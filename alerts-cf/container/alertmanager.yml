@@ -1,0 +1,6 @@
+# Experiment config: alerts are visible in the UIs but notify nothing.
+# Real routing (opsgenie/ilert, heartbeats) arrives with production rules.
+route:
+  receiver: none
+receivers:
+- name: none

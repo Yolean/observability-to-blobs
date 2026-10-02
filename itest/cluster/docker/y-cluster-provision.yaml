@@ -1,0 +1,17 @@
+# k3s-in-docker variant for hosts without KVM (GitHub-hosted runners). Same
+# name and context as the qemu config so test.sh does not care which one
+# provisioned the cluster.
+provider: docker
+name: node-agent
+context: node-agent
+# GitHub-hosted runners have 2 vCPUs and 7 GB; y-cluster's defaults (4/8192)
+# make docker refuse the container there
+cpus: "2"
+memory: "4096"
+gateway:
+  skip: true
+portForwards:
+- host: "26443"
+  guest: "6443"
+- host: "30070"
+  guest: "30070"

@@ -1,0 +1,208 @@
+# Workloads that exercise each path of the agent. Assertions in test.sh
+# refer to the names and markers used here.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: log-generator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: log-generator
+  template:
+    metadata:
+      labels:
+        app: log-generator
+    spec:
+      containers:
+      - name: app
+        image: busybox:1.37
+        command:
+        - /bin/sh
+        - -c
+        - |
+          count=0
+          # burst: 200 lines as fast as possible, exercises ordering and ns timestamps
+          while [ "$count" -lt 200 ]; do
+            count=$((count + 1))
+            echo "{\"count\":$count,\"message\":\"burst\"}"
+          done
+          # one line well above the 16 KiB CRI split, exercises multiline.parser cri
+          long=$(printf 'L%.0s' $(seq 1 20000))
+          echo "{\"count\":0,\"message\":\"long-line\",\"pad\":\"$long\"}"
+          while true; do
+            count=$((count + 1))
+            if [ $((count % 10)) -eq 0 ]; then
+              printf 'stack trace example\n  at main (app.js:42)\n  at run (app.js:10)\n' >&2
+            else
+              echo "{\"count\":$count,\"message\":\"hello from log-generator\"}"
+            fi
+            # one of each signal every 20 lines; the originals must stay in the logs table
+            if [ $((count % 20)) -eq 0 ]; then
+              echo '{"name":"svc","level":50,"msg":"ECONNREFUSED","req_id":"a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d","time":"2026-01-01T00:00:00Z","v":0}'
+              echo '{"start_time":"2026-01-01T00:00:01Z","req_method":"GET","req_path":"/api","resp_code":503,"req_id":null}'
+              echo '2026-01-01 00:00:02,000 req_id=bbfc8246-6b89-45c4-8abb-6485aa3dab2e ERROR [com.example.Svc] (executor-thread-1) live report failed' >&2
+              echo 'web:build: command finished with error, but continuing...' >&2
+            fi
+            sleep 1
+          done
+---
+# Multi-container pod using the OpenTelemetry port-scoped hints: each port
+# opts in on its own, port names stay free for Services and probes, and the
+# sidecar proves per-port config (metrics_path). The "slow" port is enabled
+# too: it accepts connections and never answers.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: metrics-multi
+  labels:
+    app: metrics-multi
+  annotations:
+    io.opentelemetry.discovery.metrics.9101/enabled: "true"
+    io.opentelemetry.discovery.metrics.side-m/enabled: "true"
+    io.opentelemetry.discovery.metrics.side-m/config: |
+      metrics_path: /side
+    io.opentelemetry.discovery.metrics.9103/enabled: "true"
+spec:
+  containers:
+  - name: app
+    image: busybox:1.37
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      mkdir -p /www && cat > /www/metrics <<'M'
+      # HELP app_requests_total Requests served.
+      # TYPE app_requests_total counter
+      app_requests_total{code="200",method="get"} 42
+      app_requests_total{code="500",method="get"} 1
+      # TYPE app_latency_seconds histogram
+      app_latency_seconds_bucket{le="0.1"} 3
+      app_latency_seconds_bucket{le="1"} 5
+      app_latency_seconds_bucket{le="+Inf"} 5
+      app_latency_seconds_sum 0.8
+      app_latency_seconds_count 5
+      M
+      exec httpd -f -p 9101 -h /www
+    ports:
+    - name: app-m
+      containerPort: 9101
+  - name: sidecar
+    image: busybox:1.37
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      mkdir -p /www && printf '# TYPE sidecar_up gauge\nsidecar_up 1\n' > /www/side
+      exec httpd -f -p 9102 -h /www
+    ports:
+    - name: side-m
+      containerPort: 9102
+  # Accepts connections and never answers: the scrape must time out, report
+  # up=0, and not pile up requests. tcpsvd keeps listening; a plain nc loop
+  # would stop accepting while the hung handler of the previous connection
+  # lives on.
+  - name: slow
+    image: busybox:1.37
+    command: ["tcpsvd", "-E", "0.0.0.0", "9103", "sleep", "3600"]
+    ports:
+    - name: slow-m
+      containerPort: 9103
+  # No declared ports and no port-scoped hint: must not be scraped.
+  - name: noport
+    image: busybox:1.37
+    command: ["sleep", "infinity"]
+---
+# Classic prometheus.io without a port annotation: every declared container
+# port becomes a target (the kubernetes_sd fallback Prometheus itself uses).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: metrics-classic
+  labels:
+    app: metrics-classic
+  annotations:
+    prometheus.io/scrape: "true"
+spec:
+  containers:
+  - name: c-one
+    image: busybox:1.37
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      mkdir -p /www && printf '# TYPE classic_one gauge\nclassic_one 1\n' > /www/metrics
+      exec httpd -f -p 9111 -h /www
+    ports:
+    - containerPort: 9111
+  - name: c-two
+    image: busybox:1.37
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      mkdir -p /www && printf '# TYPE classic_two gauge\nclassic_two 1\n' > /www/metrics
+      exec httpd -f -p 9112 -h /www
+    ports:
+    - containerPort: 9112
+---
+# Numeric port and custom path; the container declaring 9104 gets attributed.
+# Its limits (requests default to them) make it the Guaranteed QoS pod whose
+# limits podindex must carry.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: metrics-numeric
+  labels:
+    app: metrics-numeric
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9104"
+    prometheus.io/path: "/custom-metrics"
+spec:
+  containers:
+  - name: web-app
+    image: busybox:1.37
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      mkdir -p /www && printf '# TYPE numeric_gauge gauge\nnumeric_gauge{kind="custom"} 7\n' > /www/custom-metrics
+      exec httpd -f -p 9104 -h /www
+    ports:
+    - name: web
+      containerPort: 9104
+    resources:
+      limits:
+        memory: 64Mi
+        cpu: 100m
+---
+# Not annotated: must not be scraped even though it declares a metrics port.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: metrics-optout
+  labels:
+    app: metrics-optout
+spec:
+  containers:
+  - name: app
+    image: busybox:1.37
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      mkdir -p /www && printf '# TYPE optout_gauge gauge\noptout_gauge 1\n' > /www/metrics
+      exec httpd -f -p 9105 -h /www
+    ports:
+    - name: metrics
+      containerPort: 9105
+---
+# Exits every 20s so the kubelet restarts it and /var/log/pods gets 1.log, 2.log...
+apiVersion: v1
+kind: Pod
+metadata:
+  name: restarter
+  labels:
+    app: restarter
+spec:
+  restartPolicy: Always
+  containers:
+  - name: app
+    image: busybox:1.37
+    command: ["/bin/sh", "-c", "echo \"restarter says hello\"; sleep 20; echo \"restarter exiting\"; exit 1"]

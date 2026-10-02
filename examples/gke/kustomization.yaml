@@ -1,0 +1,49 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Sketch of a production overlay for a GKE cluster writing to GCS through
+# the S3-compatible endpoint with HMAC keys of a service account that may
+# write to the bucket.
+# Not applied by anything in this repo.
+namespace: observability
+
+resources:
+- ../../agent
+
+images:
+- name: ghcr.io/yolean/node-agent
+  newTag: <commit sha from the ci workflow>
+
+secretGenerator:
+- name: node-agent-s3
+  envs:
+  # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (HMAC), next to this file;
+  # .gitignore keeps it out of the repo
+  - s3-credentials.env
+
+patches:
+- patch: |
+    apiVersion: apps/v1
+    kind: DaemonSet
+    metadata:
+      name: node-agent
+    spec:
+      template:
+        spec:
+          # outside kube-system GKE admits system-node-critical pods only
+          # where a ResourceQuota scoped to that PriorityClass exists
+          # (scopeSelector PriorityClass In [system-node-critical]); create
+          # one in the observability namespace, or leave this out
+          priorityClassName: system-node-critical
+          containers:
+          - name: agent
+            env:
+            - name: CLUSTER_NAME
+              value: my-cluster
+            - name: S3_BUCKET
+              value: my-logs-bucket
+            - name: S3_ENDPOINT
+              value: https://storage.googleapis.com
+            - name: S3_REGION
+              value: europe-west4

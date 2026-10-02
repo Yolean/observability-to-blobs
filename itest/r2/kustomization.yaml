@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Point the agent at the test- R2 bucket (EU jurisdiction) instead of
+# versitygw. Credentials and the account's endpoint come from the gitignored
+# .env.r2 next to this file; the bucket is committed config. alerts-cf/README.md owns bucket
+# creation and the token recipe; clean.sh purges the bucket between
+# experiments.
+secretGenerator:
+- name: node-agent-s3
+  namespace: observability
+  behavior: replace
+  envs:
+  - .env.r2
+
+patches:
+- patch: |
+    apiVersion: apps/v1
+    kind: DaemonSet
+    metadata:
+      name: node-agent
+    spec:
+      template:
+        spec:
+          containers:
+          - name: agent
+            env:
+            - name: S3_TLS
+              value: "on"
+            - name: S3_REGION
+              value: auto
+            - name: S3_BUCKET
+              value: node-agent-itest
+            # from .env.r2, through the Secret
+            - name: S3_ENDPOINT
+              $patch: delete

@@ -1,0 +1,17 @@
+# Demo rules against the itest sample workloads. ScrapeTargetDown
+# genuinely fires: the "slow" container's port is declared and enabled
+# but never answers within the scrape timeout, which is exactly what
+# up == 0 records. ServerErrorsSeen stays green (the 5xx counter in the
+# sample exposition is constant, so increase() is zero).
+groups:
+- name: local-demo
+  rules:
+  - alert: ScrapeTargetDown
+    expr: up == 0
+    for: 2m
+    annotations:
+      summary: "{{ $labels.namespace }}/{{ $labels.pod }} {{ $labels.container }} not scrapable"
+  - alert: ServerErrorsSeen
+    expr: increase(app_requests_total{code="500"}[15m]) > 0
+    annotations:
+      summary: "5xx responses on {{ $labels.pod }}"

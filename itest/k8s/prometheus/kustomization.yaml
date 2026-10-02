@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: observability
+
+resources:
+- prometheus.yaml
+
+secretGenerator:
+- name: prometheus-s3
+  literals:
+  - AWS_ACCESS_KEY_ID=demoaccess
+  - AWS_SECRET_ACCESS_KEY=demosecret
+
+images:
+- name: ghcr.io/yoleanagents/blobs-to-prometheus
+  newName: blobs-to-prometheus
+  newTag: itest

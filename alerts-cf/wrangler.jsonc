@@ -1,0 +1,37 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "y-alerts",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-08-01",
+  "workers_dev": true,
+  "containers": [
+    {
+      "class_name": "AlertsStack",
+      "image": "./container/Dockerfile",
+      // repo root, so the Dockerfile reaches images/blobs-to-prometheus
+      // and local/rules at their canonical locations
+      "image_build_context": "..",
+      "instance_type": "basic",
+      "max_instances": 1,
+      "constraints": { "jurisdiction": "eu" }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "ALERTS", "class_name": "AlertsStack" },
+      { "name": "WATCHDOG", "class_name": "Watchdog" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AlertsStack", "Watchdog"] }],
+  "vars": {
+    // Non-secret config. R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY are set
+    // with `pnpm exec wrangler secret put` from the same bucket-scoped
+    // token as itest/r2/.env.r2; the AlertsStack constructor forwards them
+    // into the container.
+    // the account's endpoint, as S3_ENDPOINT in itest/r2/.env.r2
+    "S3_ENDPOINT": "https://<account id>.eu.r2.cloudflarestorage.com",
+    "S3_BUCKET": "node-agent-itest",
+    "CLUSTER_NAME": "itest"
+  },
+  "observability": { "enabled": true }
+}

@@ -1,0 +1,12 @@
+target/
+node_modules/
+itest/cluster/kubeconfig
+*.log
+local/*.duckdb
+local/mirror/
+itest/r2/.env.r2
+alerts-cf/.env
+alerts-cf/.wrangler/
+.claude/
+itest/cluster/.kubeconfig.y-cluster-lock
+examples/gke/s3-credentials.env

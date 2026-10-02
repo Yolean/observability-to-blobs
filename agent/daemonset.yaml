@@ -1,0 +1,141 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-agent
+spec:
+  selector:
+    matchLabels:
+      app: node-agent
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: node-agent
+    spec:
+      # Everything comes from the node itself; the pod never talks to the
+      # API server, so it gets no token.
+      automountServiceAccountToken: false
+      tolerations:
+      - operator: Exists
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: agent
+        image: ghcr.io/yolean/node-agent
+        imagePullPolicy: IfNotPresent
+        args:
+        - -c
+        - /fluent-bit/etc/config/fluent-bit.yaml
+        securityContext:
+          # /var/log/pods and the CRI socket are root-only on the node
+          runAsUser: 0
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]
+        env:
+        - name: CLUSTER_NAME
+          value: dev
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: NODE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_UID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        # no downward API field exists for the container name
+        - name: CONTAINER_NAME
+          value: agent
+        - name: UPLOAD_TIMEOUT
+          value: 30s
+        - name: PODINDEX_CHECKPOINT
+          value: 1h
+        - name: JOURNAL_PATH
+          value: /var/log/journal
+        - name: S3_REGION
+          value: us-east-1
+        - name: S3_TLS
+          value: "on"
+        envFrom:
+        - secretRef:
+            name: node-agent-s3
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            memory: 1Gi
+        volumeMounts:
+        - name: config
+          mountPath: /fluent-bit/etc/config
+          readOnly: true
+        # only the two log trees the pipeline reads, not all of /var/log:
+        # the rest (audit logs, auth.log, package logs) is not this agent's
+        - name: pods
+          mountPath: /var/log/pods
+          readOnly: true
+        - name: journal
+          mountPath: /var/log/journal
+          readOnly: true
+        - name: state
+          mountPath: /var/lib/node-agent
+        - name: cri
+          mountPath: /run/containerd/containerd.sock
+        - name: proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: sys
+          mountPath: /host/sys
+          readOnly: true
+        - name: ca-certificates
+          mountPath: /etc/ssl/certs/ca-certificates.crt
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: config
+        configMap:
+          name: node-agent
+      - name: pods
+        hostPath:
+          path: /var/log/pods
+      # the persistent journal; a node that keeps it in /run/log/journal
+      # points this volume and JOURNAL_PATH there
+      - name: journal
+        hostPath:
+          path: /var/log/journal
+      - name: state
+        hostPath:
+          path: /var/lib/node-agent
+          type: DirectoryOrCreate
+      - name: cri
+        hostPath:
+          path: /run/containerd/containerd.sock
+          type: Socket
+      - name: proc
+        hostPath:
+          path: /proc
+      - name: sys
+        hostPath:
+          path: /sys
+      - name: ca-certificates
+        hostPath:
+          path: /etc/ssl/certs/ca-certificates.crt
+          type: File
+      - name: tmp
+        emptyDir: {}

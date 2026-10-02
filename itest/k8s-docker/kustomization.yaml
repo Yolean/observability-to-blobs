@@ -1,0 +1,34 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# k3s-in-docker has no systemd journal. An empty directory lets the systemd
+# input start (it just never sees entries); test.sh skips the journal
+# assertion on this backend. The base's journal volume is a hostPath the
+# docker node lacks, so it becomes an empty directory too.
+resources:
+- ../k8s
+
+patches:
+- patch: |
+    apiVersion: apps/v1
+    kind: DaemonSet
+    metadata:
+      name: node-agent
+    spec:
+      template:
+        spec:
+          containers:
+          - name: agent
+            env:
+            - name: JOURNAL_PATH
+              value: /no-journal
+            volumeMounts:
+            - name: no-journal
+              mountPath: /no-journal
+          volumes:
+          - name: no-journal
+            emptyDir: {}
+          - name: journal
+            hostPath: null
+            emptyDir: {}

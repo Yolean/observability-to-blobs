@@ -1,0 +1,4 @@
+# Composition hook, empty in the base. Overlays replace this ConfigMap key
+# (configMapGenerator behavior: merge) with pipeline sections of their own;
+# see examples/gke/signals-kafka.yaml for the signal-forwarding example.
+env: {}

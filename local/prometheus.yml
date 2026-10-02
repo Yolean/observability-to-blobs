@@ -1,0 +1,13 @@
+# A receiver-mode Prometheus for the local (host) stacks: no scraping,
+# every sample arrives via remote write from images/blobs-to-prometheus
+# with its original timestamp. The out-of-order window is what makes the
+# tailer's backfill acceptable; it must cover BACKFILL.
+global:
+  # every query is logged with params, timings and client; read it with
+  #   docker exec local-prom tail -f /prometheus/query.log
+  query_log_file: /prometheus/query.log
+storage:
+  tsdb:
+    out_of_order_time_window: 2h
+rule_files:
+- rules/*.yml

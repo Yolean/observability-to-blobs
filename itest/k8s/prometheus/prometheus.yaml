@@ -1,0 +1,90 @@
+# Prometheus fed from the bucket, not by scraping: the sidecar backfills
+# the last hour of metrics blobs through the remote-write receiver and
+# then tails new windows, so an ephemeral volume still comes back with
+# history. test.sh does not apply it; apply it by hand after ./test.sh up:
+#
+#   kubectl apply -k itest/k8s/prometheus
+#
+# The sidecar reads PoC-era {cluster}/{node}/.../metrics-N.parquet keys and
+# is not wired to the agent's raw1/ layout yet (README.md, "Known gaps"), so
+# against a current bucket it pushes nothing.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus
+data:
+  prometheus.yml: |
+    # No scrape_configs: every sample arrives via remote write from the
+    # blobs-to-prometheus sidecar, carrying its original scrape timestamp.
+    # The out-of-order window (a config setting, not a flag) is what makes
+    # the sidecar's backfill acceptable; it must cover BACKFILL.
+    global: {}
+    storage:
+      tsdb:
+        out_of_order_time_window: 2h
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+      - name: prometheus
+        image: docker.io/prom/prometheus:v3.14.0
+        args:
+        - --config.file=/etc/prometheus/prometheus.yml
+        - --web.enable-remote-write-receiver
+        - --storage.tsdb.retention.time=1d
+        ports:
+        - containerPort: 9090
+          name: http
+        volumeMounts:
+        - name: config
+          mountPath: /etc/prometheus
+        - name: data
+          mountPath: /prometheus
+      - name: blobs
+        image: ghcr.io/yoleanagents/blobs-to-prometheus
+        env:
+        - name: S3_ENDPOINT
+          value: http://versitygw.default.svc.cluster.local:7070
+        - name: S3_TLS
+          value: "off"
+        - name: S3_BUCKET
+          value: node-agent
+        - name: CLUSTER_NAME
+          value: itest
+        - name: BACKFILL
+          value: 1h
+        - name: POLL
+          value: 15s
+        envFrom:
+        - secretRef:
+            name: prometheus-s3
+      volumes:
+      - name: config
+        configMap:
+          name: prometheus
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+spec:
+  selector:
+    app: prometheus
+  ports:
+  - port: 9090
+    targetPort: 9090

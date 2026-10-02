@@ -1,0 +1,83 @@
+# Production shape of signal forwarding: copies of interesting log lines to
+# Kafka for a chat notifier. Merge into the node-agent ConfigMap as
+# pipeline-extra.yaml; detections and destinations are owned here, by
+# production config, not by the agent. Postponed until the new stack is
+# validated beside the current one, so the consumer does
+# not receive every signal twice. Stock filters only: the agent image has
+# no Lua.
+parsers:
+  - name: turbo_task
+    format: regex
+    regex: '^(?<turbo_package>[^:#\s]+)[:#](?<turbo_task>[^:\s]+):'
+  - name: req_id
+    format: regex
+    regex: '"?req_id"?\s*[:=]\s*"?(?<req_id>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'
+
+pipeline:
+  filters:
+    - name: rewrite_tag
+      match: blob
+      emitter_name: signals
+      emitter_storage.type: filesystem
+      rule:
+        # bunyan ERROR(50..59) and FATAL(60)
+        - $message ["]level["]:\s*(5[0-9]|60)[,}] signal.error-js true
+        # envoy access log with a 5xx response
+        - $message ["]resp_code["]:\s*5[0-9][0-9] signal.error-envoy true
+        # Quarkus/JBoss logging at ERROR
+        - $message \sERROR\s+\[ signal.error-java true
+        # turborepo task failure, and the summary line that catches it when
+        # the per-task line is absent
+        - $message command.finished.with.error signal.error-turbo true
+        - $message ^\s*Failed:\s+ signal.error-turbo-summary true
+        # one line above the 16 KiB CRI split: almost always a dumped object
+        - $message ^[\s\S]{16385,} signal.oversized true
+    # the detection is the tag's last segment
+    - name: modify
+      match: signal.error-js
+      add: detection error-js
+    - name: modify
+      match: signal.error-envoy
+      add: detection error-envoy
+    - name: modify
+      match: signal.error-java
+      add: detection error-java
+    - name: modify
+      match: signal.error-turbo
+      add: detection error-turbo
+    - name: modify
+      match: signal.error-turbo-summary
+      add: detection error-turbo-summary
+    - name: modify
+      match: signal.oversized
+      add: detection oversized
+    # the oversized copy drops its body: the message becomes the literal
+    # "oversized", and its pod (or unit) and time find the line in the
+    # blob. No stock filter records the length (that would need Lua).
+    - name: modify
+      match: signal.oversized
+      set: message oversized
+    - name: parser
+      match: signal.error-turbo
+      key_name: message
+      parser: turbo_task
+      reserve_data: true
+      preserve_key: true
+    # req_id correlates signals across services for one request
+    - name: parser
+      match: signal.*
+      key_name: message
+      parser: req_id
+      reserve_data: true
+      preserve_key: true
+
+  outputs:
+    - name: kafka
+      alias: kafka_signals
+      match: signal.*
+      brokers: kafka-bootstrap:9092
+      topics: signals
+      # absent on lines without a req_id: those are partitioned round-robin
+      message_key_field: req_id
+      format: json
+      retry_limit: 3

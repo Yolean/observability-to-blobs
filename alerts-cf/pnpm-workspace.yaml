@@ -1,0 +1,5 @@
+# pnpm 11 blocks postinstall scripts by default; wrangler needs these two
+# (same setup as registry-directpush).
+allowBuilds:
+  esbuild: true
+  workerd: true

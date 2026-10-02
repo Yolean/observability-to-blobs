@@ -1,0 +1,54 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The agent as it runs in the itest cluster: local image, versitygw as S3,
+# k3s' containerd socket path.
+resources:
+- ../../agent
+- versitygw
+- workloads
+
+secretGenerator:
+- name: node-agent-s3
+  namespace: observability
+  literals:
+  - AWS_ACCESS_KEY_ID=demoaccess
+  - AWS_SECRET_ACCESS_KEY=demosecret
+
+images:
+- name: ghcr.io/yolean/node-agent
+  newName: node-agent
+  newTag: itest
+
+# strategic merge: env entries and volumes merge by name
+patches:
+- patch: |
+    apiVersion: apps/v1
+    kind: DaemonSet
+    metadata:
+      name: node-agent
+    spec:
+      template:
+        spec:
+          containers:
+          - name: agent
+            imagePullPolicy: Never
+            env:
+            - name: CLUSTER_NAME
+              value: itest
+            - name: S3_TLS
+              value: "off"
+            - name: S3_BUCKET
+              value: node-agent
+            - name: S3_ENDPOINT
+              value: http://versitygw.default.svc.cluster.local:7070
+            - name: PODINDEX_CHECKPOINT
+              value: 2m
+            - name: UPLOAD_TIMEOUT
+              value: 30s
+          volumes:
+          - name: cri
+            hostPath:
+              path: /run/k3s/containerd/containerd.sock
+              type: Socket

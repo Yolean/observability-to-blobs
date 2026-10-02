@@ -1,0 +1,9 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ../k8s-r2 for the docker backend, applied by hand the same way.
+resources:
+- ../k8s-docker
+components:
+- ../r2

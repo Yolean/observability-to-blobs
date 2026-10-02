@@ -1,0 +1,23 @@
+diff --git a/src/flb_http_client.c b/src/flb_http_client.c
+index 3b55b86..4752bc0 100644
+--- a/src/flb_http_client.c
++++ b/src/flb_http_client.c
+@@ -141,8 +141,16 @@ static int header_lookup(struct flb_http_client *c,
+         return FLB_HTTP_MORE;
+     }
+ 
+-    /* Lookup the beginning of the header */
+-    p = strcasestr(c->resp.data, header);
++    /* Lookup the beginning of the header, ensuring it starts a line.
++     * GCS returns x-goog-stored-content-length before Content-Length;
++     * strcasestr matches "Content-Length" inside the longer header name. */
++    p = c->resp.data;
++    while ((p = strcasestr(p, header)) != NULL) {
++        if (p == c->resp.data || *(p - 1) == '\n') {
++            break;
++        }
++        p++;
++    }
+     end = strstr(c->resp.data, "\r\n\r\n");
+     if (!p) {
+         if (end) {

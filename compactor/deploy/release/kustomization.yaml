@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The release pin, written by compactor/build.sh bump and asserted by
+# build.sh check. The tag is not in the binary: the digest moves only
+# when the image content does.
+images:
+- name: ghcr.io/yolean/blobs-compactor
+  newTag: 20260928T111638Z
+  digest: sha256:1c73e9106514759074993d6923c3118e7f25fd7f1cc2300476e617e039bfe6ef

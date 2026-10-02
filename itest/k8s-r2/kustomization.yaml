@@ -1,0 +1,12 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The agent ships to Cloudflare R2 (itest/r2) instead of versitygw, which
+# stays deployed but idle. test.sh never applies this; apply it by hand over
+# a ./test.sh up cluster (see alerts-cf/README.md). Any later test.sh run
+# re-applies ../k8s and switches the agent back to versitygw.
+resources:
+- ../k8s
+components:
+- ../r2

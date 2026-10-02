@@ -1,0 +1,206 @@
+# Node agent pipeline. One blob per node per UPLOAD_TIMEOUT leaves this
+# process: JSON lines, zstd, every line carrying a "table" field:
+#   logs      container logs (CRI) and selected journal units
+#   metrics   one line per Prometheus scrape (annotated pods, node_exporter,
+#             the agent itself) with the samples as an array
+#   podindex  pod and container lifecycle events from the CRI
+# Every line carries "ts", the event time rendered by the S3 output at
+# microseconds; lines whose source has nanoseconds (CRI log lines, scrapes,
+# CRI events) also carry "time". Consumers read coalesce(time, ts).
+# No Lua: enrichment is the stock parser, modify, content_modifier and
+# record_modifier processors below.
+# Environment: CLUSTER_NAME NODE_NAME NODE_IP POD_NAMESPACE POD_NAME POD_UID
+# CONTAINER_NAME S3_BUCKET S3_ENDPOINT S3_REGION S3_TLS UPLOAD_TIMEOUT
+# PODINDEX_CHECKPOINT JOURNAL_PATH, plus AWS_ACCESS_KEY_ID /
+# AWS_SECRET_ACCESS_KEY.
+service:
+  flush: 1
+  log_level: info
+  parsers_file: /fluent-bit/etc/parsers.conf
+  http_server: on
+  http_listen: 127.0.0.1
+  http_port: 2020
+  storage.path: /var/lib/node-agent/storage
+  storage.sync: normal
+  storage.max_chunks_up: 128
+
+plugins:
+  - /fluent-bit/lib/in_cri_scrape.so
+
+parsers:
+  # pod identity from the CRI log path
+  #   /var/log/pods/<namespace>_<pod>_<uid>/<container>/<restart>.log
+  - name: podpath
+    format: regex
+    regex: '^/var/log/pods/(?<namespace>[^_/]+)_(?<pod>[^_/]+)_(?<pod_uid>[^/]+)/(?<container>[^/]+)/(?<restart>\d+)\.log$'
+    types: restart:integer
+
+# Composition hook: overlays replace pipeline-extra.yaml in the ConfigMap to
+# add filters and outputs without forking this file (signal forwarding to
+# Kafka is the intended use, and is production configuration, not agent
+# scope). Anything routed away from the blob must be re-tagged; everything
+# still tagged blob ends up in the object.
+includes:
+  - pipeline-extra.yaml
+
+pipeline:
+  inputs:
+    - name: tail
+      alias: pods
+      tag: blob
+      path: /var/log/pods/*/*/*.log
+      # the agent's own stdout would otherwise feed back into the agent
+      exclude_path: /var/log/pods/*_node-agent-*/*/*.log
+      multiline.parser: cri
+      path_key: file
+      read_from_head: true
+      db: /var/lib/node-agent/tail.db
+      db.locking: true
+      refresh_interval: 5
+      rotate_wait: 30
+      buffer_chunk_size: 256k
+      buffer_max_size: 2M
+      skip_long_lines: on
+      storage.type: filesystem
+      processors:
+        logs:
+          # the cri multiline parser leaves time (the CRI string, ns),
+          # stream, _p and log; the path carries the pod identity
+          - name: parser
+            key_name: file
+            parser: podpath
+            reserve_data: true
+            preserve_key: false
+          - name: modify
+            add:
+              - table logs
+              - cluster ${CLUSTER_NAME}
+              - node ${NODE_NAME}
+            rename:
+              - log message
+            remove:
+              - _p
+
+    - name: systemd
+      alias: journal
+      tag: blob
+      # JOURNAL_PATH lets a node without a journal point this at an empty
+      # directory instead of failing the input (see itest/k8s-docker)
+      path: ${JOURNAL_PATH}
+      systemd_filter:
+        - _SYSTEMD_UNIT=kubelet.service
+        - _SYSTEMD_UNIT=containerd.service
+        - _SYSTEMD_UNIT=k3s.service
+        - _SYSTEMD_UNIT=k3s-agent.service
+        - _TRANSPORT=kernel
+      systemd_filter_type: or
+      read_from_tail: on
+      db: /var/lib/node-agent/journal.db
+      lowercase: on
+      strip_underscores: on
+      storage.type: filesystem
+      processors:
+        logs:
+          - name: modify
+            add:
+              - table logs
+              - cluster ${CLUSTER_NAME}
+              - node ${NODE_NAME}
+              - stream journal
+            # rename does not overwrite, so the first existing key wins:
+            # the unit, else the syslog identifier, else the transport
+            # ("kernel" for kernel messages)
+            rename:
+              - systemd_unit unit
+              - syslog_identifier unit
+              - transport unit
+          - name: content_modifier
+            action: convert
+            key: priority
+            converted_type: int
+          # the journal's other fields stay out of the blob
+          - name: record_modifier
+            allowlist_key:
+              - table
+              - cluster
+              - node
+              - stream
+              - unit
+              - priority
+              - message
+
+    - name: node_exporter_metrics
+      alias: node_exporter
+      tag: exp.node
+      scrape_interval: 15
+      path.procfs: /host/proc
+      path.sysfs: /host/sys
+      # cpufreq, hwmon, thermalzone and nvme read sysfs trees that VMs and
+      # cloud nodes often lack, and the collector logs an error per missing
+      # file per scrape
+      metrics: cpu,meminfo,diskstats,filesystem,uname,stat,time,loadavg,vmstat,netdev,netstat,sockstat,filefd,processes
+
+    - name: fluentbit_metrics
+      alias: self_metrics
+      tag: exp.agent
+      scrape_interval: 15
+
+    - name: cri_scrape
+      alias: scrape
+      tag: blob
+      cri_socket: /run/containerd/containerd.sock
+      scrape_interval: 15s
+      scrape_timeout: 10s
+      discovery_interval: 10s
+      static_targets: node@127.0.0.1:2021/metrics
+      podindex_checkpoint: ${PODINDEX_CHECKPOINT}
+      storage.type: filesystem
+
+  outputs:
+    # node_exporter and self metrics are cmetrics, which the S3 output does
+    # not ship. Serving them on localhost and scraping them with cri_scrape
+    # keeps one path for all metrics.
+    - name: prometheus_exporter
+      match: exp.*
+      host: 127.0.0.1
+      port: 2021
+
+    - name: s3
+      alias: blob
+      match: blob
+      bucket: ${S3_BUCKET}
+      endpoint: ${S3_ENDPOINT}
+      region: ${S3_REGION}
+      tls: ${S3_TLS}
+      tls.ca_file: /etc/ssl/certs/ca-certificates.crt
+      use_put_object: on
+      format: json_lines
+      compression: zstd
+      # the event time on every line, microseconds (the only timestamp
+      # journal rows have; the others keep their nanosecond "time" too)
+      json_date_key: ts
+      json_date_format: iso8601
+      upload_timeout: ${UPLOAD_TIMEOUT}
+      # measured on the buffered JSON; only matters when a window overflows,
+      # and then it uploads early under its own key
+      total_file_size: 64M
+      store_dir: /var/lib/node-agent/s3
+      # an agent that cannot reach the bucket keeps buffering on disk, and
+      # nothing is quarantined by a retry budget: out_s3 caps `no_limits`
+      # to 5 attempts (30 s of outage, see UPSTREAM.md) but honours an
+      # explicit number; retries are 2 s * attempts apart, so after a day
+      # of outage the wait between attempts is ~10 min. The backlog fills
+      # store_dir up to store_dir_limit_size; then out_s3 refuses new data
+      # and the engine keeps it as input chunks in storage.path, up to
+      # storage.total_limit_size. Beyond that the oldest of those chunks
+      # are dropped, so an outage costs at most ~8G of node disk and then
+      # loses data. (out_s3 warns at startup that it prefers
+      # store_dir_limit_size; that limit does not bound storage.path.)
+      store_dir_limit_size: 4G
+      storage.total_limit_size: 4G
+      retry_limit: 100000
+      # the key's time is the first record's time in the object. Hour
+      # before node: consumers LIST one hour prefix for the whole cluster
+      # (DuckDB globs list up to the first wildcard), and a node's objects
+      # are still one prefix
+      s3_key_format: /raw1/${CLUSTER_NAME}/%Y-%m-%d/%H/${NODE_NAME}/%M%S-$UUID.jsonl.zst

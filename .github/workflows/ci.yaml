@@ -1,0 +1,120 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # Only calls compactor/build.sh, which is what a developer runs: no Go,
+  # contain or cache setup here. Cold on purpose, so the pin check is a
+  # reproduction from nothing but the commit and the pinned inputs.
+  compactor:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - run: compactor/build.sh host-setup
+    - run: compactor/build.sh test
+    - run: compactor/build.sh check
+    - if: github.ref == 'refs/heads/main' && github.event_name == 'push' && github.repository_owner == 'Yolean'
+      env:
+        REGISTRY_USER: ${{ github.actor }}
+        REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: compactor/build.sh publish
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: docker/setup-buildx-action@v4
+
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: images/fluentbit/plugins/cri_scrape/go.mod
+        cache-dependency-path: images/fluentbit/plugins/cri_scrape/go.sum
+
+    # test.sh needs these on PATH; locally they come from the developer's
+    # toolchain, here they are pinned downloads. Everything after this step
+    # is the same script a developer runs.
+    - name: Install y-cluster
+      env:
+        VERSION: v0.5.0
+      run: |
+        curl -fsSL -o /usr/local/bin/y-cluster \
+          "https://github.com/Yolean/y-cluster/releases/download/${VERSION}/y-cluster_${VERSION}_linux_amd64"
+        chmod +x /usr/local/bin/y-cluster
+        y-cluster --version
+
+    # the engine the compactor embeds, so the itest runs compactor/sql/ on it
+    - name: Install duckdb
+      run: |
+        . compactor/build.env
+        curl -fsSL "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb_cli-linux-amd64.gz" \
+          | gunzip > /usr/local/bin/duckdb
+        chmod +x /usr/local/bin/duckdb
+        duckdb --version
+
+    # exposes the cache credentials to the plain `docker buildx build` that
+    # test.sh runs. Own scope: this build is amd64 only and an export under
+    # the image job's scope would evict the arm64 layers there.
+    - uses: crazy-max/ghaction-github-runtime@v4
+
+    - run: ./test.sh
+      env:
+        IMAGE_BUILD_ARGS: --cache-from type=gha,scope=node-agent-test --cache-to type=gha,mode=max,scope=node-agent-test
+
+    - name: Agent logs on failure
+      if: failure()
+      run: |
+        export KUBECONFIG=$PWD/itest/cluster/kubeconfig
+        kubectl --context=node-agent get pods -A || true
+        kubectl --context=node-agent logs ds/node-agent --tail=200 || true
+
+  image:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: docker/setup-qemu-action@v4
+    - uses: docker/setup-buildx-action@v4
+    - uses: docker/login-action@v4
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    # GITHUB_TOKEN can only publish under the repository's own owner, and
+    # ghcr wants it lowercase; metadata-action does the lowercasing.
+    - uses: docker/metadata-action@v6
+      id: meta
+      with:
+        images: ghcr.io/${{ github.repository_owner }}/node-agent
+        tags: type=raw,value=${{ github.sha }}
+    - uses: docker/build-push-action@v7
+      with:
+        context: images/fluentbit
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha,scope=node-agent
+        cache-to: type=gha,mode=max,scope=node-agent
+    - uses: docker/metadata-action@v6
+      id: meta-sidecar
+      with:
+        images: ghcr.io/${{ github.repository_owner }}/blobs-to-prometheus
+        tags: type=raw,value=${{ github.sha }}
+    - uses: docker/build-push-action@v7
+      with:
+        context: images/blobs-to-prometheus
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta-sidecar.outputs.tags }}
+        labels: ${{ steps.meta-sidecar.outputs.labels }}
+        cache-from: type=gha,scope=blobs-to-prometheus
+        cache-to: type=gha,mode=max,scope=blobs-to-prometheus

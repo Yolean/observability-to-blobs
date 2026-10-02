@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Yolean/y-cluster/main/pkg/provision/schema/qemu.schema.json
+#
+# Local k3s node for the agent itests: a real Ubuntu VM with systemd,
+# journald and containerd, so node logs and the /var/log/pods layout
+# look like production rather than like a container pretending to be
+# a node. Ports are offset from y-cluster defaults so this cluster
+# can coexist with a developer's own "local" context.
+provider: qemu
+name: node-agent
+context: node-agent
+sshPort: "2232"
+cpus: "4"
+memory: "6144"
+gateway:
+  skip: true
+portForwards:
+- host: "26443"
+  guest: "6443"
+# versitygw S3 NodePort, reached by duckdb on the host
+- host: "30070"
+  guest: "30070"

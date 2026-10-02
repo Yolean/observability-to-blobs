@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: versitygw
+spec:
+  serviceName: versitygw
+  replicas: 1
+  selector:
+    matchLabels:
+      app: versitygw
+  template:
+    metadata:
+      labels:
+        app: versitygw
+    spec:
+      containers:
+      - name: versitygw
+        image: docker.io/versity/versitygw:v1.7.0
+        args:
+        - posix
+        - /data
+        - --port
+        - "7070"
+        env:
+        - name: ROOT_ACCESS_KEY
+          value: demoaccess
+        - name: ROOT_SECRET_KEY
+          value: demosecret
+        ports:
+        - containerPort: 7070
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: versitygw
+spec:
+  selector:
+    app: versitygw
+  ports:
+  - port: 7070
+    targetPort: 7070
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: versitygw-nodeport
+spec:
+  type: NodePort
+  selector:
+    app: versitygw
+  ports:
+  - port: 7070
+    targetPort: 7070
+    nodePort: 30070
+---
+# Creates the bucket once versitygw answers. Idempotent: re-running the job
+# (kustomize re-apply after delete) finds the bucket and exits 0.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-bucket
+spec:
+  backoffLimit: 20
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: aws
+        image: amazon/aws-cli:2.22.35
+        env:
+        - name: AWS_ACCESS_KEY_ID
+          value: demoaccess
+        - name: AWS_SECRET_ACCESS_KEY
+          value: demosecret
+        - name: AWS_DEFAULT_REGION
+          value: us-east-1
+        command:
+        - sh
+        - -c
+        - |
+          set -e
+          until aws --endpoint-url http://versitygw:7070 s3 ls >/dev/null 2>&1; do sleep 2; done
+          aws --endpoint-url http://versitygw:7070 s3 ls s3://node-agent >/dev/null 2>&1 \
+            || aws --endpoint-url http://versitygw:7070 s3 mb s3://node-agent
