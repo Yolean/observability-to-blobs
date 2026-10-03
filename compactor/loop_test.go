@@ -1,0 +1,102 @@
+package main
+
+import (
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+// The cadence over a day boundary: the previous hour is folded
+// incrementally until its grace has passed, then read in full, and its
+// day rolled up.
+func TestRollingPassFinalizesThePreviousHourAndRollsUpItsDay(t *testing.T) {
+	w := newWorld(t)
+	h23 := day.Add(23 * time.Hour)
+	next := day.Add(24 * time.Hour)
+	w.put(rawKey(h23, "n1", "5900-a"), logs(h23.Add(59*time.Minute), 3, "ns1", "p1", "u1")...)
+	w.put(rawKey(next, "n1", "0000-b"), logs(next, 2, "ns1", "p1", "u1")...)
+
+	if err := w.c.rollingPass(w.ctx, next.Add(5*time.Minute), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if f := w.folded(h23); len(f) != 1 || f[rawKey(h23, "n1", "5900-a")] {
+		t.Fatalf("before the grace: sidecar %v, want the key, not final", f)
+	}
+	if !w.exists(w.c.l.hourlySidecar(next)) {
+		t.Fatal("the current hour was not folded")
+	}
+	if w.exists(w.c.l.dailySidecar(day)) {
+		t.Fatal("rolled up a day whose last hour is not final")
+	}
+	if err := w.c.rollingPass(w.ctx, next.Add(11*time.Minute), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if f := w.folded(h23); !f[rawKey(h23, "n1", "5900-a")] {
+		t.Fatalf("after the grace: sidecar %v, want final", f)
+	}
+	if n := w.q("SELECT count(*) FROM " + w.dailySource("logs", day)); n != 3 {
+		t.Fatalf("daily logs %d, want 3", n)
+	}
+	if !w.c.finalSeen.Equal(h23) {
+		t.Fatalf("finalSeen %s", w.c.finalSeen)
+	}
+	var b strings.Builder
+	w.c.m.write(&b)
+	for _, want := range []string{
+		`blobs_compactor_last_success_timestamp_seconds{job="rolling"} `,
+		`blobs_compactor_last_success_timestamp_seconds{job="rollup"} `,
+		`blobs_compactor_rows{tier="daily",table="logs"} 3`,
+		`blobs_compactor_raw_keys_read_total 3`,
+	} {
+		if !strings.Contains(b.String(), want) {
+			t.Fatalf("metrics lack %q:\n%s", want, b.String())
+		}
+	}
+}
+
+// The past pass finds every other hour with new keys from one listing,
+// gives a skipped hour its full read, and rolls up past days.
+func TestPastPass(t *testing.T) {
+	w := newWorld(t)
+	w.c.rawDelete = true
+	a := w.putA()
+	w.putE()
+	now := day.Add(26 * time.Hour)
+	cur := now.Truncate(time.Hour)
+	current := w.put(rawKey(cur, "n1", "0000-z"), logs(cur, 1, "ns1", "p1", "u1")...)
+	uploaded := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(w.c.raw.URL(current), uploaded, uploaded); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.c.past(w.ctx, now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []time.Time{h10, h11} {
+		if f := w.folded(h); len(f) != 1 {
+			t.Fatalf("hour %s: sidecar %v", h, f)
+		}
+	}
+	if w.exists(w.c.l.hourlySidecar(cur)) {
+		t.Fatal("the past pass folded the current hour")
+	}
+	if w.exists(a) || !w.exists(current) {
+		t.Fatal("deletion: want the final hours' keys gone, the current hour's kept")
+	}
+	if !w.exists(w.c.l.dailySidecar(day)) {
+		t.Fatal("no rollup of the past day")
+	}
+	var b strings.Builder
+	w.c.m.write(&b)
+	for _, want := range []string{
+		"blobs_compactor_raw_objects 1\n",
+		"blobs_compactor_raw_deleted_total 2\n",
+	} {
+		if !strings.Contains(b.String(), want) {
+			t.Fatalf("metrics lack %q:\n%s", want, b.String())
+		}
+	}
+	if !strings.Contains(b.String(), "blobs_compactor_raw_oldest_age_seconds 36") {
+		t.Fatalf("want the age of the object uploaded an hour ago:\n%s", b.String())
+	}
+}
