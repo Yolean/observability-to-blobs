@@ -8,8 +8,9 @@
 > the fold uses the SQL in `sql/`. Built: the build (`build.sh`, the pins,
 > CI), `selftest`, the embedded SQL with the tests of the engine behaviour
 > the fold relies on, `fold`, `rollup`, the loop (`run`) with optional raw
-> deletion and `/metrics`, and `deploy/base` with the release pin. The
-> itest runs it in a cluster (root `README.md`).
+> deletion and `/metrics`, optional Parquet encryption of the tiers, and
+> `deploy/base` with the release pin. The itest runs it in a cluster,
+> encrypted (root `README.md`).
 
 ## Decisions
 
@@ -136,6 +137,7 @@ compactor/
   main.go            the commands, open (the engine, httpfs, the secret), version
   config.go          the environment
   keys.go            the key layout of the tiers
+  encryption.go      parquet keys: loading, the missing-key check, which object, per-key reads
   store.go           RawSource and TierStore, and a local directory as both
   s3.go              the bucket as both: ListObjectsV2, HeadObject, DeleteObjects, SigV4
   fold.go            fold of one hour, the sidecar
@@ -156,7 +158,8 @@ compactor/
 
 The shell prototype `compact.sh` is gone: `blobs-compactor fold` writes
 the same objects. `local/blobs.sh` and `test.sh` read `sql/raw.sql` and
-`sql/tables.sql` (and `local/hourly.sql` for the hourly tier), so every
+`sql/tables.sql` (`local/blobs.sh` builds its hourly views itself, per
+parquet key), so every
 consumer and the compactor share one column contract and one definition
 of each table's rows.
 
@@ -233,6 +236,9 @@ daily/{cluster}/{logs,metrics}/{date}/namespace={namespace}/data_0.parquet
 daily/{cluster}/{podindex,pods}/{date}.parquet
 daily/{cluster}/_folded/{date}.csv.zst                key: the raw keys rolled into the day, written last
 ```
+
+With encryption on (below), a tier object's `.parquet` is `.k-{id}.parquet`,
+`{id}` the parquet key it is encrypted with; sidecars are always plain.
 
 The namespace in a daily key is path-escaped the way DuckDB's hive
 partitioning writes it, and the column is in the file too, so readers can
@@ -369,6 +375,101 @@ one under `PAST_INTERVAL` plus a fold), and `blobs_compactor_raw_oldest_age_seco
 is what an alert on that bound reads. The secret then needs delete on
 `raw1/`; lifecycle rules still bound everything else.
 
+## Encryption
+
+Off by default. With it on, the hourly and daily tiers' Parquet objects
+are encrypted with keys the operator provides (DuckDB's Parquet
+encryption: footer and columns, AES-GCM, one key per file). The sidecars
+stay plain: they list raw keys, which carry cluster, date, hour, node and
+upload time, and no row data. Raw objects are not touched.
+
+**Keys.** `PARQUET_KEYS_DIR` is a directory, normally a mounted Secret,
+with one file per key: the file name is the key id (`[a-z0-9][a-z0-9-]*`,
+at most 32 characters), the content the standard base64 of 32 random
+bytes, for example `openssl rand -base64 32`. Entries starting with a dot
+(a Secret mount's own) are skipped; any other file that is not a valid
+key stops the compactor. Only 32 byte keys: DuckDB decodes a key's base64
+only when the text is not itself 16, 24 or 32 characters long, and the
+base64 of a 16 or 24 byte key is 24 or 32 characters, so it would be taken
+as the key verbatim and mean different bytes to DuckDB than to any other
+reader. Encryption is on when `PARQUET_KEY_ID` is set: the id of the key
+new objects get, which must have a file (the compactor will not start
+otherwise). Writing encrypted Parquet needs httpfs's crypto (without it
+DuckDB's is read-only), so the compactor loads httpfs whenever
+`PARQUET_KEY_ID` is set, also with `BLOBS_DIR`, and at start writes and
+reads back one encrypted object in scratch. A key's content never changes;
+a new key is a new id.
+
+**Layout.** The key id is in the object's name, so that a reader can
+select one key's objects with a glob, and the tier stays the first prefix
+segment, so lifecycle rules keep matching literal prefixes:
+
+```
+hourly/{cluster}/{table}/{date}/{HH}.k-{id}.parquet
+daily/{cluster}/{logs,metrics}/{date}/namespace={namespace}/data_0.k-{id}.parquet
+daily/{cluster}/{podindex,pods}/{date}.k-{id}.parquet
+```
+
+Plain objects keep their names. A plain reader's globs are
+`[0-9][0-9].parquet`, `data_0.parquet` and
+`[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].parquet`, which match no
+encrypted name (`?` would do on a disk, but in an `s3://` URL it starts
+the query string); one key's are `*.k-{id}.parquet`.
+
+**Rotation without deletes.** An existing object is always rewritten
+under the name, so the key, it was first written with; only new objects
+(a new hour's four, a namespace's first partition of a day, a day's first
+`podindex` and `pods`) get the active key. So an hour never has two
+objects, a rotation needs no S3 delete, and changing `PARQUET_KEY_ID`
+(add the new key's file to the Secret first, then the env, which restarts
+the pod) moves the tiers to the new key as hours and days pass. Turning
+encryption on for a bucket with plain objects works the same way: they
+stay plain, new ones are encrypted. With a keys directory the compactor
+finds an object by listing its stem (`{HH}.`, `{date}.`), one
+ListObjectsV2 per table and fold where a plain compactor makes a
+HeadObject; a stem with two objects fails the job rather than guess.
+Turning encryption off (unset `PARQUET_KEY_ID`, keep the directory) writes
+new objects plain and keeps the encrypted ones under their keys.
+
+**Retention never outlasts a key, verified.** An old key stays in the
+directory until every object under it has expired. At start, on every
+past pass, and on every rolling tick while it refuses, the compactor
+lists `hourly/{cluster}/` and `daily/{cluster}/` (a few pages: some
+thousand keys for a month), collects the key ids in the object names
+plus `PARQUET_KEY_ID`, and if any has no key file it refuses to fold or
+roll up: it logs an error naming the ids, sets
+`blobs_compactor_parquet_keys_missing` to their number, counts the passes
+as failures (so the rolling-staleness rule fires too) and keeps serving
+`/metrics`. It resumes at the first check that finds every key again,
+which a Secret update reaches without a restart. A compactor with no keys
+directory over encrypted objects refuses the same way, rather than write
+a plain object beside an encrypted one. `fold` and `rollup` by hand check
+first too. The check compares files, not the engine: keys stay loaded
+when their file goes.
+
+**Readers.** Whoever reads the tiers needs the keys: one `read_parquet`
+takes one footer key, a glob over objects of two keys fails ("Computed AES
+tag differs"), a keyed read of a plain object fails and so does a plain
+read of an encrypted one. So a reader reads the plain objects in one
+`read_parquet` and each key's in its own, and unites them with `UNION ALL
+BY NAME`. `union_by_name = true` on an encrypted read is an internal
+error in DuckDB 1.5.5 and 1.5.6, which also invalidates the database, so
+an encrypted read never sets it: within one key's glob the first object's
+columns win, and an object written before a raw1 column was added can
+fail such a read. The compactor itself reads each encrypted object in a
+`read_parquet` of its own, united by name, so it never meets that. The
+readers built this way are the fold's union with the hour's object, the
+rollup's reads of hours, partitions, `podindex` and `pods`,
+`local/blobs.sh` (`PARQUET_KEYS_DIR`, the same directory layout) and the
+itest's assertions (`tier` in `test.sh`). `sqlfiles_test.go` pins each of
+these engine facts, so a DuckDB bump that changes one fails `build.sh
+test`.
+
+The unit tests write encrypted objects without httpfs, with
+`force_mbedtls_unsafe`, which the compactor never sets; `selftest`
+writes and reads back encrypted Parquet with the image's httpfs, and the
+itest runs the compactor encrypted with a key rotation.
+
 ## Manifests
 
 `deploy/base/deployment.yaml`, `args: [run]`:
@@ -387,8 +488,11 @@ is what an alert on that bound reads. The secret then needs delete on
   stripped), `S3_REGION` (us-east-1), `S3_TLS` (on), `ROLLING_INTERVAL`
   (2m), `GRACE` (10m, at most 30m), `PAST_INTERVAL` (1h), `RAW_DELETE`
   (off), `DUCKDB_THREADS` (4), `DUCKDB_HTTP_RETRIES` (5). Not in the base,
-  with their defaults: `JOB_TIMEOUT` (30m), `METRICS_ADDR` (:9090), and
-  `BLOBS_DIR`, a local directory in place of the bucket.
+  with their defaults: `JOB_TIMEOUT` (30m), `METRICS_ADDR` (:9090),
+  `BLOBS_DIR`, a local directory in place of the bucket, and
+  `PARQUET_KEYS_DIR` and `PARQUET_KEY_ID` (unset: no encryption); an
+  overlay that turns encryption on mounts the keys Secret and sets both,
+  as `itest/compactor` does.
 - `DUCKDB_MEMORY_LIMIT` from `resourceFieldRef: limits.memory`, with
   DuckDB given 75% of it. `/scratch` is an emptyDir for `temp_directory`
   (`DUCKDB_TEMP_DIRECTORY`), `/tmp` a small one. Starting values:
@@ -401,12 +505,14 @@ is what an alert on that bound reads. The secret then needs delete on
   `blobs_compactor_rows{tier,table}` (rows of the last object written),
   `blobs_compactor_raw_keys_read_total`, `blobs_compactor_raw_deleted_total`,
   `blobs_compactor_raw_objects` and `blobs_compactor_raw_oldest_age_seconds`
-  (by upload time, from the past pass's listing, aging between listings).
+  (by upload time, from the past pass's listing, aging between listings),
+  and `blobs_compactor_parquet_keys_missing`.
   The node agent scrapes it into the blobs, where alerting sees it (the
   itest asserts that it arrives). The endpoint exists for these rules,
   which go in with the rules that phase 3 wires into the tailer:
   `time() - blobs_compactor_last_success_timestamp_seconds{job="rolling"} > 600`,
-  and with raw deletion on, `blobs_compactor_raw_oldest_age_seconds > 7200`.
+  with raw deletion on, `blobs_compactor_raw_oldest_age_seconds > 7200`,
+  and `blobs_compactor_parquet_keys_missing > 0`.
 
 `deploy/release/kustomization.yaml`: `resources: [../base]`, and `images:`
 with the tag and digest (written by `build.sh bump`), to be vendored
@@ -465,5 +571,10 @@ before pushing, so the pushed digest is the pinned one. The job needs
 - A raw object the engine cannot read (truncated, not JSON lines) fails
   its hour's fold on every pass: `blobs_compactor_runs_total{result="failure"}`
   shows it, and nothing skips the object.
+- Encrypted tiers: a reader's per-key glob cannot use `union_by_name`
+  (an engine error in DuckDB 1.5), so a view over one key's objects fails
+  on an object that lacks a column a later raw1 version added; the
+  compactor reads object by object and is not affected. Revisit on a
+  DuckDB bump (`TestEngineParquetEncryption` fails when it is fixed).
 - The current day has no daily tier until its last hour is final; the
   hourly tier is the recent tier. `rollup <date>` makes one by hand.

@@ -112,7 +112,17 @@ Against a real k3s node, from the raw objects read back with DuckDB's
 
 And the compactor, deployed from `compactor/deploy/base` (the
 `itest/compactor` overlay: versitygw, a 20 s rolling interval, a 1 min
-grace), folding the same bucket while all of the above runs:
+grace, and Parquet encryption on, with keys `itest-1` and `itest-2`
+generated once per checkout in `target/itest/parquet-keys`), folding the
+same bucket while all of the above runs. Every tier read below goes
+through the per-key union (`tier` in `test.sh`); the plain mode is
+covered by the Go tests:
+
+- the key rotation: the hourly objects written under `itest-1` keep
+  their names, so their key, after `PARQUET_KEY_ID` moves to `itest-2`;
+  the day's daily objects, first written after it, are under `itest-2`;
+  every hourly and daily object is encrypted, one per hour, table and
+  namespace; a read without the key fails
 
 - every raw key in the bucket is listed in its hour's sidecar, and the
   sidecars list no key the raw tier lacks
@@ -135,7 +145,8 @@ parquet keys, so they find nothing in the current bucket.
 
 The cluster is left running. `y-cluster teardown -c itest/cluster/qemu` (or
 `.../docker`) removes it. While it runs, `local/blobs.sh` opens a DuckDB
-session over the bucket with a view per table (`local/README.md`).
+session over the bucket with a view per table (`local/README.md`);
+`PARQUET_KEYS_DIR=target/itest/parquet-keys` gives it the itest's keys.
 
 ## Known gaps
 
@@ -185,6 +196,11 @@ The compactor:
 - A raw object the engine cannot read fails its hour's fold on every
   pass, visible in `blobs_compactor_runs_total{result="failure"}`;
   nothing skips it.
+- With encrypted tiers, a reader's view over one key's objects cannot
+  align columns across raw1 versions (`union_by_name` on an encrypted
+  read is an engine error in DuckDB 1.5), so it fails on an object older
+  than a column it reads; `local/blobs.sh`'s hourly views have this gap,
+  the compactor does not (`compactor/README.md`, "Encryption").
 
 The alerting tailer, as requirements for its rewrite onto `raw1/`:
 

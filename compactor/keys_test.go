@@ -65,7 +65,7 @@ func TestTierNames(t *testing.T) {
 		t.Fatalf("dailyStem %s", got)
 	}
 	// the plain readers' globs (README) do not match an encrypted name
-	for _, g := range []struct{ glob, name string }{{"??.parquet", "14.k-a.parquet"}, {"????-??-??.parquet", "2026-10-01.k-a.parquet"}} {
+	for _, g := range []struct{ glob, name string }{{"[0-9][0-9].parquet", "14.k-a.parquet"}, {"[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].parquet", "2026-10-01.k-a.parquet"}} {
 		if ok, _ := filepath.Match(g.glob, g.name); ok {
 			t.Fatalf("%s matches %s", g.glob, g.name)
 		}
