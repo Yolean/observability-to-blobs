@@ -54,9 +54,14 @@ real production rules) to size what an alerts-only consumer would pull.
 
 `local/blobs.sh` opens a DuckDB session with a view per table: `raw`,
 `logs`, `metrics` (samples unnested) and `podindex` over the raw tier,
-plus `hourly_logs`, `hourly_metrics` and `pods` once the compactor has
+plus `hourly_logs`, `hourly_metrics`, `hourly_podindex` and `pods` once the compactor has
 written them. It defaults to the itest bucket; export `S3_ENDPOINT`,
-`S3_TLS`, `S3_REGION` and the AWS keys for another one.
+`S3_TLS`, `S3_REGION` and the AWS keys for another one. For encrypted
+tiers export `PARQUET_KEYS_DIR`, a directory of key files laid out as the
+compactor mounts them (the itest's: `target/itest/parquet-keys`); each
+hourly view then unites a read of the plain objects with one per key
+(`compactor/README.md`, "Encryption"), and objects under a key the
+directory lacks are left out with a warning.
 
     local/blobs.sh                                   # interactive, whole cluster
     local/blobs.sh itest/2026-09-22/14/<node>        # raw views scoped to one node-hour
