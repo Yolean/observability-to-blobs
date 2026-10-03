@@ -1,5 +1,5 @@
-// blobs-compactor folds the raw1 tier into the hourly and daily tiers
-// (NEXT.md section 4). How it is built and run: compactor/README.md.
+// blobs-compactor folds the raw1 tier into the hourly and daily tiers.
+// What it computes, and how it is built and run: compactor/README.md.
 package main
 
 import (

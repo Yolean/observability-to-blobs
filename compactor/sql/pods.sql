@@ -1,4 +1,4 @@
--- pods, the investigation index (NEXT.md section 4): one row per
+-- pods, the investigation index (compactor/README.md): one row per
 -- (pod_uid, container, restart) seen in any table; the incarnations of a
 -- name are separate rows. Defined over whatever logs, metrics and podindex
 -- resolve to when queried: in a fold, the temp tables of those names that
@@ -52,8 +52,8 @@ CREATE OR REPLACE VIEW pods AS
   SELECT coalesce(p.namespace, l.namespace, m.namespace) AS namespace,
          coalesce(p.pod, l.pod, m.pod) AS pod, k.pod_uid,
          coalesce(p.node, l.node, m.node) AS node,
-         -- workload and owner kind, derived from labels and name shape (NEXT.md
-         -- section 4): good enough for search, exact owner refs need the enricher
+         -- workload and owner kind, derived from labels and name shape: good
+         -- enough for search, exact owner refs need the enricher
          CASE
            WHEN p.labels['tekton.dev/pipeline'] IS NOT NULL THEN p.labels['tekton.dev/pipeline']
            WHEN p.labels['tekton.dev/task'] IS NOT NULL THEN p.labels['tekton.dev/task']

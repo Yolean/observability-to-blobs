@@ -14,7 +14,7 @@
 
 | | |
 |---|---|
-| Engine | DuckDB **v1.5.5** (latest, 2026-07-22) embedded via `github.com/duckdb/duckdb-go/v2` **v2.10505.0**, which links prebuilt static libraries from `duckdb-go-bindings` (version-locked by go.sum). DuckDB itself is never compiled here |
+| Engine | DuckDB **v1.5.6** (latest, 2026-09-28) embedded via `github.com/duckdb/duckdb-go/v2` **v2.10506.0**, which links prebuilt static libraries from `duckdb-go-bindings` (version-locked by go.sum). DuckDB itself is never compiled here |
 | Go | `go 1.27.0`, `toolchain go1.27.1` in `compactor/go.mod` |
 | C toolchain | the Debian gcc 14.2 inside a digest-pinned `golang:1.27.1-trixie`; one native toolchain per target arch, run under emulation for the foreign arch. No cross compilers, nothing from the host |
 | Host requirements | bash and docker. No Go, contain, crane, jq or gcc on the host |
@@ -78,7 +78,7 @@ docker run --rm --platform linux/<arch> --user "$(id -u):$(id -g)" \
 
 - **Pins** live in `compactor/build.env`: `BUILDER` (golang:1.27.1-trixie
   index digest, today `sha256:433790e5...`), `CONTAIN=v1.1.0`,
-  `CRANE=v0.22.1`, `BINFMT` digest, `DUCKDB_VERSION=v1.5.5` and
+  `CRANE=v0.22.1`, `BINFMT` digest, `DUCKDB_VERSION=v1.5.6` and
   `HTTPFS_SHA256_linux_amd64` / `_linux_arm64`. The runtime base digest
   is in `contain.yaml`, and the DuckDB engine is in `go.sum`.
 - **GOTOOLCHAIN comes from go.mod** (the toolchain line, else `go` + the go
