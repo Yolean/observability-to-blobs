@@ -28,13 +28,18 @@ type RawSource interface {
 }
 
 // TierStore is where the hourly and daily tiers go. DuckDB reads and writes
-// the paths URL returns, every write a COPY; the store only lists, tells
-// whether a key exists, and prepares a key for a COPY. It never deletes.
+// the paths URL returns, every write a COPY to a temporary key; the store
+// lists, tells whether a key exists, prepares a key for a COPY, moves a
+// checked temporary object to its key, and deletes temporary objects. It
+// replaces an object whole or not at all, and deletes nothing but keys
+// under a tier's _tmp/.
 type TierStore interface {
 	List(ctx context.Context, prefix string) ([]Object, error)
 	Stat(ctx context.Context, key string) (bool, error)
 	URL(key string) string
 	Prepare(key string) error
+	Move(ctx context.Context, from, to string) error
+	Delete(ctx context.Context, keys []string) error
 }
 
 // dirBucket is a bucket in a local directory, for tests and for running the
@@ -46,6 +51,14 @@ func (d dirBucket) URL(key string) string { return filepath.Join(d.root, filepat
 
 func (d dirBucket) Prepare(key string) error {
 	return os.MkdirAll(filepath.Dir(d.URL(key)), 0o755)
+}
+
+// Move renames from to to, which replaces to atomically on one file system.
+func (d dirBucket) Move(_ context.Context, from, to string) error {
+	if err := d.Prepare(to); err != nil {
+		return err
+	}
+	return os.Rename(d.URL(from), d.URL(to))
 }
 
 func (d dirBucket) Stat(_ context.Context, key string) (bool, error) {

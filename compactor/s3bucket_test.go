@@ -78,4 +78,27 @@ func TestS3Bucket(t *testing.T) {
 	if ok, err := b.Stat(ctx, "nothing/here"); ok || err != nil {
 		t.Fatalf("stat of a missing key: %v %v", ok, err)
 	}
+
+	// A write that its deadline interrupts mid-upload: httpfs completes
+	// the multipart upload of the half-written file, at the temporary key,
+	// and the hour's object stays the previous one.
+	hourly := func() (n int64, err error) {
+		err = c.db.QueryRowContext(ctx, "SELECT count(*) FROM read_parquet("+sqlString(b.URL(c.l.hourly("logs", h10)))+")").Scan(&n)
+		return
+	}
+	before, err := hourly()
+	if err != nil || before != h10Logs {
+		t.Fatalf("hourly logs before: %d %v", before, err)
+	}
+	interruptWrite(t, c, c.l.hourly("logs", h10), 3*time.Second)
+	if n, err := hourly(); n != before || err != nil {
+		t.Fatalf("hourly logs after the interrupted write: %d %v, want %d", n, err, before)
+	}
+	// what the write's own delete missed, the sweep deletes
+	if err := c.sweep(ctx, time.Now().Add(time.Hour), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if left := tmpLeft(t, c); len(left) != 0 {
+		t.Fatalf("temporary objects left: %v", left)
+	}
 }

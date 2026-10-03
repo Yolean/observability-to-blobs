@@ -210,11 +210,12 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 			return r, err
 		}
 	}
-	if err := c.tiers.Prepare(dayKeys); err != nil {
-		return r, err
-	}
-	return r, c.exec(ctx, conn, "COPY (SELECT DISTINCT key FROM (SELECT key FROM hour_keys UNION ALL SELECT key FROM day_keys) ORDER BY key) TO "+
-		sqlString(c.tiers.URL(dayKeys))+" (FORMAT csv, HEADER true, COMPRESSION zstd)")
+	return r, c.put(ctx, conn, dayKeys, func(to string) string {
+		return "COPY (SELECT DISTINCT key FROM (SELECT key FROM hour_keys UNION ALL SELECT key FROM day_keys) ORDER BY key) TO " +
+			to + " (FORMAT csv, HEADER true, COMPRESSION zstd)"
+	}, func(path string) string {
+		return "read_csv(" + path + ", header = true, compression = 'zstd', columns = {'key': 'VARCHAR'})"
+	})
 }
 
 // unionDistinct creates the temp table t from hourly_t and the files.

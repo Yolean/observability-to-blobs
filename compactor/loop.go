@@ -120,9 +120,10 @@ func (c *compactor) rollingPass(ctx context.Context, now time.Time, timeout time
 	return err
 }
 
-// pastPass lists the cluster's raw prefix once, folds every hour but the
-// current one that has new keys or is due its final fold, sets the raw age
-// gauges from the listing, and rolls up every past day.
+// pastPass deletes abandoned temporary objects, lists the cluster's raw
+// prefix once, folds every hour but the current one that has new keys or is
+// due its final fold, sets the raw age gauges from the listing, and rolls
+// up every past day.
 func (c *compactor) pastPass(ctx context.Context, now time.Time, timeout time.Duration) error {
 	start := time.Now()
 	err := c.past(ctx, now, timeout)
@@ -131,12 +132,17 @@ func (c *compactor) pastPass(ctx context.Context, now time.Time, timeout time.Du
 }
 
 func (c *compactor) past(ctx context.Context, now time.Time, timeout time.Duration) error {
+	var errs []error
 	lctx, cancel := context.WithTimeout(ctx, timeout)
+	if err := c.sweep(lctx, now, timeout); err != nil {
+		c.log.Error("sweep", "err", err)
+		errs = append(errs, err)
+	}
 	objs, err := c.raw.List(lctx, c.l.rawPrefix())
 	cancel()
 	if err != nil {
 		c.log.Error("past", "err", err)
-		return err
+		return errors.Join(append(errs, err)...)
 	}
 	byHour := map[time.Time][]Object{}
 	for _, o := range objs {
@@ -150,7 +156,6 @@ func (c *compactor) past(ctx context.Context, now time.Time, timeout time.Durati
 	}
 	sort.Slice(hours, func(i, j int) bool { return hours[i].Before(hours[j]) })
 	cur := now.UTC().Truncate(time.Hour)
-	var errs []error
 	deleted := map[string]bool{}
 	for _, h := range hours {
 		if h.Equal(cur) {

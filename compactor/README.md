@@ -137,7 +137,8 @@ compactor/
   config.go          the environment
   keys.go            the key layout of the tiers
   store.go           RawSource and TierStore, and a local directory as both
-  s3.go              the bucket as both: ListObjectsV2, HeadObject, DeleteObjects, SigV4
+  s3.go              the bucket as both: ListObjectsV2, HeadObject, CopyObject,
+                     DeleteObjects, SigV4
   fold.go            fold of one hour, the sidecar
   rollup.go          rollup of one day
   loop.go            run: the rolling and past passes
@@ -207,9 +208,11 @@ this design rests on:
 2. **Folded keys live in a sidecar** written last as the commit marker:
    `hourly/{cluster}/_folded/{date}/{HH}.csv` and
    `daily/{cluster}/_folded/{date}.csv.zst`. Every object write is a
-   `COPY`. The binary's own S3 calls are three that DuckDB cannot make:
-   ListObjectsV2 (keys with their upload times), HeadObject, and
-   DeleteObjects for the optional raw deletion.
+   `COPY` to a temporary key, moved into place once it reads back whole
+   (below, "Writes replace an object whole"). The binary's own S3 calls
+   are four that DuckDB cannot make: ListObjectsV2 (keys with their upload
+   times), HeadObject, CopyObject for the move, and DeleteObjects for the
+   temporary objects and the optional raw deletion.
 3. **Tiered cadence and hour-first keys**
    (`raw1/{cluster}/{date}/{HH}/{node}/{MMSS}-{uuid}.jsonl.zst`). The
    current hour is folded every 2 min; once an hour, every other hour with
@@ -232,6 +235,7 @@ hourly/{cluster}/_folded/{date}/{HH}.csv              key,final: the raw keys fo
 daily/{cluster}/{logs,metrics}/{date}/namespace={namespace}/data_0.parquet
 daily/{cluster}/{podindex,pods}/{date}.parquet
 daily/{cluster}/_folded/{date}.csv.zst                key: the raw keys rolled into the day, written last
+{hourly,daily}/{cluster}/_tmp/{random}.tmp             a write in progress, or one a failed job left
 ```
 
 The namespace in a daily key is path-escaped the way DuckDB's hive
@@ -283,8 +287,9 @@ is off: the compactor rereads objects it has just replaced.
 6. **Commit.** `COPY` the sidecar, the previous keys plus the new ones,
    last.
 
-A crash between steps 5 and 6 leaves rows of keys the sidecar does not
-list; the next fold reads those keys again and `DISTINCT` folds the
+Every `COPY` of steps 5 and 6 writes as described under "Writes replace
+an object whole" below. A crash between steps 5 and 6 leaves rows of keys
+the sidecar does not list; the next fold reads those keys again and `DISTINCT` folds the
 repeat, the same edge an upload retry produces.
 
 **The full read and the final hour.** The first fold at or after
@@ -298,6 +303,32 @@ under its first record's hour) are folded incrementally by the past pass,
 with `final = false`. If some key the sidecar lists is no longer in the
 listing (lifecycle expired it), the full read unions like an incremental
 fold instead of replacing, so it cannot lose those rows.
+
+### Writes replace an object whole
+
+A `COPY` that its job's deadline (`JOB_TIMEOUT`) interrupts can still
+complete its multipart upload when httpfs closes the file: the key then
+holds a parquet file without its footer (reproduced on versitygw). At a
+tier's key that would fail every later fold and rollup that reads the
+object, and with raw deletion on, the rows behind it would be gone. So no
+`COPY` writes a tier's key. Each one, the hourly objects, the daily
+partitions, `podindex`, `pods` and both sidecars, goes to a new key under
+the tier's `_tmp/` (`hourly/{cluster}/_tmp/` or `daily/{cluster}/_tmp/`,
+suffix `.tmp`, so no reader's `*.parquet` or `*.csv` glob matches it).
+The object there must read back, its footer and row count through the
+engine, with as many rows as the `COPY` reported; only then is it moved to
+its key: a server-side CopyObject, which replaces the key whole, and a
+delete of the temporary key (a rename for a local directory). A reader of
+the key sees the previous object or the new one, never a part.
+
+A failed write deletes its temporary object. What that misses, or what a
+killed process leaves, the past pass deletes: every object under the
+`_tmp/` prefixes uploaded more than `JOB_TIMEOUT` ago, which no running
+job can own. An operator can also give those two prefixes a short
+lifecycle rule (a day, say), and the bucket a rule that aborts incomplete
+multipart uploads, which an interrupted `COPY` that httpfs aborts leaves.
+CopyObject takes objects up to 5 GiB, which bounds one namespace's daily
+`logs` or `metrics` object.
 
 ### The rollup of one day
 
@@ -380,8 +411,10 @@ is what an alert on that bound reads. The secret then needs delete on
   `readOnlyRootFilesystem`, drop ALL, seccomp RuntimeDefault.
 - `envFrom` secret `blobs-compactor-s3` (`AWS_ACCESS_KEY_ID`,
   `AWS_SECRET_ACCESS_KEY`). It needs list and read on `raw1/`, and list,
-  read and write on `hourly/` and `daily/`; delete on `raw1/` only with
-  `RAW_DELETE=after-final`. The compactor never deletes in the tiers.
+  read and write on `hourly/` and `daily/`, and delete on
+  `hourly/{cluster}/_tmp/` and `daily/{cluster}/_tmp/`; delete on `raw1/`
+  only with `RAW_DELETE=after-final`. The compactor deletes nothing else
+  in the tiers.
 - env, set by overlays where the base has none: `CLUSTER_NAME` (as the
   agent names it), `S3_BUCKET`, `S3_ENDPOINT` (host:port; a scheme is
   stripped), `S3_REGION` (us-east-1), `S3_TLS` (on), `ROLLING_INTERVAL`

@@ -20,11 +20,11 @@ import (
 
 // s3Bucket is a bucket on an S3-compatible endpoint. DuckDB's httpfs reads
 // and writes the objects (s3:// paths, the secret set up by open); this
-// client makes the three calls DuckDB cannot: ListObjectsV2, which returns
-// upload times that a DuckDB glob does not, HeadObject, and DeleteObjects.
-// It is stdlib only (SigV4, path-style URLs), so the module graph stays the
-// engine's: three calls do not justify an SDK and its dependencies in the
-// pinned image.
+// client makes the four calls DuckDB cannot: ListObjectsV2, which returns
+// upload times that a DuckDB glob does not, HeadObject, CopyObject, which
+// moves a checked object to its key, and DeleteObjects. It is stdlib only
+// (SigV4, path-style URLs), so the module graph stays the engine's: four
+// calls do not justify an SDK and its dependencies in the pinned image.
 type s3Bucket struct {
 	bucket   string
 	endpoint string // host[:port]
@@ -89,6 +89,23 @@ func (b *s3Bucket) Stat(ctx context.Context, key string) (bool, error) {
 	return true, nil
 }
 
+// Move copies from to to with CopyObject and then deletes from. The copy is
+// server-side and replaces to whole, so a reader of to sees the old object
+// or the new one, never a part. CopyObject takes objects up to 5 GiB.
+func (b *s3Bucket) Move(ctx context.Context, from, to string) error {
+	hdr := http.Header{"X-Amz-Copy-Source": {s3Escape("/"+b.bucket+"/"+from, false)}}
+	body, err := b.send(ctx, http.MethodPut, to, nil, hdr, nil, http.StatusOK)
+	if err != nil {
+		return fmt.Errorf("copy %s to %s: %w", from, to, err)
+	}
+	// CopyObject can fail after it has sent 200, with an Error document
+	var res struct{ XMLName xml.Name }
+	if err := xml.Unmarshal(body, &res); err != nil || res.XMLName.Local != "CopyObjectResult" {
+		return fmt.Errorf("copy %s to %s: %s", from, to, strings.TrimSpace(string(body[:min(len(body), 512)])))
+	}
+	return b.Delete(ctx, []string{from})
+}
+
 // Delete removes keys with DeleteObjects, 1,000 per request. A key that is
 // already gone counts as deleted; any other per-key error fails the call.
 func (b *s3Bucket) Delete(ctx context.Context, keys []string) error {
@@ -134,9 +151,14 @@ type s3Error struct {
 
 func (e *s3Error) Error() string { return fmt.Sprintf("HTTP %d %s", e.status, e.body) }
 
-// do sends one signed request for key ("" for the bucket) and returns the
-// body of a response with status want.
 func (b *s3Bucket) do(ctx context.Context, method, key string, q url.Values, payload []byte, want int) ([]byte, error) {
+	return b.send(ctx, method, key, q, nil, payload, want)
+}
+
+// send sends one signed request for key ("" for the bucket), with the
+// headers hdr signed too, and returns the body of a response with status
+// want.
+func (b *s3Bucket) send(ctx context.Context, method, key string, q url.Values, hdr http.Header, payload []byte, want int) ([]byte, error) {
 	scheme := "https"
 	if !b.tls {
 		scheme = "http"
@@ -146,6 +168,9 @@ func (b *s3Bucket) do(ctx context.Context, method, key string, q url.Values, pay
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
+	}
+	for k, v := range hdr {
+		req.Header[http.CanonicalHeaderKey(k)] = v
 	}
 	if payload != nil {
 		sum := md5.Sum(payload)
