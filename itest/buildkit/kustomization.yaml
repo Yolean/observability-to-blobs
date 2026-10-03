@@ -1,0 +1,9 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+# A rootless BuildKit daemon in the itest cluster, for hosts without docker:
+# test.sh builds the agent image through it with buildctl (IMAGE_BUILDER=cluster).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: itest-buildkit
+resources:
+- namespace.yaml
+- buildkitd.yaml
