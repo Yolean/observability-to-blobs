@@ -216,11 +216,14 @@ this design rests on:
 3. **Tiered cadence and hour-first keys**
    (`raw1/{cluster}/{date}/{HH}/{node}/{MMSS}-{uuid}.jsonl.zst`). The
    current hour is folded every 2 min; once an hour, every other hour with
-   raw objects, found by one listing of `raw1/{cluster}/` (lifecycle ages
-   an object from its upload, so late hours are not bounded by retention).
-   A listing pages through every key under its prefix, which is why the
-   hour comes first: an hour's fold lists only that hour (measured with
-   DuckDB's glob, which lists the same way).
+   raw objects, found by listing `raw1/{cluster}/` hour by hour (lifecycle
+   ages an object from its upload, so late hours are not bounded by
+   retention). A listing pages through every key under its prefix, which
+   is why the hour comes first: an hour's fold lists only that hour
+   (measured with DuckDB's glob, which lists the same way).
+   The past pass finds the dates and their hours with
+   delimiter listings, one entry per prefix, and then lists one hour at a
+   time, so the compactor holds at most one hour's keys, never the tier's.
 4. **The first fold after H+1 plus grace is a full read** of the hour's
    raw. It repairs incremental-fold bugs, partial writes, and an
    overlapping writer: `Recreate` prevents one during rollouts, not when a
@@ -374,7 +377,7 @@ Further rules:
   is of a day's last hour, roll the day up: its first rollup, which finds
   all of its hours changed.
 - every `PAST_INTERVAL` (default 1h), and on the first tick after a
-  start: list `raw1/{cluster}/` once and fold every other hour that has
+  start: list `raw1/{cluster}/` hour by hour and fold every other hour that has
   keys its sidecar lacks or is past H+1h+`GRACE` and not final (so an
   hour whose final fold a downtime skipped still gets it); then check
   every past day that has hourly sidecars for a rollup, which does

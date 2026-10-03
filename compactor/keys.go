@@ -57,6 +57,17 @@ func (l layout) rawHour(key string) (time.Time, bool) {
 	return h, err == nil
 }
 
+// rawHourOfPrefix returns the hour of an hour's prefix,
+// raw1/{cluster}/{date}/{HH}/.
+func (l layout) rawHourOfPrefix(prefix string) (time.Time, bool) {
+	rest, ok := strings.CutPrefix(prefix, l.rawPrefix())
+	if !ok {
+		return time.Time{}, false
+	}
+	h, err := time.Parse(dateLayout+"/15/", rest)
+	return h, err == nil
+}
+
 func (l layout) hourly(table string, h time.Time) string {
 	return fmt.Sprintf("hourly/%s/%s/%s/%s.parquet", l.cluster, table, h.Format(dateLayout), h.Format("15"))
 }

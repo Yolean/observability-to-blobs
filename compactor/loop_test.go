@@ -57,7 +57,7 @@ func TestRollingPassFinalizesThePreviousHourAndRollsUpItsDay(t *testing.T) {
 	}
 }
 
-// The past pass finds every other hour with new keys from one listing,
+// The past pass finds every other hour with new keys from its listings,
 // gives a skipped hour its full read, and rolls up past days.
 func TestPastPass(t *testing.T) {
 	w := newWorld(t)
@@ -186,5 +186,41 @@ func TestStopEndsAPassBetweenJobs(t *testing.T) {
 	}
 	if !w.exists(w.c.l.hourlySidecar(cur)) || w.exists(w.c.l.hourlySidecar(h12)) {
 		t.Fatal("rolling pass: want the current hour committed and the previous not started")
+	}
+}
+
+// listings records the prefixes a store is listed with.
+type listings struct {
+	dirBucket
+	prefixes []string
+}
+
+func (l *listings) List(ctx context.Context, prefix string) ([]Object, error) {
+	l.prefixes = append(l.prefixes, prefix)
+	return l.dirBucket.List(ctx, prefix)
+}
+
+// The past pass never lists more than an hour of raw keys at once, nor
+// more than a day of hourly sidecars: dates and hours come from listings
+// with a delimiter.
+func TestPastPassListsHourByHour(t *testing.T) {
+	w := newWorld(t)
+	raw := &listings{dirBucket: w.c.raw.(dirBucket)}
+	w.c.raw = raw
+	w.putA()
+	w.putE()
+	next := day.Add(24 * time.Hour)
+	w.put(rawKey(next, "n1", "0000-x"), logs(next, 1, "ns1", "p1", "u1")...)
+	if err := w.c.past(w.ctx, day.Add(50*time.Hour), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{w.c.l.rawHourPrefix(h10), w.c.l.rawHourPrefix(h11), w.c.l.rawHourPrefix(next)}
+	if strings.Join(raw.prefixes, " ") != strings.Join(want, " ") {
+		t.Fatalf("raw listings %v, want %v", raw.prefixes, want)
+	}
+	for _, d := range []time.Time{day, next} {
+		if !w.exists(w.c.l.dailySidecar(d)) {
+			t.Fatalf("no rollup of %s", d)
+		}
 	}
 }

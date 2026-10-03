@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -100,5 +102,65 @@ func TestS3Bucket(t *testing.T) {
 	}
 	if left := tmpLeft(t, c); len(left) != 0 {
 		t.Fatalf("temporary objects left: %v", left)
+	}
+}
+
+// TestS3BucketListing pages List and Dirs past 1,000 entries and round-trips
+// keys that need escaping, against the bucket TestS3Bucket names.
+func TestS3BucketListing(t *testing.T) {
+	endpoint := os.Getenv("TEST_S3_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("TEST_S3_ENDPOINT not set")
+	}
+	b := &s3Bucket{bucket: os.Getenv("TEST_S3_BUCKET"), endpoint: endpoint, region: "us-east-1",
+		keyID: os.Getenv("AWS_ACCESS_KEY_ID"), secret: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		http: &http.Client{Timeout: time.Minute}, now: time.Now}
+	ctx := context.Background()
+	root := "listing-" + time.Now().UTC().Format("150405") + "/"
+	var keys, dirs []string
+	for _, s := range []string{"a b", "a+b", "a=b", "a&b", "a~b", "å", "a%20b", "a'b", "a(b)", "a!b*", "a,b;c:d@e$"} {
+		keys = append(keys, root+"s/"+s+".jsonl.zst")
+	}
+	for i := 0; i < 1203; i++ {
+		d := fmt.Sprintf("%sd/%05d/", root, i)
+		dirs = append(dirs, d)
+		keys = append(keys, d+"x")
+	}
+	for _, k := range keys {
+		if _, err := b.do(ctx, http.MethodPut, k, nil, []byte("x"), http.StatusOK); err != nil {
+			t.Fatalf("put %q: %v", k, err)
+		}
+	}
+	got, err := b.List(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(keys)
+	if len(got) != len(keys) {
+		t.Fatalf("listed %d keys, want %d", len(got), len(keys))
+	}
+	for i := range got {
+		if got[i].Key != keys[i] || got[i].Modified.IsZero() {
+			t.Fatalf("key %d: %+v, want %q", i, got[i], keys[i])
+		}
+		if ok, err := b.Stat(ctx, keys[i]); !ok || err != nil {
+			t.Fatalf("stat %q: %v %v", keys[i], ok, err)
+		}
+	}
+	gotDirs, err := b.Dirs(ctx, root+"d/")
+	if err != nil || strings.Join(gotDirs, " ") != strings.Join(dirs, " ") {
+		t.Fatalf("dirs: %d of %d, %v", len(gotDirs), len(dirs), err)
+	}
+	if err := b.Move(ctx, keys[0], root+"moved"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := b.Stat(ctx, keys[0]); ok {
+		t.Fatal("moved key still there")
+	}
+	if err := b.Delete(ctx, append(keys[1:], root+"moved", root+"missing")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := b.List(ctx, root); err != nil || len(got) != 0 {
+		t.Fatalf("after the delete: %d keys, %v", len(got), err)
 	}
 }

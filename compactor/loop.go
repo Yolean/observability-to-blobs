@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"sort"
+	"strings"
 	"time"
 )
 
@@ -13,8 +13,9 @@ import (
 //   - every ROLLING_INTERVAL, the rolling pass folds the current hour, and
 //     the previous hour until its final fold has committed;
 //   - every PAST_INTERVAL, and on the first tick after a start, the past
-//     pass lists raw1/{cluster}/ once and folds every other hour with keys
-//     its sidecar lacks, or that is past H+1h+GRACE and not final yet;
+//     pass lists raw1/{cluster}/ hour by hour and folds every other hour
+//     with keys its sidecar lacks, or that is past H+1h+GRACE and not
+//     final yet;
 //   - a rollup of a past day runs after the rolling pass committed the
 //     final fold of that day's last hour, and after every past pass for
 //     every past day with hourly sidecars, where it does nothing unless an
@@ -149,9 +150,9 @@ func (c *compactor) rolling(ctx context.Context, now time.Time, timeout time.Dur
 }
 
 // pastPass deletes abandoned temporary objects, lists the cluster's raw
-// prefix once, folds every hour but the current one that has new keys or is
-// due its final fold, sets the raw gauges from the listing, and rolls up
-// every past day.
+// tier hour by hour, folds every hour but the current one that has new keys
+// or is due its final fold, sets the raw gauges from those listings, and
+// rolls up every past day.
 func (c *compactor) pastPass(ctx context.Context, now time.Time, timeout time.Duration) error {
 	start := time.Now()
 	err := c.past(ctx, now, timeout)
@@ -159,75 +160,94 @@ func (c *compactor) pastPass(ctx context.Context, now time.Time, timeout time.Du
 	return err
 }
 
+// past holds one hour's listing at a time: the dates under raw1/{cluster}/
+// and the hours under each come from listings with a delimiter, one entry
+// per prefix, so memory is bounded by the largest hour, not the tier.
 func (c *compactor) past(ctx context.Context, now time.Time, timeout time.Duration) error {
 	jobs := jobContext(ctx)
 	var errs []error
-	lctx, cancel := context.WithTimeout(ctx, timeout)
-	if err := c.sweep(lctx, now, timeout); err != nil {
-		c.log.Error("sweep", "err", err)
+	fail := func(what string, err error) {
+		c.log.Error("past", "step", what, "err", err)
 		errs = append(errs, err)
 	}
-	objs, err := c.raw.List(lctx, c.l.rawPrefix())
-	cancel()
-	if err != nil {
-		c.log.Error("past", "err", err)
-		return errors.Join(append(errs, err)...)
+	list := func(f func(context.Context) error) error {
+		lctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		return f(lctx)
 	}
-	byHour := map[time.Time][]Object{}
-	for _, o := range objs {
-		if h, ok := c.l.rawHour(o.Key); ok {
-			byHour[h] = append(byHour[h], o)
+	if err := list(func(ctx context.Context) error { return c.sweep(ctx, now, timeout) }); err != nil {
+		fail("sweep", err)
+	}
+	var dates []string
+	if err := list(func(ctx context.Context) (err error) { dates, err = c.raw.Dirs(ctx, c.l.rawPrefix()); return }); err != nil {
+		fail("list", err)
+		return errors.Join(errs...)
+	}
+	cur := now.UTC().Truncate(time.Hour)
+	seen := map[time.Time]bool{}
+	complete := true
+	for _, date := range dates {
+		var hours []string
+		if err := list(func(ctx context.Context) (err error) { hours, err = c.raw.Dirs(ctx, date); return }); err != nil {
+			fail("list", err)
+			complete = false
+			continue
+		}
+		for _, hp := range hours {
+			h, ok := c.l.rawHourOfPrefix(hp)
+			if !ok {
+				continue
+			}
+			if err := stopped(ctx); err != nil {
+				return errors.Join(append(errs, err)...)
+			}
+			var listed []Object
+			if err := list(func(ctx context.Context) error {
+				objs, err := c.raw.List(ctx, hp)
+				for _, o := range objs {
+					if oh, ok := c.l.rawHour(o.Key); ok && oh.Equal(h) {
+						listed = append(listed, o)
+					}
+				}
+				return err
+			}); err != nil {
+				fail("list", err)
+				complete = false
+				continue
+			}
+			seen[h] = true
+			// the listing's count, until the fold, which deletes, sets its own
+			c.m.rawHour(h, summarize(listed, nil))
+			if h.Equal(cur) {
+				continue
+			}
+			_, err := c.foldJob(jobs, h, listed, now, timeout)
+			errs = append(errs, err)
 		}
 	}
-	hours := make([]time.Time, 0, len(byHour))
-	for h := range byHour {
-		hours = append(hours, h)
+	if complete {
+		c.m.rawRetain(seen)
 	}
-	sort.Slice(hours, func(i, j int) bool { return hours[i].Before(hours[j]) })
-	cur := now.UTC().Truncate(time.Hour)
-	listed := map[time.Time]bool{}
-	for _, h := range hours {
-		listed[h] = true
-		// the listing's count, until a fold of the hour, which deletes,
-		// sets it from its own
-		c.m.rawHour(h, summarize(byHour[h], nil))
+
+	// every past day with hourly sidecars: a no-op unless one of its hours
+	// has keys the daily sidecar lacks
+	var days []string
+	if err := list(func(ctx context.Context) (err error) {
+		days, err = c.tiers.Dirs(ctx, c.l.hourlySidecarPrefix())
+		return
+	}); err != nil {
+		fail("list", err)
+		return errors.Join(errs...)
 	}
-	c.m.rawRetain(listed)
-	for _, h := range hours {
-		if h.Equal(cur) {
+	for _, dp := range days {
+		d, err := time.Parse(dateLayout+"/", strings.TrimPrefix(dp, c.l.hourlySidecarPrefix()))
+		if err != nil || !d.Before(dayOf(now)) {
 			continue
 		}
 		if err := stopped(ctx); err != nil {
 			return errors.Join(append(errs, err)...)
 		}
-		_, err := c.foldJob(jobs, h, byHour[h], now, timeout)
-		errs = append(errs, err)
-	}
-
-	// every past day with hourly sidecars: a no-op unless one of its hours
-	// has keys the daily sidecar lacks
-	lctx, cancel = context.WithTimeout(ctx, timeout)
-	sidecars, err := c.tiers.List(lctx, c.l.hourlySidecarPrefix())
-	cancel()
-	if err != nil {
-		return errors.Join(append(errs, err)...)
-	}
-	days := map[time.Time]bool{}
-	for _, o := range sidecars {
-		if h, ok := sidecarHour(o.Key); ok && dayOf(h).Before(dayOf(now)) {
-			days[dayOf(h)] = true
-		}
-	}
-	sorted := make([]time.Time, 0, len(days))
-	for d := range days {
-		sorted = append(sorted, d)
-	}
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Before(sorted[j]) })
-	for _, d := range sorted {
-		if err := stopped(ctx); err != nil {
-			return errors.Join(append(errs, err)...)
-		}
-		_, err := c.rollupJob(jobs, d, timeout)
+		_, err = c.rollupJob(jobs, d, timeout)
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)

@@ -44,15 +44,37 @@ func (b *s3Bucket) Prepare(string) error { return nil }
 // ListObjectsV2 page per 1,000 keys.
 func (b *s3Bucket) List(ctx context.Context, prefix string) ([]Object, error) {
 	var out []Object
+	err := b.list(ctx, prefix, "", func(objs []Object, _ []string) {
+		out = append(out, objs...)
+	})
+	return out, err
+}
+
+// Dirs returns the common prefixes right under prefix, which ends in "/":
+// a ListObjectsV2 with delimiter "/", which returns one entry per
+// "directory" however many keys it holds.
+func (b *s3Bucket) Dirs(ctx context.Context, prefix string) ([]string, error) {
+	var out []string
+	err := b.list(ctx, prefix, "/", func(_ []Object, dirs []string) {
+		out = append(out, dirs...)
+	})
+	return out, err
+}
+
+// list pages through a ListObjectsV2, handing each page to fn.
+func (b *s3Bucket) list(ctx context.Context, prefix, delimiter string, fn func([]Object, []string)) error {
 	token := ""
 	for {
 		q := url.Values{"list-type": {"2"}, "prefix": {prefix}}
+		if delimiter != "" {
+			q.Set("delimiter", delimiter)
+		}
 		if token != "" {
 			q.Set("continuation-token", token)
 		}
 		body, err := b.do(ctx, http.MethodGet, "", q, nil, http.StatusOK)
 		if err != nil {
-			return nil, fmt.Errorf("list %s: %w", prefix, err)
+			return fmt.Errorf("list %s: %w", prefix, err)
 		}
 		var page struct {
 			IsTruncated           bool
@@ -61,18 +83,25 @@ func (b *s3Bucket) List(ctx context.Context, prefix string) ([]Object, error) {
 				Key          string
 				LastModified time.Time
 			}
+			CommonPrefixes []struct{ Prefix string }
 		}
 		if err := xml.Unmarshal(body, &page); err != nil {
-			return nil, fmt.Errorf("list %s: %w", prefix, err)
+			return fmt.Errorf("list %s: %w", prefix, err)
 		}
+		objs := make([]Object, 0, len(page.Contents))
 		for _, c := range page.Contents {
-			out = append(out, Object{Key: c.Key, Modified: c.LastModified})
+			objs = append(objs, Object{Key: c.Key, Modified: c.LastModified})
 		}
+		dirs := make([]string, 0, len(page.CommonPrefixes))
+		for _, p := range page.CommonPrefixes {
+			dirs = append(dirs, p.Prefix)
+		}
+		fn(objs, dirs)
 		if !page.IsTruncated {
-			return out, nil
+			return nil
 		}
 		if page.NextContinuationToken == "" {
-			return nil, fmt.Errorf("list %s: truncated page without a continuation token", prefix)
+			return fmt.Errorf("list %s: truncated page without a continuation token", prefix)
 		}
 		token = page.NextContinuationToken
 	}

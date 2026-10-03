@@ -23,6 +23,7 @@ type Object struct {
 // PutObject endpoint would be another.
 type RawSource interface {
 	List(ctx context.Context, prefix string) ([]Object, error)
+	Dirs(ctx context.Context, prefix string) ([]string, error)
 	URL(key string) string
 	Delete(ctx context.Context, keys []string) error
 }
@@ -35,6 +36,7 @@ type RawSource interface {
 // under a tier's _tmp/.
 type TierStore interface {
 	List(ctx context.Context, prefix string) ([]Object, error)
+	Dirs(ctx context.Context, prefix string) ([]string, error)
 	Stat(ctx context.Context, key string) (bool, error)
 	URL(key string) string
 	Prepare(key string) error
@@ -105,6 +107,23 @@ func (d dirBucket) List(_ context.Context, prefix string) ([]Object, error) {
 		return nil
 	})
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, err
+}
+
+// Dirs returns the "directories" right under prefix, which ends in "/":
+// each a prefix ending in "/", sorted, as an S3 listing with delimiter "/"
+// returns them.
+func (d dirBucket) Dirs(_ context.Context, prefix string) ([]string, error) {
+	entries, err := os.ReadDir(d.URL(prefix))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() {
+			out = append(out, prefix+e.Name()+"/")
+		}
+	}
 	return out, err
 }
 
