@@ -24,13 +24,39 @@ type metrics struct {
 	rows         map[[2]string]float64 // tier, table
 	keysRead     float64
 	rawDeleted   float64
-	rawObjects   float64
-	rawOldest    time.Time // upload time of the oldest raw object in the last full listing
+	// the raw objects of each hour as its latest listing saw them, less
+	// those deleted since: a fold's listing of its hour, or the past
+	// pass's of every hour
+	rawHours map[time.Time]rawSummary
+}
+
+// rawSummary is one hour's raw objects: how many, and the oldest upload.
+type rawSummary struct {
+	objects int
+	oldest  time.Time
+}
+
+func summarize(objs []Object, deleted []string) rawSummary {
+	gone := make(map[string]bool, len(deleted))
+	for _, k := range deleted {
+		gone[k] = true
+	}
+	var s rawSummary
+	for _, o := range objs {
+		if gone[o.Key] {
+			continue
+		}
+		s.objects++
+		if s.oldest.IsZero() || o.Modified.Before(s.oldest) {
+			s.oldest = o.Modified
+		}
+	}
+	return s
 }
 
 func newMetrics() *metrics {
 	return &metrics{now: time.Now, lastSuccess: map[string]float64{}, lastDuration: map[string]float64{},
-		runs: map[[2]string]float64{}, rows: map[[2]string]float64{}}
+		runs: map[[2]string]float64{}, rows: map[[2]string]float64{}, rawHours: map[time.Time]rawSummary{}}
 }
 
 // job records one run of a job: rolling, past or rollup.
@@ -56,6 +82,7 @@ func (m *metrics) fold(r foldResult) {
 	for t, n := range r.rows {
 		m.rows[[2]string{"hourly", t}] = float64(n)
 	}
+	m.setRawHour(r.hour, r.raw)
 }
 
 func (m *metrics) rollup(r rollupResult) {
@@ -66,11 +93,30 @@ func (m *metrics) rollup(r rollupResult) {
 	}
 }
 
-func (m *metrics) listing(objects int, oldest time.Time) {
+// rawHour sets an hour's raw summary from a listing of it.
+func (m *metrics) rawHour(h time.Time, s rawSummary) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.rawObjects = float64(objects)
-	m.rawOldest = oldest
+	m.setRawHour(h, s)
+}
+
+func (m *metrics) setRawHour(h time.Time, s rawSummary) {
+	if s.objects == 0 {
+		delete(m.rawHours, h)
+		return
+	}
+	m.rawHours[h] = s
+}
+
+// rawRetain forgets the hours a listing of every hour did not find.
+func (m *metrics) rawRetain(hours map[time.Time]bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for h := range m.rawHours {
+		if !hours[h] {
+			delete(m.rawHours, h)
+		}
+	}
 }
 
 func (m *metrics) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
@@ -112,12 +158,20 @@ func (m *metrics) write(w io.Writer) {
 	fmt.Fprintf(&b, "blobs_compactor_raw_keys_read_total %s\n", num(m.keysRead))
 	family("blobs_compactor_raw_deleted_total", "counter", "Raw objects deleted after their hour's final fold (RAW_DELETE=after-final).")
 	fmt.Fprintf(&b, "blobs_compactor_raw_deleted_total %s\n", num(m.rawDeleted))
-	family("blobs_compactor_raw_objects", "gauge", "Raw objects in the last listing of the cluster's raw prefix, less those deleted since.")
-	fmt.Fprintf(&b, "blobs_compactor_raw_objects %s\n", num(m.rawObjects))
-	family("blobs_compactor_raw_oldest_age_seconds", "gauge", "Age now of the oldest raw object (by upload time) in the last listing, 0 when it had none.")
+	var objects int
+	var oldest time.Time
+	for _, s := range m.rawHours {
+		objects += s.objects
+		if oldest.IsZero() || s.oldest.Before(oldest) {
+			oldest = s.oldest
+		}
+	}
+	family("blobs_compactor_raw_objects", "gauge", "Raw objects as the latest listing of each hour saw them (a fold's of its hour, the past pass's of every hour), less those deleted since.")
+	fmt.Fprintf(&b, "blobs_compactor_raw_objects %d\n", objects)
+	family("blobs_compactor_raw_oldest_age_seconds", "gauge", "Age now of the oldest of those raw objects, by upload time; 0 when there are none.")
 	age := 0.0
-	if !m.rawOldest.IsZero() {
-		age = m.now().Sub(m.rawOldest).Seconds()
+	if !oldest.IsZero() {
+		age = m.now().Sub(oldest).Seconds()
 	}
 	fmt.Fprintf(&b, "blobs_compactor_raw_oldest_age_seconds %s\n", num(age))
 	io.WriteString(w, b.String())

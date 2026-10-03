@@ -100,3 +100,53 @@ func TestPastPass(t *testing.T) {
 		t.Fatalf("want the age of the object uploaded an hour ago:\n%s", b.String())
 	}
 }
+
+// The raw gauges stay true when the rolling pass, not the past pass,
+// deletes an hour: the age is the oldest object still there.
+func TestRawGaugesFollowEveryPassesDeletions(t *testing.T) {
+	w := newWorld(t)
+	w.c.rawDelete = true
+	h09 := day.Add(9 * time.Hour)
+	upload := func(key string, at time.Time) {
+		if err := os.Chtimes(w.c.raw.URL(key), at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	k9 := w.put(rawKey(h09, "n1", "0030-a"), logs(h09.Add(30*time.Second), 2, "ns1", "p1", "u1")...)
+	upload(k9, h09.Add(30*time.Second))
+	k10 := w.put(rawKey(h10, "n1", "0030-b"), logs(h10.Add(30*time.Second), 2, "ns1", "p1", "u1")...)
+	upload(k10, h10.Add(30*time.Second))
+	if err := w.c.past(w.ctx, h10.Add(5*time.Minute), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	gauges := func() string {
+		var b strings.Builder
+		w.c.m.write(&b)
+		return b.String()
+	}
+	w.c.m.now = func() time.Time { return h10.Add(6 * time.Minute) }
+	for _, want := range []string{"blobs_compactor_raw_objects 2\n", "blobs_compactor_raw_oldest_age_seconds 3930\n"} {
+		if g := gauges(); !strings.Contains(g, want) {
+			t.Fatalf("after the past pass, metrics lack %q:\n%s", want, g)
+		}
+	}
+	// the rolling pass after h09's grace: its final fold deletes k9
+	if err := w.c.rollingPass(w.ctx, h10.Add(11*time.Minute), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if w.exists(k9) {
+		t.Fatal("k9 not deleted")
+	}
+	// a new object of the current hour, which the next rolling pass lists
+	k10b := w.put(rawKey(h10, "n2", "3000-c"), logs(h10.Add(30*time.Minute), 1, "ns1", "p1", "u1")...)
+	upload(k10b, h10.Add(30*time.Minute))
+	if err := w.c.rollingPass(w.ctx, h10.Add(31*time.Minute), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	w.c.m.now = func() time.Time { return h10.Add(61 * time.Minute) }
+	for _, want := range []string{"blobs_compactor_raw_objects 2\n", "blobs_compactor_raw_oldest_age_seconds 3630\n"} {
+		if g := gauges(); !strings.Contains(g, want) {
+			t.Fatalf("after the rolling pass deleted hour 09, metrics lack %q:\n%s", want, g)
+		}
+	}
+}

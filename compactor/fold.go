@@ -230,6 +230,7 @@ type foldResult struct {
 	wrote   bool
 	deleted []string
 	rows    map[string]int64
+	raw     rawSummary // the hour's listing, less deleted
 }
 
 // fold folds one hour (compactor/README.md, "A fold of one hour"). listed
@@ -339,6 +340,7 @@ func (c *compactor) fold(ctx context.Context, h time.Time, listed []Object, now 
 			r.deleted = del
 		}
 	}
+	r.raw = summarize(listed, r.deleted)
 	return r, nil
 }
 

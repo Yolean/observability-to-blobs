@@ -434,7 +434,10 @@ is what an alert on that bound reads. The secret then needs delete on
   `blobs_compactor_rows{tier,table}` (rows of the last object written),
   `blobs_compactor_raw_keys_read_total`, `blobs_compactor_raw_deleted_total`,
   `blobs_compactor_raw_objects` and `blobs_compactor_raw_oldest_age_seconds`
-  (by upload time, from the past pass's listing, aging between listings).
+  (by upload time, aging between listings). They are per hour as its
+  latest listing saw it, less what was deleted since: every fold lists its
+  hour, the rolling pass's folds too, and the past pass lists every hour,
+  so a deletion by either pass shows at once.
   The node agent scrapes it into the blobs, where alerting sees it (the
   itest asserts that it arrives). The endpoint exists for these rules,
   which go in with the rules that phase 3 wires into the tailer:

@@ -122,8 +122,8 @@ func (c *compactor) rollingPass(ctx context.Context, now time.Time, timeout time
 
 // pastPass deletes abandoned temporary objects, lists the cluster's raw
 // prefix once, folds every hour but the current one that has new keys or is
-// due its final fold, sets the raw age gauges from the listing, and rolls
-// up every past day.
+// due its final fold, sets the raw gauges from the listing, and rolls up
+// every past day.
 func (c *compactor) pastPass(ctx context.Context, now time.Time, timeout time.Duration) error {
 	start := time.Now()
 	err := c.past(ctx, now, timeout)
@@ -156,29 +156,21 @@ func (c *compactor) past(ctx context.Context, now time.Time, timeout time.Durati
 	}
 	sort.Slice(hours, func(i, j int) bool { return hours[i].Before(hours[j]) })
 	cur := now.UTC().Truncate(time.Hour)
-	deleted := map[string]bool{}
+	listed := map[time.Time]bool{}
+	for _, h := range hours {
+		listed[h] = true
+		// the listing's count, until a fold of the hour, which deletes,
+		// sets it from its own
+		c.m.rawHour(h, summarize(byHour[h], nil))
+	}
+	c.m.rawRetain(listed)
 	for _, h := range hours {
 		if h.Equal(cur) {
 			continue
 		}
-		r, err := c.foldJob(ctx, h, byHour[h], now, timeout)
+		_, err := c.foldJob(ctx, h, byHour[h], now, timeout)
 		errs = append(errs, err)
-		for _, k := range r.deleted {
-			deleted[k] = true
-		}
 	}
-	n := 0
-	var oldest time.Time
-	for _, o := range objs {
-		if deleted[o.Key] {
-			continue
-		}
-		n++
-		if oldest.IsZero() || o.Modified.Before(oldest) {
-			oldest = o.Modified
-		}
-	}
-	c.m.listing(n, oldest)
 
 	// every past day with hourly sidecars: a no-op unless one of its hours
 	// has keys the daily sidecar lacks
