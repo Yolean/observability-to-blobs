@@ -1,0 +1,75 @@
+# The host agent (HOST_MODE.md). Installed from the release tarball, which
+# extracts to /opt/observability-host; this file goes to
+# /etc/systemd/system/ (or is linked there with systemctl link).
+#
+# Needs, written by whoever installs it:
+#  - the user and group below:
+#      useradd --system --user-group --no-create-home --home-dir /nonexistent \
+#        --shell /usr/sbin/nologin observability-host
+#  - /etc/observability-host/env, named by EnvironmentFile (the example is
+#    etc/observability-host.env.example in the tarball): CLUSTER_NAME,
+#    NODE_NAME (default: the host name), S3_BUCKET, S3_ENDPOINT, S3_REGION,
+#    S3_TLS, KEY_ROOT, and the settings listed in etc/host.yaml.
+#  - /etc/observability-host/s3-credentials, root-only (0600 root:root), the
+#    bucket key in the AWS shared credentials format:
+#      [default]
+#      aws_access_key_id = ...
+#      aws_secret_access_key = ...
+#    systemd hands it to the service in its credentials directory; it is not
+#    in the environment file, this unit or the command line. fluent-bit reads
+#    it once, when it first needs credentials, so a changed key takes a
+#    restart of the unit.
+#  - for the audit log: auditd's log_group set to adm in
+#    /etc/audit/auditd.conf (and the log directory group-readable).
+[Unit]
+Description=observability-to-blobs host agent
+Documentation=https://github.com/Yolean/observability-to-blobs/blob/main/HOST_MODE.md
+After=network-online.target
+Wants=network-online.target
+# Restart=always must not give up after a burst of failures
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=observability-host
+Group=observability-host
+# the journal and /var/log/audit, /var/log/apt, ...
+SupplementaryGroups=systemd-journal adm
+
+# defaults; the environment file below overrides them
+Environment=NODE_NAME=%H
+Environment=HEARTBEAT_COMMAND=/opt/observability-host/bin/observability-host-heartbeat
+EnvironmentFile=/etc/observability-host/env
+# the bucket key, from a root-only file: fluent-bit's AWS credential chain
+# reads the shared credentials file (after the AWS_ACCESS_KEY_ID variables,
+# which must therefore stay unset)
+LoadCredential=s3:/etc/observability-host/s3-credentials
+Environment=AWS_SHARED_CREDENTIALS_FILE=%d/s3
+
+# positions, storage and the output buffer: /var/lib/observability-host
+StateDirectory=observability-host
+StateDirectoryMode=0750
+
+# refuse to run unconfigured: an unset ${CLUSTER_NAME} would otherwise
+# end up in object keys as text
+# ($$ is systemd's escape for a $ the shell is to expand)
+ExecStartPre=/bin/sh -c 'test -n "$$CLUSTER_NAME" && test -n "$$S3_BUCKET" && test -n "$$S3_ENDPOINT"'
+ExecStart=/opt/observability-host/bin/fluent-bit -c /opt/observability-host/etc/host.yaml
+# the stop, and the journal record of it, are shipped before the process ends
+TimeoutStopSec=60
+Restart=always
+RestartSec=5
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+# write access: the state directory only (StateDirectory), nothing else
+
+[Install]
+WantedBy=multi-user.target
