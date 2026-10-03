@@ -410,3 +410,25 @@ func TestPastPassSweepsTemporaryObjects(t *testing.T) {
 		t.Fatalf("after the sweep: %v", tmpLeft(t, w.c))
 	}
 }
+
+// A full read with no sidecar but the hour's objects there (the sidecar
+// expired, a raw key too) unions with them: it cannot tell which keys the
+// objects hold rows of, so replacing them could drop rows.
+func TestFullReadWithoutSidecarKeepsTheObjectsRows(t *testing.T) {
+	w := newWorld(t)
+	a := w.putA()
+	w.putB()
+	w.putC()
+	w.fold(h10, afterG)
+	w.remove(w.c.l.hourlySidecar(h10), a)
+	r := w.fold(h10, afterG.Add(3*time.Hour))
+	if !r.full || !r.final || r.keys != 2 {
+		t.Fatalf("%+v, want the full read of the 2 keys left", r)
+	}
+	if n := w.hourlyRows("logs", h10); n != h10Logs {
+		t.Fatalf("logs rows %d, want %d: the expired key's rows kept", n, h10Logs)
+	}
+	if n := w.hourlyRows("podindex", h10); n != 3 {
+		t.Fatalf("podindex rows %d, want 3", n)
+	}
+}

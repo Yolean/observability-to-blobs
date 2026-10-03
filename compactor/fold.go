@@ -280,14 +280,21 @@ func (c *compactor) fold(ctx context.Context, h time.Time, listed []Object, now 
 			keys = append(keys, o.Key)
 		}
 		// The full read replaces the hour's objects, which repairs what
-		// incremental folds got wrong; but only while raw still holds every
-		// folded key. If some are gone (lifecycle), replacing would lose
-		// their rows, so it unions like an incremental fold.
+		// incremental folds got wrong; but only while raw still holds
+		// every key those objects may hold rows of. If a folded key is
+		// gone (lifecycle), or there is no sidecar to say which keys the
+		// objects hold (it expired, or the first fold crashed before it),
+		// replacing could lose rows, so it unions like an incremental fold.
 		union = false
 		for k := range folded {
 			if !inListing[k] {
 				union = true
 				break
+			}
+		}
+		if len(folded) == 0 {
+			if union, err = c.hasHourly(ctx, h); err != nil {
+				return r, err
 			}
 		}
 	} else {
@@ -342,6 +349,17 @@ func (c *compactor) fold(ctx context.Context, h time.Time, listed []Object, now 
 	}
 	r.raw = summarize(listed, r.deleted)
 	return r, nil
+}
+
+// hasHourly tells whether any of the hour's objects exists.
+func (c *compactor) hasHourly(ctx context.Context, h time.Time) (bool, error) {
+	for _, t := range append(foldTables, "pods") {
+		ok, err := c.tiers.Stat(ctx, c.l.hourly(t, h))
+		if ok || err != nil {
+			return ok, err
+		}
+	}
+	return false, nil
 }
 
 // foldKeys reads keys once, unions their rows with the hour's existing

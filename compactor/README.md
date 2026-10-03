@@ -301,8 +301,11 @@ commits with the fold that earns it. A final hour is never read in full
 again. Keys that arrive later (a backlog shipped after an outage lands
 under its first record's hour) are folded incrementally by the past pass,
 with `final = false`. If some key the sidecar lists is no longer in the
-listing (lifecycle expired it), the full read unions like an incremental
-fold instead of replacing, so it cannot lose those rows.
+listing (lifecycle expired it), or there is no sidecar while the hour's
+objects exist (it expired, or the hour's first fold crashed before it),
+the full read unions like an incremental fold instead of replacing: the
+objects may hold rows of keys raw no longer has, and replacing would lose
+them.
 
 ### Writes replace an object whole
 
