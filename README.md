@@ -118,25 +118,32 @@ same bucket while all of the above runs. Every tier read below goes
 through the per-key union (`tier` in `test.sh`); the plain mode is
 covered by the Go tests:
 
-- the key rotation: the hourly objects written under `itest-1` keep
-  their names, so their key, after `PARQUET_KEY_ID` moves to `itest-2`;
-  the day's daily objects, first written after it, are under `itest-2`;
-  every hourly and daily object is encrypted, one per hour, table and
-  namespace; a read without the key fails
-
-- every raw key in the bucket is listed in its hour's sidecar, and the
-  sidecars list no key the raw tier lacks
+- after a rolling and a past pass that both started after a snapshot of
+  the raw keys (read from the compactor's `/metrics`), every key of the
+  snapshot is listed in its hour's sidecar, and the sidecars list no key
+  the raw tier lacks
 - per folded hour, the hourly `logs`, `metrics` and `podindex` objects
-  hold exactly as many rows as the distinct rows of the raw keys its
-  sidecar lists, read through `compactor/sql/`
+  hold exactly the distinct rows of the raw keys its sidecar lists, read
+  through `compactor/sql/`: the same rows both ways, each once
 - the hourly `pods` index has the three incarnations of `reused`
 - with the compactor stopped, `blobs-compactor rollup <day>` in a pod of
-  its own writes the daily tier: its `logs`, `metrics` and `podindex`
-  match the distinct rows of every raw key of the day, a namespace's logs
-  are one object under its hive key, the daily sidecar lists the day's
-  keys, and the daily `pods` has the three incarnations, one row each
-  with its line and exit 0
+  its own, for every day with folded hours (two when the run crosses
+  midnight UTC), writes the daily tier: its `logs`, `metrics` and
+  `podindex` hold exactly the distinct rows of every raw key of the day,
+  a namespace's logs are one object under its hive key, the daily sidecar
+  lists the day's keys, and the daily `pods` has the three incarnations,
+  each with its line and exit 0
+- an incremental rollup: a raw object of a namespace of its own, in a
+  free hour of the last day, folded with `blobs-compactor fold` and
+  rolled up again, rewrites that one namespace, leaves the other
+  namespaces' `pods` rows as they were, and the day still holds exactly
+  the distinct rows of its keys
 - the compactor's `/metrics` reach the blobs through the agent's scrape
+- the key rotation, before the snapshot: the hourly objects written under
+  `itest-1` keep their names, so their key, after `PARQUET_KEY_ID` moves
+  to `itest-2`; the last day's daily objects, first written after it, are
+  under `itest-2`; every hourly and daily object is encrypted, one per
+  hour, table and namespace; a read without the key fails
 
 Not part of `test.sh` because they take the cluster down or load it:
 `itest/node-restart.sh`, `itest/rotation.sh` and `itest/stress.sh` (PoC

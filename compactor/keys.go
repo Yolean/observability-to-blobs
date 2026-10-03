@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -52,6 +54,17 @@ func (l layout) rawHour(key string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	h, err := time.Parse(dateLayout+"/15", m[2]+"/"+m[3])
+	return h, err == nil
+}
+
+// rawHourOfPrefix returns the hour of an hour's prefix,
+// raw1/{cluster}/{date}/{HH}/.
+func (l layout) rawHourOfPrefix(prefix string) (time.Time, bool) {
+	rest, ok := strings.CutPrefix(prefix, l.rawPrefix())
+	if !ok {
+		return time.Time{}, false
+	}
+	h, err := time.Parse(dateLayout+"/15/", rest)
 	return h, err == nil
 }
 
@@ -165,4 +178,23 @@ func (l layout) dailyStem(table string, day time.Time) string {
 
 func (l layout) dailySidecar(day time.Time) string {
 	return fmt.Sprintf("daily/%s/_folded/%s.csv.zst", l.cluster, day.Format(dateLayout))
+}
+
+// tmpPrefixes hold the tiers' temporary objects: every tier write is a COPY
+// to a key here, moved to its own key once it reads back whole. What a
+// failed job leaves here, the past pass deletes; an operator can give these
+// prefixes a short lifecycle rule too.
+func (l layout) tmpPrefixes() []string {
+	return []string{"hourly/" + l.cluster + "/_tmp/", "daily/" + l.cluster + "/_tmp/"}
+}
+
+// tmp is a new temporary key in key's tier. Its suffix is .tmp, so no glob
+// of a tier's *.parquet or *.csv ever matches it.
+func (l layout) tmp(key string) string {
+	tier, _, _ := strings.Cut(key, "/")
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err) // crypto/rand does not fail
+	}
+	return tier + "/" + l.cluster + "/_tmp/" + hex.EncodeToString(b[:]) + ".tmp"
 }

@@ -23,18 +23,25 @@ type Object struct {
 // PutObject endpoint would be another.
 type RawSource interface {
 	List(ctx context.Context, prefix string) ([]Object, error)
+	Dirs(ctx context.Context, prefix string) ([]string, error)
 	URL(key string) string
 	Delete(ctx context.Context, keys []string) error
 }
 
 // TierStore is where the hourly and daily tiers go. DuckDB reads and writes
-// the paths URL returns, every write a COPY; the store only lists, tells
-// whether a key exists, and prepares a key for a COPY. It never deletes.
+// the paths URL returns, every write a COPY to a temporary key; the store
+// lists, tells whether a key exists, prepares a key for a COPY, moves a
+// checked temporary object to its key, and deletes temporary objects. It
+// replaces an object whole or not at all, and deletes nothing but keys
+// under a tier's _tmp/.
 type TierStore interface {
 	List(ctx context.Context, prefix string) ([]Object, error)
+	Dirs(ctx context.Context, prefix string) ([]string, error)
 	Stat(ctx context.Context, key string) (bool, error)
 	URL(key string) string
 	Prepare(key string) error
+	Move(ctx context.Context, from, to string) error
+	Delete(ctx context.Context, keys []string) error
 }
 
 // dirBucket is a bucket in a local directory, for tests and for running the
@@ -46,6 +53,14 @@ func (d dirBucket) URL(key string) string { return filepath.Join(d.root, filepat
 
 func (d dirBucket) Prepare(key string) error {
 	return os.MkdirAll(filepath.Dir(d.URL(key)), 0o755)
+}
+
+// Move renames from to to, which replaces to atomically on one file system.
+func (d dirBucket) Move(_ context.Context, from, to string) error {
+	if err := d.Prepare(to); err != nil {
+		return err
+	}
+	return os.Rename(d.URL(from), d.URL(to))
 }
 
 func (d dirBucket) Stat(_ context.Context, key string) (bool, error) {
@@ -92,6 +107,23 @@ func (d dirBucket) List(_ context.Context, prefix string) ([]Object, error) {
 		return nil
 	})
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, err
+}
+
+// Dirs returns the "directories" right under prefix, which ends in "/":
+// each a prefix ending in "/", sorted, as an S3 listing with delimiter "/"
+// returns them.
+func (d dirBucket) Dirs(_ context.Context, prefix string) ([]string, error) {
+	entries, err := os.ReadDir(d.URL(prefix))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() {
+			out = append(out, prefix+e.Name()+"/")
+		}
+	}
 	return out, err
 }
 

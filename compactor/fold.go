@@ -32,6 +32,9 @@ type compactor struct {
 	// beforeCommit, when set, runs after a fold's or a rollup's table
 	// writes and before its sidecar; tests fail there as a crash would
 	beforeCommit func(sidecar string) error
+	// copied, when set, runs after a COPY to a temporary key and before
+	// the object there is read back; tests damage it there
+	copied func(tmp string)
 	// finalSeen is the latest previous hour seen final: a cache that spares
 	// the rolling pass a sidecar read, never state
 	finalSeen time.Time
@@ -142,18 +145,102 @@ func firstLine(q string) string {
 // write COPYs query, sorted the table's way, to key, encrypted with the
 // parquet key its name carries, if any.
 func (c *compactor) write(ctx context.Context, conn *sql.Conn, table, query, key string) error {
-	if err := c.tiers.Prepare(key); err != nil {
-		return err
-	}
 	opts := "FORMAT parquet, COMPRESSION zstd"
 	if n := rowGroups[table]; n > 0 {
 		opts += fmt.Sprintf(", ROW_GROUP_SIZE %d", n)
 	}
+	read := readParquet
 	if id := tierKeyID(key); id != "" {
 		opts += ", ENCRYPTION_CONFIG " + encryptionConfig(id)
+		read = func(path string) string {
+			return "read_parquet(" + path + ", encryption_config = " + encryptionConfig(id) + ")"
+		}
 	}
-	return c.exec(ctx, conn, fmt.Sprintf("COPY (SELECT * FROM (%s) ORDER BY %s) TO %s (%s)",
-		query, sortOrder[table], sqlString(c.tiers.URL(key)), opts))
+	return c.put(ctx, conn, key, func(to string) string {
+		return fmt.Sprintf("COPY (SELECT * FROM (%s) ORDER BY %s) TO %s (%s)", query, sortOrder[table], to, opts)
+	}, read)
+}
+
+func readParquet(path string) string { return "read_parquet(" + path + ")" }
+
+// put writes an object of a tier so that its key only ever holds a whole
+// one: copySQL, the COPY to a quoted path, writes to a temporary key; the
+// object there must read back, through the FROM clause read returns for
+// the path, with as many rows as the COPY reported; only then is it moved
+// to key. A COPY that a deadline interrupts can still complete its upload,
+// unreadable, which at a tier's key would fail every later read of it;
+// here it lands at a temporary key that is deleted.
+func (c *compactor) put(ctx context.Context, conn *sql.Conn, key string, copySQL, read func(path string) string) error {
+	tmp := c.l.tmp(key)
+	err := c.putTmp(ctx, conn, tmp, copySQL, read)
+	if err == nil {
+		err = c.tiers.Move(ctx, tmp, key)
+	}
+	if err != nil {
+		// best effort, also after a deadline; the past pass deletes what
+		// this misses
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancel()
+		if derr := c.tiers.Delete(dctx, []string{tmp}); derr != nil {
+			c.log.Warn("delete temporary object", "key", tmp, "err", derr)
+		}
+		return fmt.Errorf("write %s: %w", key, err)
+	}
+	return nil
+}
+
+func (c *compactor) putTmp(ctx context.Context, conn *sql.Conn, tmp string, copySQL, read func(path string) string) error {
+	if err := c.tiers.Prepare(tmp); err != nil {
+		return err
+	}
+	path := sqlString(c.tiers.URL(tmp))
+	q := copySQL(path)
+	res, err := conn.ExecContext(ctx, q)
+	if err != nil {
+		return fmt.Errorf("%s: %w", firstLine(q), err)
+	}
+	wrote, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if c.copied != nil {
+		c.copied(tmp)
+	}
+	var n int64
+	if err := conn.QueryRowContext(ctx, "SELECT count(*) FROM "+read(path)).Scan(&n); err != nil {
+		return fmt.Errorf("read back %s: %w", tmp, err)
+	}
+	if n != wrote {
+		return fmt.Errorf("read back %s: %d rows, the COPY wrote %d", tmp, n, wrote)
+	}
+	return nil
+}
+
+// sweep deletes the tiers' temporary objects uploaded more than age before
+// now: what a job left that failed or was killed between its COPY and the
+// move, and whose own delete missed it. A job's own temporary object is
+// younger than its deadline, so age is JOB_TIMEOUT.
+func (c *compactor) sweep(ctx context.Context, now time.Time, age time.Duration) error {
+	var old []string
+	for _, p := range c.l.tmpPrefixes() {
+		objs, err := c.tiers.List(ctx, p)
+		if err != nil {
+			return err
+		}
+		for _, o := range objs {
+			if o.Modified.Before(now.Add(-age)) {
+				old = append(old, o.Key)
+			}
+		}
+	}
+	if len(old) == 0 {
+		return nil
+	}
+	if err := c.tiers.Delete(ctx, old); err != nil {
+		return err
+	}
+	c.log.Info("sweep", "deleted", len(old))
+	return nil
 }
 
 func (c *compactor) count(ctx context.Context, conn *sql.Conn, table string) (int64, error) {
@@ -171,6 +258,7 @@ type foldResult struct {
 	wrote   bool
 	deleted []string
 	rows    map[string]int64
+	raw     rawSummary // the hour's listing, less deleted
 }
 
 // fold folds one hour (compactor/README.md, "A fold of one hour"). listed
@@ -220,14 +308,21 @@ func (c *compactor) fold(ctx context.Context, h time.Time, listed []Object, now 
 			keys = append(keys, o.Key)
 		}
 		// The full read replaces the hour's objects, which repairs what
-		// incremental folds got wrong; but only while raw still holds every
-		// folded key. If some are gone (lifecycle), replacing would lose
-		// their rows, so it unions like an incremental fold.
+		// incremental folds got wrong; but only while raw still holds
+		// every key those objects may hold rows of. If a folded key is
+		// gone (lifecycle), or there is no sidecar to say which keys the
+		// objects hold (it expired, or the first fold crashed before it),
+		// replacing could lose rows, so it unions like an incremental fold.
 		union = false
 		for k := range folded {
 			if !inListing[k] {
 				union = true
 				break
+			}
+		}
+		if len(folded) == 0 {
+			if union, err = c.hasHourly(ctx, h); err != nil {
+				return r, err
 			}
 		}
 	} else {
@@ -280,7 +375,19 @@ func (c *compactor) fold(ctx context.Context, h time.Time, listed []Object, now 
 			r.deleted = del
 		}
 	}
+	r.raw = summarize(listed, r.deleted)
 	return r, nil
+}
+
+// hasHourly tells whether any of the hour's objects exists.
+func (c *compactor) hasHourly(ctx context.Context, h time.Time) (bool, error) {
+	for _, t := range append(foldTables, "pods") {
+		_, ok, err := c.locate(ctx, c.l.hourlyStem(t, h))
+		if ok || err != nil {
+			return ok, err
+		}
+	}
+	return false, nil
 }
 
 // foldKeys reads keys once, unions their rows with the hour's existing
@@ -382,10 +489,10 @@ func (c *compactor) writeFolded(ctx context.Context, conn *sql.Conn, key string,
 	if err := c.exec(ctx, conn, "SET VARIABLE folded_final = ["+strings.Join(finals, ", ")+"]::BOOLEAN[]"); err != nil {
 		return err
 	}
-	if err := c.tiers.Prepare(key); err != nil {
-		return err
-	}
-	return c.exec(ctx, conn, "COPY (SELECT * FROM (SELECT unnest(getvariable('folded_keys')) AS key, "+
-		"unnest(getvariable('folded_final')) AS final) ORDER BY key) TO "+sqlString(c.tiers.URL(key))+
-		" (FORMAT csv, HEADER true)")
+	return c.put(ctx, conn, key, func(to string) string {
+		return "COPY (SELECT * FROM (SELECT unnest(getvariable('folded_keys')) AS key, " +
+			"unnest(getvariable('folded_final')) AS final) ORDER BY key) TO " + to + " (FORMAT csv, HEADER true)"
+	}, func(path string) string {
+		return "read_csv(" + path + ", header = true, columns = {'key': 'VARCHAR', 'final': 'BOOLEAN'})"
+	})
 }

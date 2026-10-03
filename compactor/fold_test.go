@@ -1,6 +1,11 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -269,5 +274,159 @@ func TestExpiredSidecar(t *testing.T) {
 	}
 	if n := w.q("SELECT count(*) FROM read_csv(" + w.path(w.c.l.dailySidecar(day)) + ", header = true)"); n != 4 {
 		t.Fatalf("daily sidecar lists %d keys, want 4", n)
+	}
+}
+
+// slowCopy is a COPY that runs for minutes, writing all the while.
+func slowCopy(to string) string {
+	return "COPY (SELECT range AS i, md5(range::VARCHAR) || md5((range + 1)::VARCHAR) AS s FROM range(3000000000)) TO " +
+		to + " (FORMAT parquet, COMPRESSION zstd)"
+}
+
+// interruptWrite runs slowCopy to key until a deadline stops it mid-COPY.
+func interruptWrite(t *testing.T, c *compactor, key string, after time.Duration) {
+	t.Helper()
+	conn, err := c.conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), after)
+	defer cancel()
+	start := time.Now()
+	err = c.put(ctx, conn, key, slowCopy, readParquet)
+	if err == nil || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("an interrupted write: err %v after %s", err, time.Since(start))
+	}
+}
+
+// tmpLeft lists the tiers' temporary objects.
+func tmpLeft(t *testing.T, c *compactor) []Object {
+	t.Helper()
+	var out []Object
+	for _, p := range c.l.tmpPrefixes() {
+		objs, err := c.tiers.List(context.Background(), p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, objs...)
+	}
+	return out
+}
+
+// A write that its job's deadline interrupts mid-COPY leaves the hour's
+// object as it was, and the next fold goes on from it.
+func TestInterruptedWriteKeepsThePreviousObject(t *testing.T) {
+	w := newWorld(t)
+	w.putA()
+	w.putB()
+	w.fold(h10, during)
+	interruptWrite(t, w.c, tierName(w.c.l.hourlyStem("logs", h10), "").key, time.Second)
+	if n := w.hourlyRows("logs", h10); n != 11 {
+		t.Fatalf("after the interrupted write: %d logs rows, want the previous 11", n)
+	}
+	if left := tmpLeft(t, w.c); len(left) != 0 {
+		t.Fatalf("temporary objects left: %v", left)
+	}
+	w.putC()
+	if r := w.fold(h10, beforeG); r.keys != 1 || w.hourlyRows("logs", h10) != h10Logs {
+		t.Fatalf("the fold after it: %+v, %d logs rows", r, w.hourlyRows("logs", h10))
+	}
+}
+
+// A temporary object that does not read back whole is never moved to its
+// key: not an object, not the sidecar.
+func TestDamagedTemporaryObjectIsNotMoved(t *testing.T) {
+	w := newWorld(t)
+	w.putA()
+	w.fold(h10, h10.Add(5*time.Minute))
+	b := w.putB()
+	for _, damage := range []func(string) error{
+		func(p string) error { return os.Truncate(p, 0) },
+		func(p string) error {
+			fi, err := os.Stat(p)
+			if err != nil {
+				return err
+			}
+			return os.Truncate(p, fi.Size()-8)
+		},
+	} {
+		w.c.copied = func(tmp string) {
+			if err := damage(w.c.tiers.URL(tmp)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := w.c.fold(w.ctx, h10, nil, during); err == nil || !strings.Contains(err.Error(), "read back") {
+			t.Fatalf("fold of a damaged object: %v", err)
+		}
+		if n := w.hourlyRows("logs", h10); n != 5 {
+			t.Fatalf("logs rows %d, want the previous 5", n)
+		}
+		if _, ok := w.folded(h10)[b]; ok {
+			t.Fatal("committed a key whose objects did not read back")
+		}
+	}
+	w.c.copied = nil
+	if r := w.fold(h10, during); r.keys != 1 || w.hourlyRows("logs", h10) != 11 {
+		t.Fatalf("the fold after it: %+v", r)
+	}
+	if left := tmpLeft(t, w.c); len(left) != 0 {
+		t.Fatalf("temporary objects left: %v", left)
+	}
+}
+
+// The past pass deletes temporary objects older than JOB_TIMEOUT, which
+// a killed job leaves, and keeps younger ones, which a running job may own.
+func TestPastPassSweepsTemporaryObjects(t *testing.T) {
+	w := newWorld(t)
+	now := day.Add(30 * time.Hour)
+	put := func(key string, at time.Time) {
+		p := w.c.tiers.URL(key)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("PAR1"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stale := []string{w.c.l.tmp(tierName(w.c.l.hourlyStem("logs", h10), "").key), w.c.l.tmp(tierName(w.c.l.dailyStem("pods", day), "").key)}
+	fresh := w.c.l.tmp(tierName(w.c.l.hourlyStem("logs", h11), "").key)
+	for _, k := range stale {
+		put(k, now.Add(-2*time.Minute))
+	}
+	put(fresh, now.Add(-30*time.Second))
+	if !strings.HasPrefix(stale[1], "daily/"+testCluster+"/_tmp/") || !strings.HasSuffix(stale[1], ".tmp") {
+		t.Fatalf("temporary key %s", stale[1])
+	}
+	if err := w.c.past(w.ctx, now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if w.exists(stale[0]) || w.exists(stale[1]) || !w.exists(fresh) {
+		t.Fatalf("after the sweep: %v", tmpLeft(t, w.c))
+	}
+}
+
+// A full read with no sidecar but the hour's objects there (the sidecar
+// expired, a raw key too) unions with them: it cannot tell which keys the
+// objects hold rows of, so replacing them could drop rows.
+func TestFullReadWithoutSidecarKeepsTheObjectsRows(t *testing.T) {
+	w := newWorld(t)
+	a := w.putA()
+	w.putB()
+	w.putC()
+	w.fold(h10, afterG)
+	w.remove(w.c.l.hourlySidecar(h10), a)
+	r := w.fold(h10, afterG.Add(3*time.Hour))
+	if !r.full || !r.final || r.keys != 2 {
+		t.Fatalf("%+v, want the full read of the 2 keys left", r)
+	}
+	if n := w.hourlyRows("logs", h10); n != h10Logs {
+		t.Fatalf("logs rows %d, want %d: the expired key's rows kept", n, h10Logs)
+	}
+	if n := w.hourlyRows("podindex", h10); n != 3 {
+		t.Fatalf("podindex rows %d, want 3", n)
 	}
 }

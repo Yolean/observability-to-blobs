@@ -44,6 +44,8 @@ func TestConfigRefuses(t *testing.T) {
 		want string
 	}{
 		{map[string]string{"GRACE": "31m"}, "GRACE 31m0s: at most 30m0s"},
+		{map[string]string{"ROLLING_INTERVAL": "6m"}, "ROLLING_INTERVAL 6m0s: at most 5m0s"},
+		{map[string]string{"PAST_INTERVAL": "61m"}, "PAST_INTERVAL 1h1m0s: at most 1h0m0s"},
 		{map[string]string{"RAW_DELETE": "yes"}, "RAW_DELETE"},
 		{map[string]string{"CLUSTER_NAME": "a/b"}, "CLUSTER_NAME"},
 		{map[string]string{"S3_BUCKET": ""}, "S3_BUCKET is required"},
@@ -57,8 +59,9 @@ func TestConfigRefuses(t *testing.T) {
 			t.Errorf("%v: err %v, want %q", tc.env, err, tc.want)
 		}
 	}
-	c, err := parseConfig(envOf(map[string]string{"CLUSTER_NAME": "itest", "BLOBS_DIR": "/tmp/x", "GRACE": "30m", "RAW_DELETE": "after-final"}))
-	if err != nil || !c.rawDelete || c.grace != maxGrace {
+	c, err := parseConfig(envOf(map[string]string{"CLUSTER_NAME": "itest", "BLOBS_DIR": "/tmp/x", "GRACE": "30m",
+		"ROLLING_INTERVAL": "5m", "PAST_INTERVAL": "1h", "RAW_DELETE": "after-final"}))
+	if err != nil || !c.rawDelete || c.grace != maxGrace || c.rolling != maxRolling || c.past != maxPast {
 		t.Fatalf("a local directory needs no bucket: %v", err)
 	}
 }
