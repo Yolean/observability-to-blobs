@@ -24,7 +24,7 @@
 | Platforms | linux/amd64 and linux/arm64, one index digest |
 | Image | `ghcr.io/yolean/blobs-compactor:<UTC-seconds tag>@<digest>`, pinned in `deploy/release/kustomization.yaml` |
 
-## Spike results (2026-09-25, on this Mac with Docker 29.8)
+## Spike results (2026-09-25, on an arm64 Mac with Docker 29.8)
 
 A minimal `database/sql` program on duckdb-go v2.10505.0 showed:
 
@@ -49,7 +49,7 @@ A minimal `database/sql` program on duckdb-go v2.10505.0 showed:
   *build*. Images are exercised on their native arch.
 
 Not yet shown: that an Ubuntu amd64 host produces the same digests as
-this Mac. That is acceptance check 1 below.
+an arm64 Mac. That is acceptance check 1 below.
 
 ## The build script
 
@@ -113,8 +113,8 @@ docker run --rm --platform linux/<arch> --user "$(id -u):$(id -g)" \
   runtime check.
 - **The itest** (`test.sh`) calls `PLATFORMS=linux/<host arch>
   compactor/build.sh image target/images/compactor-oci` and loads the
-  result with `y-cluster images load`. That is arm64 on this Mac,
-  amd64 on Ubuntu and GHA. The pin check always builds both.
+  result with `y-cluster images load`. That is arm64 on an Apple
+  silicon Mac, amd64 on Ubuntu and GHA. The pin check always builds both.
 
 The image digest is a function of: go.mod/go.sum and the source, the
 builder digest, `build.env`'s httpfs hashes, and the base digest. The tag
@@ -497,15 +497,15 @@ before pushing, so the pushed digest is the pinned one. The job needs
 ## Acceptance checks
 
 1. `build.sh check` passes against one committed pin on an arm64 Mac
-   (done 2026-09-25), in GHA on `ubuntu-latest` (done, PR #9 on the
-   agents remote: amd64 native, arm64 emulated, the Mac's direction
-   reversed), and on an Ubuntu amd64 host (to do).
+   (done 2026-09-25), in GHA on `ubuntu-latest` (done: amd64 native,
+   arm64 emulated, the Mac's direction reversed), and on an Ubuntu amd64
+   host (to do).
 2. A cold `check` (empty cache volume, another checkout path) reproduces
-   the pin: done on the Mac; every GHA run is cold.
-3. `selftest` passes on both arches on native hosts: arm64 on the Mac,
+   the pin: done on an arm64 Mac; every GHA run is cold.
+3. `selftest` passes on both arches on native hosts: arm64 on a Mac,
    amd64 in GHA's `check`.
 4. The itest's compactor assertions pass with the image loaded into
-   y-cluster: done 2026-10-03 on this Mac (docker backend).
+   y-cluster: done 2026-10-03 on an arm64 Mac (docker backend).
 
 ## Open
 
