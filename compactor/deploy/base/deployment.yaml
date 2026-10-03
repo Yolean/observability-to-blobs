@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blobs-compactor
+spec:
+  # A single writer is a correctness requirement: folds are incremental,
+  # with their state in the bucket. Recreate keeps rollouts from
+  # overlapping two writers.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: blobs-compactor
+  template:
+    metadata:
+      labels:
+        app: blobs-compactor
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      # it talks to the bucket only, never to the API server
+      automountServiceAccountToken: false
+      # a stop lets the fold or rollup in flight finish
+      terminationGracePeriodSeconds: 300
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: compactor
+        image: ghcr.io/yolean/blobs-compactor
+        args: [run]
+        env:
+        - name: CLUSTER_NAME
+          value: dev
+        - name: S3_REGION
+          value: us-east-1
+        - name: S3_TLS
+          value: "on"
+        - name: ROLLING_INTERVAL
+          value: 2m
+        # at most 30m: with RAW_DELETE=after-final a raw object then lives
+        # under 2h from its upload
+        - name: GRACE
+          value: 10m
+        - name: PAST_INTERVAL
+          value: 1h
+        - name: RAW_DELETE
+          value: "off"
+        # threads set the request rate against the bucket
+        - name: DUCKDB_THREADS
+          value: "4"
+        - name: DUCKDB_HTTP_RETRIES
+          value: "5"
+        # bytes; DuckDB is given 75% of it
+        - name: DUCKDB_MEMORY_LIMIT
+          valueFrom:
+            resourceFieldRef:
+              containerName: compactor
+              resource: limits.memory
+        - name: DUCKDB_TEMP_DIRECTORY
+          value: /scratch
+        envFrom:
+        - secretRef:
+            name: blobs-compactor-s3
+        ports:
+        - name: metrics
+          containerPort: 9090
+        resources:
+          requests:
+            cpu: 250m
+            memory: 1Gi
+          limits:
+            memory: 4Gi
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]
+        volumeMounts:
+        - name: scratch
+          mountPath: /scratch
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      # DuckDB's spill when a fold or a rollup outgrows its memory
+      - name: scratch
+        emptyDir:
+          sizeLimit: 10Gi
+      - name: tmp
+        emptyDir:
+          sizeLimit: 64Mi

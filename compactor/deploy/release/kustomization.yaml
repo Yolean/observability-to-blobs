@@ -1,9 +1,11 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# The release pin, written by compactor/build.sh bump and asserted by
-# build.sh check. The tag is not in the binary: the digest moves only
-# when the image content does.
+# The release: the base with the pin, written by compactor/build.sh bump
+# and asserted by build.sh check. The tag is not in the binary: the digest
+# moves only when the image content does.
+resources:
+- ../base
 images:
 - name: ghcr.io/yolean/blobs-compactor
-  newTag: 20261003T063750Z
-  digest: sha256:a46706f796c18070adff116ca6b1c46c88530b98bf03e337b202ccace824527c
+  newTag: 20261003T070452Z
+  digest: sha256:f28129819a3038651d24a01156a639dd663379f7697d0b0e7d263f96ca6b5f64

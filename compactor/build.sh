@@ -90,6 +90,7 @@ httpfs() {
   local arch=${1#linux/} var
   var=HTTPFS_SHA256_linux_$arch
   log "httpfs $DUCKDB_VERSION linux_$arch"
+  # shellcheck disable=SC2016 # expanded by the builder's sh
   builder "$HOST_PLATFORM" sh -euc '
     gz=/cache/duckdb/$1/linux_$2/httpfs.duckdb_extension.gz
     if ! echo "$3  $gz" | sha256sum -c --status 2>/dev/null; then
@@ -168,9 +169,11 @@ bump() {
   cat > "$REPO/$PIN" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# The release pin, written by compactor/build.sh bump and asserted by
-# build.sh check. The tag is not in the binary: the digest moves only
-# when the image content does.
+# The release: the base with the pin, written by compactor/build.sh bump
+# and asserted by build.sh check. The tag is not in the binary: the digest
+# moves only when the image content does.
+resources:
+- ../base
 images:
 - name: $IMAGE_REPO
   newTag: $tag
@@ -186,6 +189,7 @@ publish() {
   tag=$(pinned newTag)
   log "push $IMAGE_REPO:$tag"
   BUILDER_ENV=(-e REGISTRY_USER -e REGISTRY_TOKEN -e "CRANE=$CRANE")
+  # shellcheck disable=SC2016 # expanded by the builder's sh
   builder "$HOST_PLATFORM" sh -euc '
     crane() { go run "github.com/google/go-containerregistry/cmd/crane@$CRANE" "$@"; }
     echo "$REGISTRY_TOKEN" | crane auth login "${3%%/*}" -u "$REGISTRY_USER" --password-stdin
