@@ -6,12 +6,13 @@
 #   ./test.sh            everything
 #   ./test.sh checks     checks and unit tests only
 #   ./test.sh itest      skip checks and unit tests
-#   ./test.sh up         provision the cluster and deploy the agent plus the
-#                        sample workloads, print how to look around; no
-#                        checks, no assertions, nothing purged.
+#   ./test.sh up         provision the cluster and deploy the agent, the
+#                        compactor and the sample workloads, print how to
+#                        look around; no checks, no assertions, nothing purged.
 #
 # Env:
-#   SKIP_BUILD=1         reuse target/images/node-agent.tar
+#   SKIP_BUILD=1         reuse target/images/node-agent.tar and
+#                        target/images/compactor-oci
 #   IMAGE_REF=ref        load a published image instead of building
 #   CLUSTER_CONFIG=dir   y-cluster config dir (default: itest/cluster/qemu with
 #                        /dev/kvm, itest/cluster/docker otherwise)
@@ -47,7 +48,7 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
   need go "https://go.dev/dl/"
   need shellcheck "https://github.com/koalaman/shellcheck"
   phase "checks: shell"
-  shellcheck test.sh
+  shellcheck -x -P SCRIPTDIR test.sh compactor/build.sh
 
   for mod in images/fluentbit/plugins/cri_scrape images/blobs-to-prometheus tools/rules-manifest; do
     phase "checks: go ($mod)"
@@ -64,6 +65,8 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
   kubectl kustomize agent >/dev/null
   kubectl kustomize itest/k8s >/dev/null
   kubectl kustomize itest/k8s-docker >/dev/null
+  kubectl kustomize compactor/deploy/release >/dev/null
+  kubectl kustomize itest/compactor >/dev/null
 fi
 
 [ "$MODE" != checks ] || exit 0
@@ -91,6 +94,17 @@ else
   docker buildx build "${build_args[@]}" \
     --output "type=oci,dest=target/images/node-agent.tar,name=docker.io/library/$IMAGE" \
     images/fluentbit
+fi
+
+# The compactor's image comes from its own build script, for this host's
+# arch only (compactor/README.md, "The build script"); the release pin is
+# build.sh check's business, not the itest's.
+COMPACTOR_IMAGE=ghcr.io/yolean/blobs-compactor:build
+phase "image: build $COMPACTOR_IMAGE"
+if [ "${SKIP_BUILD:-}" = 1 ] && [ -f target/images/compactor-oci/index.json ]; then
+  echo "SKIP_BUILD=1, reusing target/images/compactor-oci"
+else
+  PLATFORMS="linux/$(docker version --format '{{.Server.Arch}}')" compactor/build.sh image target/images/compactor-oci
 fi
 
 # --------------------------------------------------------------- cluster --
@@ -130,6 +144,8 @@ if [ -n "${IMAGE_REF:-}" ]; then
 else
   y-cluster images load --context "$CONTEXT" ./target/images/node-agent.tar
 fi
+y-cluster ctr --context "$CONTEXT" -- -n k8s.io images rm "$COMPACTOR_IMAGE" </dev/null >/dev/null 2>&1 || true
+y-cluster images load --context "$CONTEXT" ./target/images/compactor-oci
 
 phase "cluster: apply"
 # bare test pods are immutable in most fields; on a reused cluster a changed
@@ -152,11 +168,13 @@ $KUBECTL -n observability rollout status daemonset/node-agent --timeout=180s >/d
 # the user's data: leave it alone.
 if [ "$MODE" != up ]; then
 phase "cluster: purge bucket prefix from earlier runs"
+# the compactor writes hourly/ and daily/: stop it first, its pod gone
+$KUBECTL -n observability delete deployment blobs-compactor --ignore-not-found --cascade=foreground >/dev/null
 $KUBECTL delete pod purge-bucket --ignore-not-found >/dev/null 2>&1
 $KUBECTL run purge-bucket --restart=Never --image=amazon/aws-cli:2.22.35 \
   --env=AWS_ACCESS_KEY_ID=demoaccess --env=AWS_SECRET_ACCESS_KEY=demosecret \
   --env=AWS_DEFAULT_REGION=us-east-1 \
-  --command -- aws --endpoint-url http://versitygw:7070 s3 rm --recursive --quiet "s3://$BUCKET/raw1/$CLUSTER" >/dev/null
+  --command -- sh -ec "for p in raw1 hourly daily; do aws --endpoint-url http://versitygw:7070 s3 rm --recursive --quiet s3://$BUCKET/\$p/$CLUSTER; done" >/dev/null
 # a failed purge leaves the old corpus under every assertion: stop on it
 deadline=$((SECONDS + 600))
 while :; do
@@ -167,7 +185,7 @@ while :; do
 done
 if [ "$purge" != Succeeded ]; then
   $KUBECTL logs pod/purge-bucket >&2 || true
-  fail "could not purge s3://$BUCKET/raw1/$CLUSTER (pod/purge-bucket $purge, logs above)"
+  fail "could not purge s3://$BUCKET/{raw1,hourly,daily}/$CLUSTER (pod/purge-bucket $purge, logs above)"
 fi
 $KUBECTL delete pod purge-bucket >/dev/null
 
@@ -183,10 +201,16 @@ $KUBECTL -n observability rollout status daemonset/node-agent --timeout=180s
 $KUBECTL rollout status deployment/log-generator --timeout=120s
 $KUBECTL wait pod/metrics-multi pod/metrics-numeric pod/metrics-optout --for=condition=Ready --timeout=120s
 
+# The compactor folds the bucket from here on. Its tag is fixed too, so a
+# restart moves it onto the image just loaded.
+$KUBECTL apply -k itest/compactor
+$KUBECTL -n observability rollout restart deployment/blobs-compactor >/dev/null
+$KUBECTL -n observability rollout status deployment/blobs-compactor --timeout=120s
+
 if [ "$MODE" = up ]; then
   cat <<INFO
 
-The agent and the sample workloads are running.
+The agent, the compactor and the sample workloads are running.
 
   export KUBECONFIG=$PWD/itest/cluster/kubeconfig
   kubectl --context=$CONTEXT get pods -A
@@ -198,6 +222,11 @@ a view per table over it:
 
   S3_ENDPOINT=127.0.0.1:$S3_PORT local/blobs.sh -c "SELECT \"table\", count(*) FROM raw GROUP BY 1"
   local/blobs.sh $CLUSTER/\$(date -u +%Y-%m-%d/%H)            # one hour, interactive
+
+The compactor folds the raw objects into hourly/$CLUSTER/ every 20 s
+(local/blobs.sh adds views over that tier once it exists):
+
+  kubectl --context=$CONTEXT -n observability logs deploy/blobs-compactor -f
 
 Tear everything down with:
 
@@ -266,13 +295,19 @@ done
 # compactor and local/blobs.sh read from the same .sql files, so the
 # column contract lives in exactly one place (compactor/sql/raw.sql).
 INIT=$(mktemp "${TMPDIR:-/tmp}/itest.XXXXXX")
-trap 'rm -f "$INIT"' EXIT
-cat >"$INIT" <<SQL
+INIT_S3=$INIT.s3 SCOPED=$INIT.scoped SNAPSHOT=$INIT.raw.csv
+trap 'rm -f "$INIT" "$INIT_S3" "$SCOPED" "$SNAPSHOT"' EXIT
+cat >"$INIT_S3" <<SQL
 .output /dev/null
 INSTALL httpfs; LOAD httpfs; SET TimeZone='UTC';
 SET s3_region='us-east-1'; SET s3_endpoint='127.0.0.1:$S3_PORT';
 SET s3_access_key_id='demoaccess'; SET s3_secret_access_key='demosecret';
 SET s3_use_ssl=false; SET s3_url_style='path';
+.output
+SQL
+cat >"$INIT" <<SQL
+.read $INIT_S3
+.output /dev/null
 SET VARIABLE raw_files = 's3://$BUCKET/raw1/$CLUSTER/*/*/*/*.jsonl.zst';
 .read $PWD/compactor/sql/raw.sql
 .read $PWD/compactor/sql/tables.sql
@@ -287,7 +322,8 @@ NOW="date_trunc('minute', now() AT TIME ZONE 'UTC')"
 
 # .read via -c rather than -init: -init prints a banner with an ANSI reset
 # that lands in front of the first value line
-q() { duckdb -noheader -csv -c ".read $INIT" -c "$1" 2>&1; }
+# (QINIT names another init, scoped() below)
+q() { duckdb -noheader -csv -c ".read ${QINIT:-$INIT}" -c "$1" 2>&1; }
 show() { duckdb -c ".read $INIT" -c "$1" 2>&1; }
 
 ERRORS=0
@@ -485,6 +521,110 @@ assert "agent self metrics arrive via the static target" \
   "SELECT count(*) > 0 FROM metrics WHERE job = 'node' AND name LIKE 'fluentbit_%' AND pod LIKE 'node-agent-%'"
 assert "healthy targets are scraped about every 15s" \
   "SELECT bool_and(coalesce(n, 0) BETWEEN 3 AND 5) FROM $MINUTES LEFT JOIN (SELECT date_trunc('minute', time) AS m, count(*) AS n FROM metrics WHERE pod = 'metrics-multi' AND container = 'app' AND name = 'up' AND time > $SINCE + INTERVAL 3 MINUTE AND time < $NOW - INTERVAL 2 MINUTE GROUP BY m) USING (m)"
+
+# -------------------------------------------------------------- compactor --
+
+phase "assert: compactor"
+# The raw keys now. Once the compactor has folded each of them it is
+# stopped, so the comparisons below see a quiet bucket; a stop lets the
+# fold in flight commit.
+FOLDED="read_csv('s3://$BUCKET/hourly/$CLUSTER/_folded/*/*.csv', header = true, columns = {'key': 'VARCHAR', 'final': 'BOOLEAN'})"
+RAW_KEYS="glob('s3://$BUCKET/raw1/$CLUSTER/*/*/*/*.jsonl.zst')"
+q "COPY (SELECT file FROM $RAW_KEYS) TO '$SNAPSHOT' (FORMAT csv, HEADER true)" >/dev/null
+deadline=$((SECONDS + 420))
+while :; do
+  n=$(q "SELECT count(*) FROM read_csv('$SNAPSHOT', header = true) WHERE file NOT IN (SELECT 's3://$BUCKET/' || key FROM $FOLDED)" | tr -d '[:space:]' || true)
+  echo "  raw keys not folded yet: $n"
+  [ "$n" != 0 ] || break
+  if [ $SECONDS -ge $deadline ]; then
+    $KUBECTL -n observability logs deploy/blobs-compactor --tail=40 || true
+    fail "the compactor has not folded every raw key after 420s"
+  fi
+  sleep 10
+done
+$KUBECTL -n observability scale deployment/blobs-compactor --replicas=0 >/dev/null
+deadline=$((SECONDS + 330))
+while [ -n "$($KUBECTL -n observability get pods -l app=blobs-compactor -o name)" ]; do
+  [ $SECONDS -lt $deadline ] || fail "the compactor's pod is still there 330s after scaling to 0"
+  sleep 2
+done
+
+assert "the compactor's own metrics reach the blobs through the agent's scrape" \
+  "SELECT count(*) > 0 FROM metrics WHERE pod LIKE 'blobs-compactor-%' AND name = 'blobs_compactor_last_success_timestamp_seconds'"
+assert "every raw key in the bucket before the stop is listed in its hour's sidecar" \
+  "SELECT count(*) = 0 FROM read_csv('$SNAPSHOT', header = true) s WHERE NOT EXISTS (SELECT 1 FROM $FOLDED f WHERE 's3://$BUCKET/' || f.key = s.file AND regexp_extract(f.key, '^raw1/[^/]+/([0-9-]+/[0-9]{2})/', 1) = regexp_extract(s.file, '/raw1/[^/]+/([0-9-]+/[0-9]{2})/', 1))"
+assert "the sidecars list only keys the raw tier has" \
+  "SELECT count(*) = 0 FROM $FOLDED WHERE 's3://$BUCKET/' || key NOT IN (SELECT file FROM $RAW_KEYS)"
+
+# scoped <file glob of sidecars>: an init whose raw views read exactly the
+# raw keys those sidecars list
+scoped() {
+  cat >"$SCOPED" <<SQL
+.read $INIT_S3
+.output /dev/null
+SET VARIABLE raw_files = (SELECT list(DISTINCT 's3://$BUCKET/' || key) FROM read_csv('s3://$BUCKET/hourly/$CLUSTER/_folded/$1', header = true, columns = {'key': 'VARCHAR', 'final': 'BOOLEAN'}));
+.read $PWD/compactor/sql/raw.sql
+.read $PWD/compactor/sql/tables.sql
+.output
+SQL
+}
+DISTINCT_RAW="(SELECT count(*) FROM (SELECT DISTINCT * EXCLUDE (filename) FROM logs)) AS logs,
+  (SELECT count(*) FROM (SELECT DISTINCT * EXCLUDE (filename) FROM metrics)) AS metrics,
+  (SELECT count(*) FROM (SELECT DISTINCT * EXCLUDE (filename) FROM podindex)) AS podindex"
+for hour in $(q "SELECT regexp_extract(file, '_folded/(.*)\\.csv\$', 1) FROM glob('s3://$BUCKET/hourly/$CLUSTER/_folded/*/*.csv') ORDER BY 1"); do
+  scoped "$hour.csv"
+  QINIT=$SCOPED assert "hourly $hour: logs, metrics and podindex hold the distinct rows of the raw keys its sidecar lists" \
+    "SELECT r.logs = (SELECT count(*) FROM read_parquet('s3://$BUCKET/hourly/$CLUSTER/logs/$hour.parquet'))
+        AND r.metrics = (SELECT count(*) FROM read_parquet('s3://$BUCKET/hourly/$CLUSTER/metrics/$hour.parquet'))
+        AND r.podindex = (SELECT count(*) FROM read_parquet('s3://$BUCKET/hourly/$CLUSTER/podindex/$hour.parquet'))
+        AND r.logs > 0
+     FROM (SELECT $DISTINCT_RAW) r"
+done
+assert "hourly pods: the three incarnations of 'reused', each its own row" \
+  "SELECT count(DISTINCT pod_uid) = 3 FROM read_parquet('s3://$BUCKET/hourly/$CLUSTER/pods/*/*.parquet') WHERE pod = 'reused' AND container = 'reused'"
+
+# the day of the latest folded hour; the rollup runs as the only writer
+DAY=$(q "SELECT max(regexp_extract(file, '_folded/([0-9-]+)/', 1)) FROM glob('s3://$BUCKET/hourly/$CLUSTER/_folded/*/*.csv')" | tr -d '[:space:]')
+echo "  rollup $DAY"
+$KUBECTL -n observability delete pod compactor-rollup --ignore-not-found >/dev/null 2>&1
+$KUBECTL -n observability run compactor-rollup --restart=Never --image="$COMPACTOR_IMAGE" --overrides="{
+  \"apiVersion\": \"v1\", \"spec\": {\"automountServiceAccountToken\": false, \"containers\": [{
+    \"name\": \"compactor-rollup\", \"image\": \"$COMPACTOR_IMAGE\", \"imagePullPolicy\": \"Never\",
+    \"args\": [\"rollup\", \"$DAY\"], \"envFrom\": [{\"secretRef\": {\"name\": \"blobs-compactor-s3\"}}],
+    \"env\": [{\"name\": \"CLUSTER_NAME\", \"value\": \"$CLUSTER\"}, {\"name\": \"S3_BUCKET\", \"value\": \"$BUCKET\"},
+      {\"name\": \"S3_ENDPOINT\", \"value\": \"versitygw.default.svc.cluster.local:7070\"}, {\"name\": \"S3_TLS\", \"value\": \"off\"}]}]}}" >/dev/null
+deadline=$((SECONDS + 300))
+while :; do
+  rollup=$($KUBECTL -n observability get pod compactor-rollup -o jsonpath='{.status.phase}')
+  case "$rollup" in (Succeeded|Failed) break;; esac
+  [ $SECONDS -lt $deadline ] || fail "compactor-rollup still $rollup after 300s"
+  sleep 3
+done
+$KUBECTL -n observability logs pod/compactor-rollup | tail -n 3
+if [ "$rollup" = Succeeded ]; then
+  echo "  PASS: blobs-compactor rollup $DAY"
+else
+  echo "  FAIL: blobs-compactor rollup $DAY ($rollup, logs above)" >&2; ERRORS=$((ERRORS + 1))
+fi
+$KUBECTL -n observability delete pod compactor-rollup >/dev/null
+
+scoped "$DAY/*.csv"
+QINIT=$SCOPED assert "daily $DAY: logs, metrics and podindex hold the distinct rows of the day's folded raw keys" \
+  "SELECT r.logs = (SELECT count(*) FROM read_parquet('s3://$BUCKET/daily/$CLUSTER/logs/$DAY/*/*.parquet'))
+      AND r.metrics = (SELECT count(*) FROM read_parquet('s3://$BUCKET/daily/$CLUSTER/metrics/$DAY/*/*.parquet'))
+      AND r.podindex = (SELECT count(*) FROM read_parquet('s3://$BUCKET/daily/$CLUSTER/podindex/$DAY.parquet'))
+      AND r.logs > 0
+   FROM (SELECT $DISTINCT_RAW) r"
+assert "daily $DAY: a namespace's logs are one object, found by its hive key" \
+  "SELECT count(*) = 1 AND bool_and(namespace = 'default') FROM (SELECT DISTINCT namespace, filename FROM read_parquet('s3://$BUCKET/daily/$CLUSTER/logs/$DAY/*/*.parquet', hive_partitioning = true, filename = true) WHERE namespace = 'default')"
+assert "daily $DAY: the sidecar lists every key of the day's hourly sidecars" \
+  "SELECT (SELECT list(key ORDER BY key) FROM read_csv('s3://$BUCKET/daily/$CLUSTER/_folded/$DAY.csv.zst', header = true))
+        = (SELECT list(DISTINCT key ORDER BY key) FROM read_csv('s3://$BUCKET/hourly/$CLUSTER/_folded/$DAY/*.csv', header = true))"
+assert "daily pods: the three incarnations of 'reused', one row each with its one line and exit 0" \
+  "SELECT count(*) = 3 AND count(DISTINCT pod_uid) = 3 AND bool_and(lines = 1) AND bool_and(exit_code = 0)
+     AND count(*) FILTER (phase = 'succeeded') >= 2
+   FROM read_parquet('s3://$BUCKET/daily/$CLUSTER/pods/$DAY.parquet') WHERE pod = 'reused' AND container = 'reused'"
+$KUBECTL -n observability scale deployment/blobs-compactor --replicas=1 >/dev/null
 
 echo
 if [ "$ERRORS" -gt 0 ]; then
