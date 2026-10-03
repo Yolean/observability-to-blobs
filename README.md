@@ -73,7 +73,9 @@ input chunks.
 ./test.sh up         # provision + deploy the agent, the compactor and sample workloads, no tests
 ```
 
-Needs docker, go, kubectl, shellcheck, duckdb and
+Needs go, kubectl, shellcheck, duckdb, docker (or, without docker, `buildctl`:
+`IMAGE_BUILDER` in `test.sh` builds the image with a rootless BuildKit in the
+itest cluster) and
 [y-cluster](https://github.com/Yolean/y-cluster/releases). With `/dev/kvm`
 the itest node is a qemu VM (Ubuntu, systemd, containerd: node logs and CRI
 discovery behave as in production); otherwise k3s-in-docker, which has no

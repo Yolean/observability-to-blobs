@@ -44,6 +44,20 @@ KUBECTL="kubectl --context=$CONTEXT"
 MODE=${1:-all}
 case "$MODE" in (all|checks|itest|up) ;; (*) echo "usage: $0 [checks|itest|up]" >&2; exit 2;; esac
 
+# one exit trap for the whole script: a second `trap ... EXIT` replaces the
+# first, which would leave the BuildKit port-forward running
+BUILDKIT_PF=""
+INIT=""
+# the port-forwards to the logs API (logs_forward below)
+LOGS_PF_PIDS=()
+cleanup() {
+  [ -z "$BUILDKIT_PF" ] || kill "$BUILDKIT_PF" 2>/dev/null || true
+  [ ${#LOGS_PF_PIDS[@]} -eq 0 ] || kill "${LOGS_PF_PIDS[@]}" 2>/dev/null || true
+  # the assertions' temporary files, all named after INIT
+  [ -z "$INIT" ] || rm -f "$INIT" "$INIT".*
+}
+trap cleanup EXIT
+
 phase() { printf '\n==> %s\n' "$*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 need() {
@@ -169,7 +183,6 @@ cluster_builder() {
   $KUBECTL -n itest-buildkit rollout status deployment/buildkitd --timeout=300s
   $KUBECTL -n itest-buildkit port-forward deployment/buildkitd 18234:1234 >/dev/null 2>&1 &
   BUILDKIT_PF=$!
-  trap 'kill $BUILDKIT_PF 2>/dev/null || true' EXIT
   export BUILDKIT_HOST=tcp://127.0.0.1:18234
   for _ in $(seq 1 30); do buildctl debug workers >/dev/null 2>&1 && return 0; sleep 1; done
   fail "BuildKit in $CONTEXT does not answer on $BUILDKIT_HOST"
@@ -482,10 +495,6 @@ umask 077  # the S3 secret and the parquet keys go into files below
 INIT=$(mktemp "${TMPDIR:-/tmp}/itest.XXXXXX")
 INIT_S3=$INIT.s3 SCOPED=$INIT.scoped SNAPSHOT=$INIT.raw.csv PODS_BEFORE=$INIT.pods.parquet ROTATED=$INIT.rotated.csv
 LOGS_HDR=$INIT.logs.headers LOGS_OUT=$INIT.logs.body
-# the port-forwards to the logs API (logs_forward below)
-LOGS_PF_PIDS=()
-trap 'rm -f "$INIT" "$INIT_S3" "$SCOPED" "$SNAPSHOT" "$PODS_BEFORE" "$ROTATED" "$LOGS_HDR" "$LOGS_OUT"
-  [ ${#LOGS_PF_PIDS[@]} -eq 0 ] || kill "${LOGS_PF_PIDS[@]}" 2>/dev/null || true' EXIT
 cat >"$INIT_S3" <<SQL
 .output /dev/null
 INSTALL httpfs; LOAD httpfs; SET TimeZone='UTC';
