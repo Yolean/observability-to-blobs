@@ -229,7 +229,7 @@ stops delivery and makes uploads fail.
 - **Gap:** the service stopped for longer than the heartbeat interval (130 s); the heartbeat's
   counter continues and its time shows the gap, the counter goes up by one within a boot and never
   repeats, and the reboot starts a new boot id and the counter at 1. A line logged while the service
-  was stopped arrives once after the start, and so does the service's own stop.
+  was stopped arrives once after the start, and the service's own stop record arrives as well.
 - **Put only:** the agent works with a key allowed nothing but PutObject on its root, and the
   gateway's request log shows nothing but PutObject answered 200 from it, all under the root: no
   list, read, head or delete, no multipart upload, no denied request.

@@ -167,10 +167,13 @@ SET VARIABLE raw_files = 's3://$BUCKET/$KEY_ROOT/$CLUSTER/*/*/*/*.jsonl.zst';
 .output
 SQL
 RAW_OBJECTS="read_json_objects('s3://$BUCKET/$KEY_ROOT/$CLUSTER/*/*/*/*.jsonl.zst', format='newline_delimited', compression='zstd')"
-q() { pf_ensure; duckdb -noheader -csv -c ".read $INIT" -c "$1" 2>&1; }
+# q runs in command substitutions (a subshell), so the forward is renewed
+# by the callers, in this shell, where PF_PID is remembered and stopped at exit
+q() { duckdb -noheader -csv -c ".read $INIT" -c "$1" 2>&1; }
 ERRORS=0
 assert() { # assert <description> <sql returning a single truthy value>
   local out
+  pf_ensure
   out=$(q "$2" | tr -d '[:space:]' || true)
   if [ "$out" = true ] || [ "$out" = 1 ]; then
     echo "  PASS: $1"
@@ -186,6 +189,7 @@ check() { # check <description> <command...>: passes when the command succeeds
 wait_for() { # wait_for <description> <seconds> <sql returning true when it is time>
   local deadline=$((SECONDS + $2)) out
   while :; do
+    pf_ensure
     out=$(q "$3" | tr -d '[:space:]' || true)
     case "$out" in (true|1) return 0;; esac
     [ $SECONDS -lt $deadline ] || { echo "  FAIL: gave up waiting for $1 after $2 s (got: $out)" >&2; ERRORS=$((ERRORS + 1)); return 1; }
@@ -326,6 +330,7 @@ DELETE
 # the audit log only that a login failed (the name is hidden)
 SURV_SQL="SELECT (SELECT count(*) FROM logs WHERE stream = 'journal' AND message LIKE '%itest-surv-$RUN%') >= 1 AND (SELECT count(*) FROM logs WHERE unit = '/var/log/audit/audit.log' AND message LIKE 'type=USER_LOGIN%res=failed%' AND time > to_timestamp($SURV_T0)::TIMESTAMP) >= 1"
 wait_for "the failed login in the bucket" 180 "$SURV_SQL" || true
+pf_ensure
 SURV_KEY=$(q "SELECT any_value(regexp_replace(filename, '^s3://$BUCKET', '')) FROM logs WHERE message LIKE '%itest-surv-$RUN%' AND stream = 'journal'" | tr -d '[:space:]')
 SURV_T1=$(rec_log | jq -rs --arg key "/$BUCKET$SURV_KEY" '[.[] | select(.path == $key and .status == 200) | .t] | first // empty')
 if [ -n "$SURV_T1" ]; then
@@ -422,6 +427,7 @@ wait_for "the event to arrive after the failed attempts" 240 \
 # ---------------------------------------------------------------- assert --
 
 phase "assert: the bucket"
+pf_ensure
 q "SELECT filename, \"table\", count(*) AS lines FROM raw GROUP BY ALL ORDER BY filename, \"table\"" | tail -n 12 | sed 's/^/  /'
 show_rec() { rec_log | jq -r '[.t, .method, .status, .md5_header, .md5_ok, .path] | @tsv' | tail -n 12 | sed 's/^/  /'; }
 show_rec
