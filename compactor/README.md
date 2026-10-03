@@ -383,10 +383,17 @@ Further rules:
   every past day that has hourly sidecars for a rollup, which does
   nothing unless an hour has keys the daily sidecar lacks.
 - `GRACE` (default 10m) is how long after its end an hour waits for its
-  last uploads before the full read. It is refused above 30m: with raw
-  deletion on, an hour's raw objects go at its final fold, so a raw
-  object lives at most about 1h + `GRACE` + `ROLLING_INTERVAL` + one fold
-  from its upload, and 30m keeps that under 2h.
+  last uploads before the full read.
+- The configuration refuses `GRACE` above 30m, `ROLLING_INTERVAL` above
+  5m and `PAST_INTERVAL` above 1h. With raw deletion on, an hour's raw
+  objects go at its final fold, the first rolling tick after
+  H+1h+`GRACE`, so a raw object lives at most 1h + `GRACE` +
+  `ROLLING_INTERVAL` from its upload, 1h35m, plus that fold; a late key,
+  one that arrives after its hour is final, goes at the next past pass,
+  at most `PAST_INTERVAL` plus that pass. Both stay under 2h while a fold
+  takes under 25m, and when one does not, the raw-age alert says so.
+  `ROLLING_INTERVAL` at most 5m also keeps the rolling alert (600 s
+  without a success) quiet between healthy passes.
 
 State lives only in the bucket, so every start, whether an upgrade, a
 drain or an OOM kill, is an ordinary tick. A SIGTERM ends a pass between
@@ -404,9 +411,10 @@ has committed, the raw keys its sidecar lists are deleted; a late key in
 a final hour is deleted once the fold that took it has committed. A key
 that no committed sidecar lists is never deleted, and nothing is deleted
 by age. A deletion that a crash interrupted resumes at the hour's next
-fold. A raw object then normally lives under 2h from its upload (a late
-one under `PAST_INTERVAL` plus a fold), and `blobs_compactor_raw_oldest_age_seconds`
-is what an alert on that bound reads. The secret then needs delete on
+fold. A raw object then lives under 2h from its upload, a bound the
+configuration enforces (above, "The loop"), and
+`blobs_compactor_raw_oldest_age_seconds` is what an alert on that bound
+reads. The secret then needs delete on
 `raw1/`; lifecycle rules still bound everything else.
 
 ## Manifests
@@ -428,7 +436,8 @@ is what an alert on that bound reads. The secret then needs delete on
 - env, set by overlays where the base has none: `CLUSTER_NAME` (as the
   agent names it), `S3_BUCKET`, `S3_ENDPOINT` (host:port; a scheme is
   stripped), `S3_REGION` (us-east-1), `S3_TLS` (on), `ROLLING_INTERVAL`
-  (2m), `GRACE` (10m, at most 30m), `PAST_INTERVAL` (1h), `RAW_DELETE`
+  (2m, at most 5m), `GRACE` (10m, at most 30m), `PAST_INTERVAL` (1h, at
+  most 1h), `RAW_DELETE`
   (off), `DUCKDB_THREADS` (4), `DUCKDB_HTTP_RETRIES` (5). Not in the base,
   with their defaults: `JOB_TIMEOUT` (30m), `METRICS_ADDR` (:9090), and
   `BLOBS_DIR`, a local directory in place of the bucket.

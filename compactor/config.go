@@ -9,12 +9,20 @@ import (
 	"time"
 )
 
-// maxGrace bounds GRACE. With RAW_DELETE=after-final an hour's raw objects
-// go once its final fold commits, at the first tick after H+1h+GRACE, so a
-// raw object lives at most about 1h + GRACE + ROLLING_INTERVAL + one fold
-// from its upload. 30m keeps that under 2h, the bound the raw-age alert
-// can then use.
-const maxGrace = 30 * time.Minute
+// The cadence's bounds. With RAW_DELETE=after-final an hour's raw objects
+// go once its final fold commits, at the first rolling tick after
+// H+1h+GRACE, so a raw object lives at most 1h + GRACE + ROLLING_INTERVAL
+// plus one fold from its upload: at most 1h35m plus the fold. A late key,
+// one that arrives after its hour is final, goes at the next past pass:
+// PAST_INTERVAL plus that pass. Both stay under 2h, the bound the raw-age
+// alert reads, while a fold takes under 25m. ROLLING_INTERVAL at most 5m
+// also keeps the rolling alert (10m without a success) from firing between
+// two healthy passes.
+const (
+	maxGrace   = 30 * time.Minute
+	maxRolling = 5 * time.Minute
+	maxPast    = time.Hour
+)
 
 // config is the compactor's environment (compactor/README.md, "Manifests").
 type config struct {
@@ -99,8 +107,13 @@ func parseConfig(env func(string) string) (config, error) {
 			return c, fmt.Errorf("%s %s: must be positive", d.name, *d.dst)
 		}
 	}
-	if c.grace > maxGrace {
-		return c, fmt.Errorf("GRACE %s: at most %s, so that with RAW_DELETE=after-final a raw object is deleted within 2h of its upload", c.grace, maxGrace)
+	for _, b := range []struct {
+		name     string
+		v, limit time.Duration
+	}{{"GRACE", c.grace, maxGrace}, {"ROLLING_INTERVAL", c.rolling, maxRolling}, {"PAST_INTERVAL", c.past, maxPast}} {
+		if b.v > b.limit {
+			return c, fmt.Errorf("%s %s: at most %s, so that with RAW_DELETE=after-final a raw object is deleted within 2h of its upload", b.name, b.v, b.limit)
+		}
 	}
 	switch get("RAW_DELETE", "off") {
 	case "off":

@@ -41,10 +41,10 @@ spec:
           value: us-east-1
         - name: S3_TLS
           value: "on"
+        # at most 5m, 30m and 1h: with RAW_DELETE=after-final a raw object
+        # then lives under 2h from its upload (compactor/README.md, "The loop")
         - name: ROLLING_INTERVAL
           value: 2m
-        # at most 30m: with RAW_DELETE=after-final a raw object then lives
-        # under 2h from its upload
         - name: GRACE
           value: 10m
         - name: PAST_INTERVAL
