@@ -444,9 +444,15 @@ reader. Encryption is on when `PARQUET_KEY_ID` is set: the id of the key
 new objects get, which must have a file (the compactor will not start
 otherwise). Writing encrypted Parquet needs httpfs's crypto (without it
 DuckDB's is read-only), so the compactor loads httpfs whenever
-`PARQUET_KEY_ID` is set, also with `BLOBS_DIR`, and at start writes and
-reads back one encrypted object in scratch. A key's content never changes;
-a new key is a new id.
+`PARQUET_KEYS_DIR` is set, also with `BLOBS_DIR` and without an active key
+(encrypted objects are still rewritten under their keys), and at start
+writes and reads back one encrypted object in scratch. A key's content
+never changes; a new key is a new id. The key check decrypts one stored
+object per key id, so a key file whose content changed under the same id
+refuses folds like a missing one, instead of failing every fold of its
+hours. Rows the engine spills to `temp_directory` during a fold are not
+encrypted: the scratch volume holds decrypted data while a job runs, so
+give it the protection the node's disks have.
 
 **Layout.** The key id is in the object's name, so that a reader can
 select one key's objects with a glob, and the tier stays the first prefix

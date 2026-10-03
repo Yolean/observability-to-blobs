@@ -45,7 +45,8 @@ GLOB="$PREFIX"
 while [ "$depth" -lt 3 ]; do GLOB="$GLOB/*"; depth=$((depth + 1)); done
 GLOB="$GLOB/*.jsonl.zst"
 
-INIT=$(mktemp "${TMPDIR:-/tmp}/blobs.XXXXXX")  # 0600; the only place the secret and the keys are written
+umask 077  # $INIT and its siblings hold the secret and the keys
+INIT=$(mktemp "${TMPDIR:-/tmp}/blobs.XXXXXX")
 trap 'rm -f "$INIT" "$INIT.probe" "$INIT.visible"' EXIT INT TERM
 
 # The secret and the variables; the views come from the .sql files.
@@ -90,7 +91,10 @@ fi
 # has no view.
 sources=$(duckdb -noheader -csv -c ".output /dev/null" -c ".read $INIT.probe" -c ".output" \
   -c "SELECT DISTINCT regexp_extract(file, '/hourly/[^/]+/([^/]+)/', 1), regexp_extract(file, '\.k-([a-z0-9-]+)\.parquet\$', 1)
-      FROM glob(getvariable('hourly_prefix') || '/*/*/*.parquet') ORDER BY ALL" 2>/dev/null) || sources=
+      FROM glob(getvariable('hourly_prefix') || '/*/*/*.parquet') ORDER BY ALL" 2>&1) || {
+  echo "blobs.sh: listing the hourly tier failed, so there are no hourly views: $sources" >&2
+  sources=
+}
 for t in logs metrics podindex pods; do
   view=
   while IFS=, read -r table id; do

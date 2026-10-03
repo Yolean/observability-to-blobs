@@ -208,9 +208,19 @@ $KUBECTL wait pod/metrics-multi pod/metrics-numeric pod/metrics-optout --for=con
 # with the keys of $PARQUET_KEYS (compactor/README.md, "Encryption"):
 # itest-1 at first, itest-2 after the rotation below. Its tag is fixed
 # too, so a restart moves it onto the image just loaded.
-mkdir -p "$PARQUET_KEYS"
+# A key's content never changes under its id: a key missing here is taken
+# from the cluster's Secret when it has one, and only minted when neither
+# has it, so a cleaned target/ against a kept bucket keeps its keys.
+(umask 077; mkdir -p "$PARQUET_KEYS")
 for id in itest-1 itest-2; do
-  [ -s "$PARQUET_KEYS/$id" ] || (umask 077; head -c 32 /dev/urandom | base64 > "$PARQUET_KEYS/$id")
+  [ -s "$PARQUET_KEYS/$id" ] && continue
+  existing=$($KUBECTL -n observability get secret blobs-compactor-parquet-keys \
+    -o go-template="{{ with index .data \"$id\" }}{{ . }}{{ end }}" 2>/dev/null || true)
+  if [ -n "$existing" ]; then
+    (umask 077; base64 -d <<< "$existing" > "$PARQUET_KEYS/$id")
+  else
+    (umask 077; head -c 32 /dev/urandom | base64 > "$PARQUET_KEYS/$id")
+  fi
 done
 $KUBECTL -n observability create secret generic blobs-compactor-parquet-keys --from-file="$PARQUET_KEYS" \
   --dry-run=client -o yaml | $KUBECTL apply -f - >/dev/null
@@ -307,6 +317,7 @@ done
 # One DuckDB init for every assertion: the secret, and the views the
 # compactor and local/blobs.sh read from the same .sql files, so the
 # column contract lives in exactly one place (compactor/sql/raw.sql).
+umask 077  # the S3 secret and the parquet keys go into files below
 INIT=$(mktemp "${TMPDIR:-/tmp}/itest.XXXXXX")
 INIT_S3=$INIT.s3 SCOPED=$INIT.scoped SNAPSHOT=$INIT.raw.csv PODS_BEFORE=$INIT.pods.parquet ROTATED=$INIT.rotated.csv
 trap 'rm -f "$INIT" "$INIT_S3" "$SCOPED" "$SNAPSHOT" "$PODS_BEFORE" "$ROTATED"' EXIT
@@ -317,7 +328,7 @@ SET s3_region='us-east-1'; SET s3_endpoint='127.0.0.1:$S3_PORT';
 SET s3_access_key_id='demoaccess'; SET s3_secret_access_key='demosecret';
 SET s3_use_ssl=false; SET s3_url_style='path';
 SQL
-# the compactor's parquet keys; this file is 0600, like the S3 one
+# the compactor's parquet keys; 0600 like the S3 one (umask above)
 for f in "$PARQUET_KEYS"/*; do
   echo "PRAGMA add_parquet_key('${f##*/}', '$(tr -d '[:space:]' < "$f")');"
 done >>"$INIT_S3"
