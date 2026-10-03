@@ -85,6 +85,8 @@ vgw_admin() {
   $KUBECTL exec versitygw-host-0 -- versitygw admin --access demoaccess --secret demosecret \
     --endpoint-url http://127.0.0.1:7080 "$@"
 }
+# the gateway's access log outlives a run: only what is written from here on is this run's
+LOG_SKIP=$($KUBECTL exec versitygw-host-0 -- sh -c 'wc -l < /logs/access.log 2>/dev/null || echo 0' | tr -d '[:space:]')
 # two users with one policy: the agent's, whose requests the gateway's log
 # must show only as PutObject, and one that the checks below may abuse
 AGENT_SECRET=$(openssl rand -hex 16)
@@ -464,7 +466,7 @@ check "the node serves the restart flag and the agent's own metrics, and no node
 
 echo "  -- put only"
 ACCESS_LOG=$TMP/access.log
-$KUBECTL exec versitygw-host-0 -- cat /logs/access.log >"$ACCESS_LOG"
+$KUBECTL exec versitygw-host-0 -- cat /logs/access.log | tail -n "+$((LOG_SKIP + 1))" >"$ACCESS_LOG"
 # fields of the gateway's log line: owner bucket [time zone] remote requester id operation key uri status
 awk '$6 == "hostagent" { print $8 " " $11 }' "$ACCESS_LOG" | sort | uniq -c | sed 's/^/  gateway log, requests of the agent: /'
 check "the gateway's log has requests of the agent, and every one is a PutObject answered 200: no list, read, head, delete, multipart or denied request" \

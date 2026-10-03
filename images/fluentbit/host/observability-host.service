@@ -23,7 +23,6 @@
 #    /etc/audit/auditd.conf (and the log directory group-readable).
 [Unit]
 Description=observability-to-blobs host agent
-Documentation=https://github.com/Yolean/observability-to-blobs/blob/main/HOST_MODE.md
 After=network-online.target
 Wants=network-online.target
 # Restart=always must not give up after a burst of failures

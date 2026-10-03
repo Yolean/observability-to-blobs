@@ -9,10 +9,16 @@
 #   ./test.sh up         provision the cluster and deploy the agent, the
 #                        compactor and the sample workloads, print how to
 #                        look around; no checks, no assertions, nothing purged.
+#   ./test.sh host       only the host phase (HOST_MODE.md) against the running
+#                        qemu cluster: itest/host/phase.sh. It also runs at
+#                        the end of the full run, on the qemu backend.
 #
 # Env:
 #   SKIP_BUILD=1         reuse target/images/node-agent.tar and
 #                        target/images/compactor-oci
+#   HOST_TARBALL=file    run the host phase with this tarball instead of
+#                        building one (HOST_BUILD_ARGS: extra buildx flags;
+#                        more in itest/host/phase.sh)
 #   IMAGE_REF=ref        load a published image instead of building
 #   CLUSTER_CONFIG=dir   y-cluster config dir (default: itest/cluster/qemu with
 #                        /dev/kvm, itest/cluster/docker otherwise)
@@ -38,7 +44,8 @@ PARQUET_KEYS=target/itest/parquet-keys
 export KUBECONFIG=$PWD/itest/cluster/kubeconfig
 KUBECTL="kubectl --context=$CONTEXT"
 MODE=${1:-all}
-case "$MODE" in (all|checks|itest|up) ;; (*) echo "usage: $0 [checks|itest|up]" >&2; exit 2;; esac
+case "$MODE" in (all|checks|itest|up|host) ;; (*) echo "usage: $0 [checks|itest|up|host]" >&2; exit 2;; esac
+[ "$MODE" != host ] || exec env CONTEXT="$CONTEXT" CLUSTER_CONFIG="${CLUSTER_CONFIG:-itest/cluster/qemu}" itest/host/phase.sh
 
 phase() { printf '\n==> %s\n' "$*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -97,6 +104,14 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
       go test ./...
     )
   done
+
+  phase "checks: host mode"
+  need jq "https://jqlang.github.io/jq/"
+  need python3 "python3"
+  shellcheck images/fluentbit/host/*.sh itest/host/*.sh
+  images/fluentbit/host/test-heartbeat.sh
+  python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' itest/host/s3-recorder.py
+  kubectl kustomize itest/host >/dev/null
 
   phase "checks: kustomize"
   kubectl kustomize agent >/dev/null
@@ -1132,6 +1147,14 @@ logs_api 18080 Running Succeeded
 phase "assert: the logs API ($PUT_CLUSTER: plain tiers, the spool)"
 logs_forward "$PUT_NS" svc/blobs-compactor-logs 18081 || fail "no logs API on svc/blobs-compactor-logs in $PUT_NS"
 logs_api 18081 Unknown Unknown
+
+# The host agent on the node itself (HOST_MODE.md): tarball, systemd unit,
+# its own bucket. It needs the qemu node; k3s-in-docker has no systemd.
+if [ "$BACKEND" = docker ]; then
+  echo "  SKIP: host phase (k3s-in-docker is not a host with systemd)"
+else
+  CONTEXT=$CONTEXT CLUSTER_CONFIG=$CLUSTER_CONFIG itest/host/phase.sh || ERRORS=$((ERRORS + 1))
+fi
 
 echo
 if [ "$ERRORS" -gt 0 ]; then
