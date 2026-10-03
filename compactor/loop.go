@@ -18,7 +18,10 @@ import (
 //   - a rollup of a past day runs after the rolling pass committed the
 //     final fold of that day's last hour, and after every past pass for
 //     every past day with hourly sidecars, where it does nothing unless an
-//     hour has keys the daily sidecar lacks.
+//     hour has keys the daily sidecar lacks;
+//   - at start and on every past pass, checkKeys: while a parquet key that
+//     a tier object's name carries has no key file, both passes refuse to
+//     fold, and the rolling pass checks again on every tick.
 //
 // Nothing is remembered between ticks that the bucket does not say, so a
 // start is an ordinary tick. One writer: replicas 1, strategy Recreate.
@@ -28,7 +31,8 @@ func (c *compactor) run(ctx context.Context, cfg config) error {
 	go func() { srvErr <- srv.ListenAndServe() }()
 	defer srv.Close()
 	c.log.Info("run", "cluster", c.l.cluster, "rolling", cfg.rolling.String(), "grace", cfg.grace.String(),
-		"past", cfg.past.String(), "raw_delete", cfg.rawDelete, "metrics", cfg.metricsAddr)
+		"past", cfg.past.String(), "raw_delete", cfg.rawDelete, "metrics", cfg.metricsAddr,
+		"parquet_key", c.keyID, "parquet_keys", sortedIDs(c.keys))
 	tick := time.NewTicker(cfg.rolling)
 	defer tick.Stop()
 	// A stop (SIGTERM) lets the pass in flight finish rather than leave
@@ -36,6 +40,7 @@ func (c *compactor) run(ctx context.Context, cfg config) error {
 	// repeats the keys, but a stopped compactor then leaves a quiet
 	// bucket. Each job keeps its own deadline.
 	jobs := context.WithoutCancel(ctx)
+	c.keysJob(jobs, cfg.jobTimeout)
 	var lastPast time.Time
 	for {
 		now := time.Now().UTC()
@@ -96,9 +101,23 @@ func (c *compactor) rollupJob(ctx context.Context, day time.Time, timeout time.D
 	return r, nil
 }
 
+// keysJob is checkKeys with a deadline; it logs and sets the refusal.
+func (c *compactor) keysJob(ctx context.Context, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return c.checkKeys(ctx)
+}
+
 // rollingPass folds the current hour and, until it is final, the previous.
+// While a parquet key is missing it checks the keys again instead.
 func (c *compactor) rollingPass(ctx context.Context, now time.Time, timeout time.Duration) error {
 	start := time.Now()
+	if c.refusal != nil {
+		if err := c.keysJob(ctx, timeout); err != nil {
+			c.m.job("rolling", start, err)
+			return err
+		}
+	}
 	cur := now.UTC().Truncate(time.Hour)
 	prev := cur.Add(-time.Hour)
 	_, err := c.foldJob(ctx, cur, nil, now, timeout)
@@ -131,6 +150,9 @@ func (c *compactor) pastPass(ctx context.Context, now time.Time, timeout time.Du
 }
 
 func (c *compactor) past(ctx context.Context, now time.Time, timeout time.Duration) error {
+	if err := c.keysJob(ctx, timeout); err != nil {
+		return err
+	}
 	lctx, cancel := context.WithTimeout(ctx, timeout)
 	objs, err := c.raw.List(lctx, c.l.rawPrefix())
 	cancel()

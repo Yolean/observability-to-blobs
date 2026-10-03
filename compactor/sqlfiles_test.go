@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -144,4 +146,88 @@ func TestPodsJoinsMetricsOnTheFullKey(t *testing.T) {
 	if n := count(t, ctx, c, "SELECT count(*) FROM pods WHERE pod_uid = 'u1' AND container = 'app' AND restart = 0 AND metric_names = ['up'] AND lines > 0"); n != 1 {
 		t.Fatal("the run's pods row lacks its metric names or its log lines")
 	}
+}
+
+// The engine's Parquet encryption, as encryption.go and every tier reader
+// rely on it (compactor/README.md, "Encryption").
+func TestEngineParquetEncryption(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	f := func(name string) string { return sqlString(filepath.Join(dir, name)) }
+	k32 := "0123456789abcdef0123456789abcdef" // printable, so it is a plain 32 byte key too
+	k16 := "0123456789abcdef"
+	keys := []initStmt{
+		{sql: "PRAGMA add_parquet_key('raw32', '" + k32 + "')"},
+		{sql: "PRAGMA add_parquet_key('b64-32', '" + base64.StdEncoding.EncodeToString([]byte(k32)) + "')"},
+		{sql: "PRAGMA add_parquet_key('raw16', '" + k16 + "')"},
+		{sql: "PRAGMA add_parquet_key('b64-16', '" + base64.StdEncoding.EncodeToString([]byte(k16)) + "')"},
+	}
+	engine := func(init ...initStmt) *sql.DB {
+		t.Helper()
+		db, err := open("", append(init, keys...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+		return db
+	}
+	fails := func(db *sql.DB, q, want string) {
+		t.Helper()
+		_, err := db.ExecContext(ctx, q)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s: err %v, want %q", q, err, want)
+		}
+	}
+	n := func(db *sql.DB, q string) int {
+		t.Helper()
+		var n int
+		if err := db.QueryRowContext(ctx, q).Scan(&n); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		return n
+	}
+
+	// Without httpfs the engine's crypto reads but does not write.
+	fails(engine(), "COPY (SELECT 1 AS i) TO "+f("x.parquet")+" (FORMAT parquet, ENCRYPTION_CONFIG {footer_key: 'raw32'})",
+		"read-only crypto module")
+
+	db := engine(initStmt{sql: "SET force_mbedtls_unsafe = true"})
+	for _, s := range []string{
+		"COPY (SELECT range AS i FROM range(10)) TO " + f("a.k-b64-32.parquet") + " (FORMAT parquet, ENCRYPTION_CONFIG {footer_key: 'b64-32'})",
+		"COPY (SELECT range AS i, 'x' AS c FROM range(5)) TO " + f("b.k-raw16.parquet") + " (FORMAT parquet, ENCRYPTION_CONFIG {footer_key: 'raw16'})",
+		"COPY (SELECT range AS i FROM range(3)) TO " + f("c.k-b64-16.parquet") + " (FORMAT parquet, ENCRYPTION_CONFIG {footer_key: 'b64-16'})",
+		"COPY (SELECT range AS i FROM range(2)) TO " + f("d.parquet") + " (FORMAT parquet)",
+	} {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The base64 of a 32 byte key is decoded; the base64 of a 16 byte key,
+	// 24 characters, is taken as a 24 byte key itself. Key files hold 32
+	// bytes only (encryption.go).
+	if got := n(db, "SELECT count(*) FROM read_parquet("+f("a.k-b64-32.parquet")+", encryption_config = {footer_key: 'raw32'})"); got != 10 {
+		t.Fatalf("a 32 byte key's base64: %d rows", got)
+	}
+	fails(db, "SELECT * FROM read_parquet("+f("c.k-b64-16.parquet")+", encryption_config = {footer_key: 'raw16'})",
+		"Computed AES tag differs")
+	// A plain read of an encrypted file fails, a keyed read of a plain one
+	// too, and one read takes one key, so a glob over two keys fails.
+	fails(db, "SELECT * FROM read_parquet("+f("a.k-b64-32.parquet")+")", "is encrypted, but 'encryption_config' was not set")
+	fails(db, "SELECT * FROM read_parquet("+f("d.parquet")+", encryption_config = {footer_key: 'raw32'})",
+		"is not encrypted, but 'encryption_config' was set")
+	fails(db, "SELECT * FROM read_parquet("+f("[ab].k-*.parquet")+", encryption_config = {footer_key: 'raw32'})",
+		"Computed AES tag differs")
+	// One read per key, united by name with the plain read, which aligns
+	// the columns.
+	if got := n(db, "SELECT count(c) * 100 + count(*) FROM ("+
+		"SELECT * FROM read_parquet("+f("d.parquet")+", union_by_name = true) UNION ALL BY NAME "+
+		"SELECT * FROM read_parquet("+f("*.k-b64-32.parquet")+", encryption_config = {footer_key: 'b64-32'}, filename = true) UNION ALL BY NAME "+
+		"SELECT * FROM read_parquet("+f("*.k-raw16.parquet")+", encryption_config = {footer_key: 'raw16'}))"); got != 5*100+17 {
+		t.Fatalf("the per-key union: %d, want 517", got)
+	}
+	// union_by_name on an encrypted read is an internal error, which also
+	// invalidates the database: readers never pass it with a key.
+	fails(engine(initStmt{sql: "SET force_mbedtls_unsafe = true"}),
+		"SELECT sum(i) FROM read_parquet("+f("a.k-b64-32.parquet")+", encryption_config = {footer_key: 'b64-32'}, union_by_name = true)",
+		"INTERNAL Error")
 }

@@ -80,6 +80,11 @@ func command(ctx context.Context, log *slog.Logger, args []string) error {
 		return err
 	}
 	defer c.Close()
+	if args[0] != "run" {
+		if err := c.keysJob(ctx, cfg.jobTimeout); err != nil {
+			return err
+		}
+	}
 	switch args[0] {
 	case "run":
 		return c.run(ctx, cfg)

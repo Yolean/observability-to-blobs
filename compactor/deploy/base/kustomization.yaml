@@ -6,6 +6,10 @@ kind: Kustomization
 # the cluster), S3_BUCKET, S3_ENDPOINT and the blobs-compactor-s3 secret
 # (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY: read on raw1/, read and write
 # on hourly/ and daily/; delete on raw1/ only with RAW_DELETE=after-final).
-# ../release adds the pinned image; itest/compactor shows an overlay.
+# Parquet encryption is off: an overlay turns it on by mounting a Secret
+# of key files and setting PARQUET_KEYS_DIR and PARQUET_KEY_ID
+# (compactor/README.md, "Encryption").
+# ../release adds the pinned image; itest/compactor shows an overlay,
+# encryption included.
 resources:
 - deployment.yaml

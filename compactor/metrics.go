@@ -26,6 +26,7 @@ type metrics struct {
 	rawDeleted   float64
 	rawObjects   float64
 	rawOldest    time.Time // upload time of the oldest raw object in the last full listing
+	keysMissed   float64   // parquet key ids the tiers' object names carry with no key file
 }
 
 func newMetrics() *metrics {
@@ -71,6 +72,12 @@ func (m *metrics) listing(objects int, oldest time.Time) {
 	defer m.mu.Unlock()
 	m.rawObjects = float64(objects)
 	m.rawOldest = oldest
+}
+
+func (m *metrics) keysMissing(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.keysMissed = float64(n)
 }
 
 func (m *metrics) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
@@ -120,6 +127,8 @@ func (m *metrics) write(w io.Writer) {
 		age = m.now().Sub(m.rawOldest).Seconds()
 	}
 	fmt.Fprintf(&b, "blobs_compactor_raw_oldest_age_seconds %s\n", num(age))
+	family("blobs_compactor_parquet_keys_missing", "gauge", "Parquet key ids that tier object names (or PARQUET_KEY_ID) carry and PARQUET_KEYS_DIR lacks; folds and rollups refuse while it is above 0.")
+	fmt.Fprintf(&b, "blobs_compactor_parquet_keys_missing %s\n", num(m.keysMissed))
 	io.WriteString(w, b.String())
 }
 

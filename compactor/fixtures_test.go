@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,16 +22,22 @@ import (
 const testCluster = "itest"
 
 type world struct {
-	t   *testing.T
-	ctx context.Context
-	dir string
-	c   *compactor
+	t       *testing.T
+	ctx     context.Context
+	dir     string
+	keysDir string
+	c       *compactor
 }
 
+// newWorld is a compactor without parquet keys. Its engine has no httpfs,
+// so its crypto is read-only unless forced: force_mbedtls_unsafe lets the
+// tests write encrypted objects, which the compactor itself never sets
+// (it loads httpfs whenever PARQUET_KEY_ID is set, and selftest writes
+// encrypted Parquet with the image's httpfs).
 func newWorld(t *testing.T) *world {
 	t.Helper()
 	ctx := context.Background()
-	db, err := open("")
+	db, err := open("", initStmt{sql: "SET force_mbedtls_unsafe = true"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +49,35 @@ func newWorld(t *testing.T) *world {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { c.Close() })
-	return &world{t: t, ctx: ctx, dir: dir, c: c}
+	return &world{t: t, ctx: ctx, dir: dir, keysDir: t.TempDir(), c: c}
+}
+
+// newKeyedWorld is a compactor that encrypts new objects with active.
+func newKeyedWorld(t *testing.T, active string) *world {
+	w := newWorld(t)
+	w.encrypt(active)
+	return w
+}
+
+// testKey is a key file's content, the same for an id in every world.
+func testKey(id string) string {
+	b := []byte(strings.Repeat(id+"/", parquetKeyBytes))[:parquetKeyBytes]
+	return base64.StdEncoding.EncodeToString(b) + "\n"
+}
+
+// encrypt makes active the key of new objects, writing its key file and
+// those of more ids, as a rotation adds a key to the Secret.
+func (w *world) encrypt(active string, more ...string) {
+	w.t.Helper()
+	for _, id := range append(more, active) {
+		if err := os.WriteFile(filepath.Join(w.keysDir, id), []byte(testKey(id)), 0o600); err != nil {
+			w.t.Fatal(err)
+		}
+	}
+	w.c.keysDir, w.c.keyID = w.keysDir, active
+	if err := w.c.checkKeys(w.ctx); err != nil {
+		w.t.Fatal(err)
+	}
 }
 
 // line is one raw line; the helpers below build the three tables' shapes.
@@ -208,18 +243,51 @@ func (w *world) path(key string) string {
 	return sqlString(filepath.Join(w.dir, filepath.FromSlash(key)))
 }
 
-// hourlyRows counts the rows of an hourly object.
-func (w *world) hourlyRows(table string, h time.Time) int64 {
-	return w.q("SELECT count(*) FROM read_parquet(" + w.path(w.c.l.hourly(table, h)) + ")")
+// obj is stem's one object, plain or encrypted.
+func (w *world) obj(stem string) tierObject {
+	w.t.Helper()
+	var found []tierObject
+	objs, err := w.c.tiers.List(w.ctx, stem+".")
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	for _, o := range objs {
+		if t, ok := stemObject(stem, o.Key); ok {
+			found = append(found, t)
+		}
+	}
+	if len(found) != 1 {
+		w.t.Fatalf("%s: objects %v, want one", stem, found)
+	}
+	return found[0]
 }
 
-// dailySource is a FROM clause over a daily table.
+// from is a FROM clause over stem's object, read with its key.
+func (w *world) from(stem string) string {
+	return "(" + w.c.readTier([]tierObject{w.obj(stem)}, "") + ")"
+}
+
+// hourlyRows counts the rows of an hourly object.
+func (w *world) hourlyRows(table string, h time.Time) int64 {
+	return w.q("SELECT count(*) FROM " + w.from(w.c.l.hourlyStem(table, h)))
+}
+
+// dailySource is a FROM clause over a daily table, each object read with
+// its key.
 func (w *world) dailySource(table string, day time.Time) string {
+	w.t.Helper()
 	if table == "logs" || table == "metrics" {
-		return "read_parquet(" + sqlString(filepath.Join(w.dir, w.c.l.dailyPartitionPrefix(table, day), "*", "*.parquet")) +
-			", hive_partitioning = false)"
+		parts, err := w.c.partitions(w.ctx, table, day)
+		if err != nil {
+			w.t.Fatal(err)
+		}
+		var objs []tierObject
+		for _, ns := range sortedIDs(parts) {
+			objs = append(objs, parts[ns])
+		}
+		return "(" + w.c.readTier(objs, "hive_partitioning = false, ") + ")"
 	}
-	return "read_parquet(" + w.path(w.c.l.daily(table, day)) + ")"
+	return w.from(w.c.l.dailyStem(table, day))
 }
 
 // sameRows fails unless two FROM clauses hold the same rows, duplicates

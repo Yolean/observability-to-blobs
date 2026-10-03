@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -54,8 +55,60 @@ func (l layout) rawHour(key string) (time.Time, bool) {
 	return h, err == nil
 }
 
-func (l layout) hourly(table string, h time.Time) string {
-	return fmt.Sprintf("hourly/%s/%s/%s/%s.parquet", l.cluster, table, h.Format(dateLayout), h.Format("15"))
+// The tier objects' keys are a stem and a suffix: ".parquet" for a plain
+// object, ".k-{id}.parquet" for one encrypted with the parquet key of that
+// id (compactor/README.md, "Encryption"). An object keeps the name, and so
+// the key, it was first written with.
+
+// tierObject is an object of the hourly or the daily tier: its key, and
+// the id of the parquet key it is encrypted with, "" when it is plain.
+type tierObject struct{ key, keyID string }
+
+// tierName is the key of stem's object encrypted with keyID, or plain.
+func tierName(stem, keyID string) tierObject {
+	if keyID == "" {
+		return tierObject{key: stem + ".parquet"}
+	}
+	return tierObject{key: stem + ".k-" + keyID + ".parquet", keyID: keyID}
+}
+
+// keyIDRE is a parquet key id: a key file's name, and a segment of the
+// names of the objects encrypted with it.
+var keyIDRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+
+var tierSuffixRE = regexp.MustCompile(`^(?:\.k-([a-z0-9][a-z0-9-]{0,31}))?\.parquet$`)
+
+// stemObject returns key as an object of stem, if it is one.
+func stemObject(stem, key string) (tierObject, bool) {
+	rest, ok := strings.CutPrefix(key, stem)
+	if !ok {
+		return tierObject{}, false
+	}
+	m := tierSuffixRE.FindStringSubmatch(rest)
+	if m == nil {
+		return tierObject{}, false
+	}
+	return tierObject{key: key, keyID: m[1]}, true
+}
+
+var tierKeyIDRE = regexp.MustCompile(`\.k-([a-z0-9][a-z0-9-]{0,31})\.parquet$`)
+
+// tierKeyID returns the parquet key id a tier object's name carries, "" for
+// a plain object or another key.
+func tierKeyID(key string) string {
+	if m := tierKeyIDRE.FindStringSubmatch(key); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+func (l layout) tierPrefixes() []string {
+	return []string{"hourly/" + l.cluster + "/", "daily/" + l.cluster + "/"}
+}
+
+// hourlyStem is the stem of one table's object of an hour.
+func (l layout) hourlyStem(table string, h time.Time) string {
+	return fmt.Sprintf("hourly/%s/%s/%s/%s", l.cluster, table, h.Format(dateLayout), h.Format("15"))
 }
 
 // hourlySidecar is the hour's folded keys, written last as the commit marker.
@@ -86,13 +139,14 @@ func (l layout) dailyPartitionPrefix(table string, day time.Time) string {
 	return fmt.Sprintf("daily/%s/%s/%s/", l.cluster, table, day.Format(dateLayout))
 }
 
-// dailyPartition is one namespace's object of logs or metrics, keyed the way
-// DuckDB's hive partitioning writes and reads it (the value path-escaped).
-func (l layout) dailyPartition(table string, day time.Time, namespace string) string {
-	return l.dailyPartitionPrefix(table, day) + "namespace=" + url.PathEscape(namespace) + "/data_0.parquet"
+// dailyPartitionStem is the stem of one namespace's object of logs or
+// metrics, keyed the way DuckDB's hive partitioning writes and reads it
+// (the value path-escaped).
+func (l layout) dailyPartitionStem(table string, day time.Time, namespace string) string {
+	return l.dailyPartitionPrefix(table, day) + "namespace=" + url.PathEscape(namespace) + "/data_0"
 }
 
-var dailyPartitionRE = regexp.MustCompile(`/namespace=([^/]*)/data_0\.parquet$`)
+var dailyPartitionRE = regexp.MustCompile(`/namespace=([^/]*)/data_0(?:\.k-[a-z0-9][a-z0-9-]{0,31})?\.parquet$`)
 
 // partitionNamespace returns the namespace of a daily partition key.
 func partitionNamespace(key string) (string, bool) {
@@ -104,9 +158,9 @@ func partitionNamespace(key string) (string, bool) {
 	return ns, err == nil
 }
 
-// daily is the one object of podindex or pods for a day.
-func (l layout) daily(table string, day time.Time) string {
-	return fmt.Sprintf("daily/%s/%s/%s.parquet", l.cluster, table, day.Format(dateLayout))
+// dailyStem is the stem of the one object of podindex or pods for a day.
+func (l layout) dailyStem(table string, day time.Time) string {
+	return fmt.Sprintf("daily/%s/%s/%s", l.cluster, table, day.Format(dateLayout))
 }
 
 func (l layout) dailySidecar(day time.Time) string {

@@ -36,6 +36,9 @@ type config struct {
 
 	metricsAddr string
 	httpfs      string
+
+	// parquet encryption: the keys directory, and the key of new objects
+	parquetKeysDir, parquetKeyID string
 }
 
 func configFromEnv() (config, error) { return parseConfig(os.Getenv) }
@@ -48,15 +51,17 @@ func parseConfig(env func(string) string) (config, error) {
 		return def
 	}
 	c := config{
-		cluster:     env("CLUSTER_NAME"),
-		bucket:      env("S3_BUCKET"),
-		region:      get("S3_REGION", "us-east-1"),
-		keyID:       env("AWS_ACCESS_KEY_ID"),
-		secret:      env("AWS_SECRET_ACCESS_KEY"),
-		dir:         env("BLOBS_DIR"),
-		tempDir:     env("DUCKDB_TEMP_DIRECTORY"),
-		metricsAddr: get("METRICS_ADDR", ":9090"),
-		httpfs:      httpfsPath(),
+		cluster:        env("CLUSTER_NAME"),
+		bucket:         env("S3_BUCKET"),
+		region:         get("S3_REGION", "us-east-1"),
+		keyID:          env("AWS_ACCESS_KEY_ID"),
+		secret:         env("AWS_SECRET_ACCESS_KEY"),
+		dir:            env("BLOBS_DIR"),
+		tempDir:        env("DUCKDB_TEMP_DIRECTORY"),
+		metricsAddr:    get("METRICS_ADDR", ":9090"),
+		httpfs:         httpfsPath(),
+		parquetKeysDir: env("PARQUET_KEYS_DIR"),
+		parquetKeyID:   env("PARQUET_KEY_ID"),
 	}
 	if !clusterRE.MatchString(c.cluster) {
 		return c, fmt.Errorf("CLUSTER_NAME %q: want a lowercase name of letters, digits, '-', '_' and '.'", c.cluster)
@@ -122,6 +127,14 @@ func parseConfig(env func(string) string) (config, error) {
 			return c, fmt.Errorf("%s %q: want a positive integer", i.name, env(i.name))
 		}
 	}
+	if c.parquetKeyID != "" {
+		if !keyIDRE.MatchString(c.parquetKeyID) {
+			return c, fmt.Errorf("PARQUET_KEY_ID %q: want a key id, %s", c.parquetKeyID, keyIDRE)
+		}
+		if c.parquetKeysDir == "" {
+			return c, fmt.Errorf("PARQUET_KEY_ID %s: PARQUET_KEYS_DIR is required", c.parquetKeyID)
+		}
+	}
 	// the container's memory limit in bytes, from resourceFieldRef; the rest
 	// is the Go heap, the HTTP client and DuckDB's own overhead
 	if v := env("DUCKDB_MEMORY_LIMIT"); v != "" {
@@ -157,7 +170,12 @@ func (c config) engineInit() (httpfs string, init []initStmt) {
 		init = append(init, initStmt{sql: "SET temp_directory = " + sqlString(c.tempDir)})
 	}
 	if c.dir != "" {
-		return "", init
+		// httpfs is for the bucket, and for encrypted writes: without it
+		// the engine's crypto is read-only (sqlfiles_test.go)
+		if c.parquetKeyID == "" {
+			return "", init
+		}
+		return c.httpfs, init
 	}
 	init = append(init, initStmt{label: "CREATE SECRET (the bucket's)", redact: []string{c.secret}, sql: fmt.Sprintf(
 		"CREATE OR REPLACE SECRET blobs (TYPE s3, PROVIDER config, KEY_ID %s, SECRET %s, REGION %s, ENDPOINT %s, URL_STYLE 'path', USE_SSL %t, SCOPE %s)",
