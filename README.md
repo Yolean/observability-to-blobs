@@ -114,18 +114,26 @@ And the compactor, deployed from `compactor/deploy/base` (the
 `itest/compactor` overlay: versitygw, a 20 s rolling interval, a 1 min
 grace), folding the same bucket while all of the above runs:
 
-- every raw key in the bucket is listed in its hour's sidecar, and the
-  sidecars list no key the raw tier lacks
+- after a rolling and a past pass that both started after a snapshot of
+  the raw keys (read from the compactor's `/metrics`), every key of the
+  snapshot is listed in its hour's sidecar, and the sidecars list no key
+  the raw tier lacks
 - per folded hour, the hourly `logs`, `metrics` and `podindex` objects
-  hold exactly as many rows as the distinct rows of the raw keys its
-  sidecar lists, read through `compactor/sql/`
+  hold exactly the distinct rows of the raw keys its sidecar lists, read
+  through `compactor/sql/`: the same rows both ways, each once
 - the hourly `pods` index has the three incarnations of `reused`
 - with the compactor stopped, `blobs-compactor rollup <day>` in a pod of
-  its own writes the daily tier: its `logs`, `metrics` and `podindex`
-  match the distinct rows of every raw key of the day, a namespace's logs
-  are one object under its hive key, the daily sidecar lists the day's
-  keys, and the daily `pods` has the three incarnations, one row each
-  with its line and exit 0
+  its own, for every day with folded hours (two when the run crosses
+  midnight UTC), writes the daily tier: its `logs`, `metrics` and
+  `podindex` hold exactly the distinct rows of every raw key of the day,
+  a namespace's logs are one object under its hive key, the daily sidecar
+  lists the day's keys, and the daily `pods` has the three incarnations,
+  each with its line and exit 0
+- an incremental rollup: a raw object of a namespace of its own, in a
+  free hour of the last day, folded with `blobs-compactor fold` and
+  rolled up again, rewrites that one namespace, leaves the other
+  namespaces' `pods` rows as they were, and the day still holds exactly
+  the distinct rows of its keys
 - the compactor's `/metrics` reach the blobs through the agent's scrape
 
 Not part of `test.sh` because they take the cluster down or load it:

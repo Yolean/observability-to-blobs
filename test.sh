@@ -295,8 +295,8 @@ done
 # compactor and local/blobs.sh read from the same .sql files, so the
 # column contract lives in exactly one place (compactor/sql/raw.sql).
 INIT=$(mktemp "${TMPDIR:-/tmp}/itest.XXXXXX")
-INIT_S3=$INIT.s3 SCOPED=$INIT.scoped SNAPSHOT=$INIT.raw.csv
-trap 'rm -f "$INIT" "$INIT_S3" "$SCOPED" "$SNAPSHOT"' EXIT
+INIT_S3=$INIT.s3 SCOPED=$INIT.scoped SNAPSHOT=$INIT.raw.csv PODS_BEFORE=$INIT.pods.parquet
+trap 'rm -f "$INIT" "$INIT_S3" "$SCOPED" "$SNAPSHOT" "$PODS_BEFORE"' EXIT
 cat >"$INIT_S3" <<SQL
 .output /dev/null
 INSTALL httpfs; LOAD httpfs; SET TimeZone='UTC';
@@ -525,21 +525,38 @@ assert "healthy targets are scraped about every 15s" \
 # -------------------------------------------------------------- compactor --
 
 phase "assert: compactor"
-# The raw keys now. Once the compactor has folded each of them it is
-# stopped, so the comparisons below see a quiet bucket; a stop lets the
-# fold in flight commit.
+# The raw keys now. The compactor then runs on until a rolling and a past
+# pass that both started after this snapshot have succeeded (read from its
+# /metrics through the API server), so between them they listed every key
+# of it, and is stopped: the sidecar assertion below checks the folds, not
+# the wait. A stop lets the job in flight commit.
 FOLDED="read_csv('s3://$BUCKET/hourly/$CLUSTER/_folded/*/*.csv', header = true, columns = {'key': 'VARCHAR', 'final': 'BOOLEAN'})"
 RAW_KEYS="glob('s3://$BUCKET/raw1/$CLUSTER/*/*/*/*.jsonl.zst')"
 q "COPY (SELECT file FROM $RAW_KEYS) TO '$SNAPSHOT' (FORMAT csv, HEADER true)" >/dev/null
-deadline=$((SECONDS + 420))
-while :; do
-  n=$(q "SELECT count(*) FROM read_csv('$SNAPSHOT', header = true) WHERE file NOT IN (SELECT 's3://$BUCKET/' || key FROM $FOLDED)" | tr -d '[:space:]' || true)
-  echo "  raw keys not folded yet: $n"
-  [ "$n" != 0 ] || break
+SNAPSHOT_AT=$(($(date +%s) + 1))
+# compactor_metric <name> <job>: that sample of the running compactor's /metrics
+compactor_metric() {
+  local pod
+  pod=$($KUBECTL -n observability get pods -l app=blobs-compactor -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || return 0
+  [ -n "$pod" ] || return 0
+  $KUBECTL get --raw "/api/v1/namespaces/observability/pods/$pod:9090/proxy/metrics" 2>/dev/null \
+    | awk -v k="$1{job=\"$2\"}" '$1 == k { print $2 }'
+}
+# started_since <job> <epoch seconds>: the job's last run succeeded and
+# started after then (its end less its duration)
+started_since() {
+  local end took
+  end=$(compactor_metric blobs_compactor_last_success_timestamp_seconds "$1")
+  took=$(compactor_metric blobs_compactor_last_duration_seconds "$1")
+  [ -n "$end" ] && [ -n "$took" ] && awk -v e="$end" -v d="$took" -v t="$2" 'BEGIN { exit !(e - d > t) }'
+}
+deadline=$((SECONDS + 600))
+until started_since rolling "$SNAPSHOT_AT" && started_since past "$SNAPSHOT_AT"; do
   if [ $SECONDS -ge $deadline ]; then
     $KUBECTL -n observability logs deploy/blobs-compactor --tail=40 || true
-    fail "the compactor has not folded every raw key after 420s"
+    fail "the compactor has not completed a rolling and a past pass in the 600s after the snapshot"
   fi
+  echo "  waiting for a rolling and a past pass that start after the snapshot"
   sleep 10
 done
 $KUBECTL -n observability scale deployment/blobs-compactor --replicas=0 >/dev/null
@@ -551,7 +568,7 @@ done
 
 assert "the compactor's own metrics reach the blobs through the agent's scrape" \
   "SELECT count(*) > 0 FROM metrics WHERE pod LIKE 'blobs-compactor-%' AND name = 'blobs_compactor_last_success_timestamp_seconds'"
-assert "every raw key in the bucket before the stop is listed in its hour's sidecar" \
+assert "every raw key in the bucket before the snapshot is listed in its hour's sidecar" \
   "SELECT count(*) = 0 FROM read_csv('$SNAPSHOT', header = true) s WHERE NOT EXISTS (SELECT 1 FROM $FOLDED f WHERE 's3://$BUCKET/' || f.key = s.file AND regexp_extract(f.key, '^raw1/[^/]+/([0-9-]+/[0-9]{2})/', 1) = regexp_extract(s.file, '/raw1/[^/]+/([0-9-]+/[0-9]{2})/', 1))"
 assert "the sidecars list only keys the raw tier has" \
   "SELECT count(*) = 0 FROM $FOLDED WHERE 's3://$BUCKET/' || key NOT IN (SELECT file FROM $RAW_KEYS)"
@@ -568,62 +585,123 @@ SET VARIABLE raw_files = (SELECT list(DISTINCT 's3://$BUCKET/' || key) FROM read
 .output
 SQL
 }
-DISTINCT_RAW="(SELECT count(*) FROM (SELECT DISTINCT * EXCLUDE (filename) FROM logs)) AS logs,
-  (SELECT count(*) FROM (SELECT DISTINCT * EXCLUDE (filename) FROM metrics)) AS metrics,
-  (SELECT count(*) FROM (SELECT DISTINCT * EXCLUDE (filename) FROM podindex)) AS podindex"
+# same_rows <view> <FROM source>: SQL that is true when the source holds
+# exactly the distinct rows of the view, filename dropped, each once
+same_rows() {
+  echo "(SELECT count(*) FROM (SELECT DISTINCT * EXCLUDE (filename) FROM $1 EXCEPT SELECT * FROM $2)) = 0
+    AND (SELECT count(*) FROM (SELECT * FROM $2 EXCEPT SELECT * EXCLUDE (filename) FROM $1)) = 0
+    AND (SELECT count(*) FROM (SELECT DISTINCT * EXCLUDE (filename) FROM $1)) = (SELECT count(*) FROM $2)"
+}
+hourly() { echo "read_parquet('s3://$BUCKET/hourly/$CLUSTER/$1/$2.parquet')"; }
+daily() {
+  case $1 in
+    (logs|metrics) echo "read_parquet('s3://$BUCKET/daily/$CLUSTER/$1/$2/*/*.parquet', hive_partitioning = false)" ;;
+    (*) echo "read_parquet('s3://$BUCKET/daily/$CLUSTER/$1/$2.parquet')" ;;
+  esac
+}
 for hour in $(q "SELECT regexp_extract(file, '_folded/(.*)\\.csv\$', 1) FROM glob('s3://$BUCKET/hourly/$CLUSTER/_folded/*/*.csv') ORDER BY 1"); do
   scoped "$hour.csv"
-  QINIT=$SCOPED assert "hourly $hour: logs, metrics and podindex hold the distinct rows of the raw keys its sidecar lists" \
-    "SELECT r.logs = (SELECT count(*) FROM read_parquet('s3://$BUCKET/hourly/$CLUSTER/logs/$hour.parquet'))
-        AND r.metrics = (SELECT count(*) FROM read_parquet('s3://$BUCKET/hourly/$CLUSTER/metrics/$hour.parquet'))
-        AND r.podindex = (SELECT count(*) FROM read_parquet('s3://$BUCKET/hourly/$CLUSTER/podindex/$hour.parquet'))
-        AND r.logs > 0
-     FROM (SELECT $DISTINCT_RAW) r"
+  QINIT=$SCOPED assert "hourly $hour: logs, metrics and podindex hold exactly the distinct rows of the raw keys its sidecar lists" \
+    "SELECT $(same_rows logs "$(hourly logs "$hour")") AND $(same_rows metrics "$(hourly metrics "$hour")")
+        AND $(same_rows podindex "$(hourly podindex "$hour")") AND (SELECT count(*) FROM logs) > 0"
 done
 assert "hourly pods: the three incarnations of 'reused', each its own row" \
   "SELECT count(DISTINCT pod_uid) = 3 FROM read_parquet('s3://$BUCKET/hourly/$CLUSTER/pods/*/*.parquet') WHERE pod = 'reused' AND container = 'reused'"
 
-# the day of the latest folded hour; the rollup runs as the only writer
-DAY=$(q "SELECT max(regexp_extract(file, '_folded/([0-9-]+)/', 1)) FROM glob('s3://$BUCKET/hourly/$CLUSTER/_folded/*/*.csv')" | tr -d '[:space:]')
-echo "  rollup $DAY"
-$KUBECTL -n observability delete pod compactor-rollup --ignore-not-found >/dev/null 2>&1
-$KUBECTL -n observability run compactor-rollup --restart=Never --image="$COMPACTOR_IMAGE" --overrides="{
-  \"apiVersion\": \"v1\", \"spec\": {\"automountServiceAccountToken\": false, \"containers\": [{
-    \"name\": \"compactor-rollup\", \"image\": \"$COMPACTOR_IMAGE\", \"imagePullPolicy\": \"Never\",
-    \"args\": [\"rollup\", \"$DAY\"], \"envFrom\": [{\"secretRef\": {\"name\": \"blobs-compactor-s3\"}}],
-    \"env\": [{\"name\": \"CLUSTER_NAME\", \"value\": \"$CLUSTER\"}, {\"name\": \"S3_BUCKET\", \"value\": \"$BUCKET\"},
-      {\"name\": \"S3_ENDPOINT\", \"value\": \"versitygw.default.svc.cluster.local:7070\"}, {\"name\": \"S3_TLS\", \"value\": \"off\"}]}]}}" >/dev/null
-deadline=$((SECONDS + 300))
-while :; do
-  rollup=$($KUBECTL -n observability get pod compactor-rollup -o jsonpath='{.status.phase}')
-  case "$rollup" in (Succeeded|Failed) break;; esac
-  [ $SECONDS -lt $deadline ] || fail "compactor-rollup still $rollup after 300s"
-  sleep 3
-done
-$KUBECTL -n observability logs pod/compactor-rollup | tail -n 3
-if [ "$rollup" = Succeeded ]; then
-  echo "  PASS: blobs-compactor rollup $DAY"
-else
-  echo "  FAIL: blobs-compactor rollup $DAY ($rollup, logs above)" >&2; ERRORS=$((ERRORS + 1))
-fi
-$KUBECTL -n observability delete pod compactor-rollup >/dev/null
+# compactor_job <args, a JSON array>: blobs-compactor with those args in a
+# pod of its own, as the only writer; its log is in JOB_LOG
+compactor_job() {
+  local job
+  $KUBECTL -n observability delete pod compactor-job --ignore-not-found >/dev/null 2>&1
+  $KUBECTL -n observability run compactor-job --restart=Never --image="$COMPACTOR_IMAGE" --overrides="{
+    \"apiVersion\": \"v1\", \"spec\": {\"automountServiceAccountToken\": false, \"containers\": [{
+      \"name\": \"compactor-job\", \"image\": \"$COMPACTOR_IMAGE\", \"imagePullPolicy\": \"Never\",
+      \"args\": $1, \"envFrom\": [{\"secretRef\": {\"name\": \"blobs-compactor-s3\"}}],
+      \"env\": [{\"name\": \"CLUSTER_NAME\", \"value\": \"$CLUSTER\"}, {\"name\": \"S3_BUCKET\", \"value\": \"$BUCKET\"},
+        {\"name\": \"S3_ENDPOINT\", \"value\": \"versitygw.default.svc.cluster.local:7070\"}, {\"name\": \"S3_TLS\", \"value\": \"off\"}]}]}}" >/dev/null
+  deadline=$((SECONDS + 300))
+  while :; do
+    job=$($KUBECTL -n observability get pod compactor-job -o jsonpath='{.status.phase}')
+    case "$job" in (Succeeded|Failed) break;; esac
+    [ $SECONDS -lt $deadline ] || fail "compactor-job $1 still $job after 300s"
+    sleep 3
+  done
+  JOB_LOG=$($KUBECTL -n observability logs pod/compactor-job)
+  echo "$JOB_LOG" | tail -n 3
+  $KUBECTL -n observability delete pod compactor-job >/dev/null
+  if [ "$job" = Succeeded ]; then
+    echo "  PASS: blobs-compactor $1"
+  else
+    echo "  FAIL: blobs-compactor $1 ($job, logs above)" >&2; ERRORS=$((ERRORS + 1))
+  fi
+}
 
-scoped "$DAY/*.csv"
-QINIT=$SCOPED assert "daily $DAY: logs, metrics and podindex hold the distinct rows of the day's folded raw keys" \
-  "SELECT r.logs = (SELECT count(*) FROM read_parquet('s3://$BUCKET/daily/$CLUSTER/logs/$DAY/*/*.parquet'))
-      AND r.metrics = (SELECT count(*) FROM read_parquet('s3://$BUCKET/daily/$CLUSTER/metrics/$DAY/*/*.parquet'))
-      AND r.podindex = (SELECT count(*) FROM read_parquet('s3://$BUCKET/daily/$CLUSTER/podindex/$DAY.parquet'))
-      AND r.logs > 0
-   FROM (SELECT $DISTINCT_RAW) r"
-assert "daily $DAY: a namespace's logs are one object, found by its hive key" \
-  "SELECT count(*) = 1 AND bool_and(namespace = 'default') FROM (SELECT DISTINCT namespace, filename FROM read_parquet('s3://$BUCKET/daily/$CLUSTER/logs/$DAY/*/*.parquet', hive_partitioning = true, filename = true) WHERE namespace = 'default')"
-assert "daily $DAY: the sidecar lists every key of the day's hourly sidecars" \
-  "SELECT (SELECT list(key ORDER BY key) FROM read_csv('s3://$BUCKET/daily/$CLUSTER/_folded/$DAY.csv.zst', header = true))
-        = (SELECT list(DISTINCT key ORDER BY key) FROM read_csv('s3://$BUCKET/hourly/$CLUSTER/_folded/$DAY/*.csv', header = true))"
-assert "daily pods: the three incarnations of 'reused', one row each with its one line and exit 0" \
-  "SELECT count(*) = 3 AND count(DISTINCT pod_uid) = 3 AND bool_and(lines = 1) AND bool_and(exit_code = 0)
-     AND count(*) FILTER (phase = 'succeeded') >= 2
-   FROM read_parquet('s3://$BUCKET/daily/$CLUSTER/pods/$DAY.parquet') WHERE pod = 'reused' AND container = 'reused'"
+# Every day with folded hours, rolled up by hand: more than one when the
+# run crossed midnight UTC (the loop rolls up a past day itself; a rollup
+# with nothing new does nothing).
+DAYS=$(q "SELECT DISTINCT regexp_extract(file, '_folded/([0-9-]+)/', 1) AS d FROM glob('s3://$BUCKET/hourly/$CLUSTER/_folded/*/*.csv') ORDER BY d")
+[ -n "$DAYS" ] || fail "no hourly sidecars"
+# daily_rows <day> <assertion label>: the day's logs, metrics and podindex
+# against the distinct rows of the raw keys its hourly sidecars list
+daily_rows() {
+  scoped "$1/*.csv"
+  QINIT=$SCOPED assert "daily $1: $2" \
+    "SELECT $(same_rows logs "$(daily logs "$1")") AND $(same_rows metrics "$(daily metrics "$1")")
+        AND $(same_rows podindex "$(daily podindex "$1")") AND (SELECT count(*) FROM logs) > 0"
+}
+for day in $DAYS; do
+  echo "  rollup $day"
+  compactor_job "[\"rollup\", \"$day\"]"
+  daily_rows "$day" "logs, metrics and podindex hold exactly the distinct rows of the day's folded raw keys"
+  assert "daily $day: the sidecar lists every key of the day's hourly sidecars" \
+    "SELECT (SELECT list(key ORDER BY key) FROM read_csv('s3://$BUCKET/daily/$CLUSTER/_folded/$day.csv.zst', header = true))
+          = (SELECT list(DISTINCT key ORDER BY key) FROM read_csv('s3://$BUCKET/hourly/$CLUSTER/_folded/$day/*.csv', header = true))"
+done
+LAST=$(echo "$DAYS" | tail -n 1)
+assert "daily $LAST: a namespace's logs are one object, found by its hive key" \
+  "SELECT count(*) = 1 AND bool_and(namespace = 'default') FROM (SELECT DISTINCT namespace, filename FROM read_parquet('s3://$BUCKET/daily/$CLUSTER/logs/$LAST/*/*.parquet', hive_partitioning = true, filename = true) WHERE namespace = 'default')"
+# per incarnation over the days: one that ran across midnight has a row in each
+assert "daily pods: the three incarnations of 'reused', each with its one line and exit 0" \
+  "SELECT count(*) = 3 AND bool_and(lines = 1) AND bool_and(exited) AND count(*) FILTER (succeeded) >= 2
+   FROM (SELECT pod_uid, sum(lines) AS lines, bool_or(exit_code = 0) AS exited, bool_or(phase = 'succeeded') AS succeeded
+         FROM read_parquet('s3://$BUCKET/daily/$CLUSTER/pods/*.parquet') WHERE pod = 'reused' AND container = 'reused' GROUP BY pod_uid)"
+
+# An incremental rollup: a raw object of a namespace of its own, in an hour
+# of the last day that has no keys yet and that the agent is not uploading
+# to, folded by hand, then the day rolled up again. Only that namespace is
+# rewritten; the other namespaces' pods rows stay as they were.
+LATE_HOUR=$(q "SELECT lpad(min(h)::VARCHAR, 2, '0') FROM range(24) t(h)
+  WHERE abs(epoch(strptime('$LAST', '%Y-%m-%d') + to_hours(h)) - epoch($NOW)) >= 7200
+    AND lpad(h::VARCHAR, 2, '0') NOT IN (SELECT regexp_extract(file, '/$LAST/([0-9]{2})/', 1) FROM $RAW_KEYS)
+    AND lpad(h::VARCHAR, 2, '0') NOT IN (SELECT regexp_extract(file, '_folded/$LAST/([0-9]{2})\\.csv\$', 1) FROM glob('s3://$BUCKET/hourly/$CLUSTER/_folded/$LAST/*.csv'))" | tr -d '[:space:]')
+[ -n "$LATE_HOUR" ] || fail "no free hour in $LAST for the incremental rollup"
+LATE_UID=$(q "SELECT uuid()" | tr -d '[:space:]')
+q "COPY (SELECT * FROM $(daily pods "$LAST")) TO '$PODS_BEFORE' (FORMAT parquet)" >/dev/null || fail "snapshot of the daily pods of $LAST"
+q "COPY (
+  SELECT 'logs' AS \"table\", t AS time, t AS ts, '$CLUSTER' AS cluster, 'itest-late' AS node, 'itest-late' AS namespace,
+         'late' AS pod, '$LATE_UID' AS pod_uid, 'late' AS container, 0 AS restart, 'stdout' AS stream, 'late line ' || i AS message
+  FROM (SELECT i, strptime('$LAST $LATE_HOUR', '%Y-%m-%d %H')::TIMESTAMP_NS + to_seconds(i) AS t FROM range(3) r(i))
+  UNION ALL BY NAME
+  SELECT 'podindex' AS \"table\", t AS time, t AS ts, '$CLUSTER' AS cluster, 'itest-late' AS node, 'pod-observed' AS kind,
+         'itest-late' AS namespace, 'late' AS pod, '$LATE_UID' AS pod_uid, t AS pod_started
+  FROM (SELECT strptime('$LAST $LATE_HOUR', '%Y-%m-%d %H')::TIMESTAMP_NS AS t)
+) TO 's3://$BUCKET/raw1/$CLUSTER/$LAST/$LATE_HOUR/itest-late/0000-$LATE_UID.jsonl.zst' (FORMAT json, COMPRESSION zstd)" >/dev/null \
+  || fail "upload of the late raw object"
+echo "  fold $LAST $LATE_HOUR, rollup $LAST"
+compactor_job "[\"fold\", \"$LAST\", \"$LATE_HOUR\"]"
+compactor_job "[\"rollup\", \"$LAST\"]"
+if echo "$JOB_LOG" | grep -q '"hours":1,"namespaces":1,'; then
+  echo "  PASS: the incremental rollup rewrote one hour's one namespace"
+else
+  echo "  FAIL: the incremental rollup did not rewrite exactly one hour's one namespace" >&2; ERRORS=$((ERRORS + 1))
+fi
+daily_rows "$LAST" "after the incremental rollup, still exactly the distinct rows of the day's folded raw keys"
+assert "daily $LAST: the incremental rollup kept the other namespaces' pods rows as they were" \
+  "SELECT (SELECT count(*) FROM (SELECT * FROM read_parquet('$PODS_BEFORE') EXCEPT SELECT * FROM $(daily pods "$LAST") WHERE namespace <> 'itest-late')) = 0
+      AND (SELECT count(*) FROM (SELECT * FROM $(daily pods "$LAST") WHERE namespace <> 'itest-late' EXCEPT SELECT * FROM read_parquet('$PODS_BEFORE'))) = 0
+      AND (SELECT count(*) FROM read_parquet('$PODS_BEFORE')) = (SELECT count(*) FROM $(daily pods "$LAST") WHERE namespace <> 'itest-late')"
+assert "daily $LAST: the late namespace's pods row has its three lines" \
+  "SELECT count(*) = 1 AND bool_and(lines = 3) FROM $(daily pods "$LAST") WHERE namespace = 'itest-late' AND pod_uid = '$LATE_UID'"
 $KUBECTL -n observability scale deployment/blobs-compactor --replicas=1 >/dev/null
 
 echo
