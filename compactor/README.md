@@ -383,9 +383,12 @@ Further rules:
   from its upload, and 30m keeps that under 2h.
 
 State lives only in the bucket, so every start, whether an upgrade, a
-drain or an OOM kill, is an ordinary tick. A SIGTERM lets the pass in
-flight finish (each job has its `JOB_TIMEOUT`, default 30m), so a stopped
-compactor leaves a quiet bucket. `fold <date> <HH>` and `rollup <date>`
+drain or an OOM kill, is an ordinary tick. A SIGTERM ends a pass between
+its jobs: the fold or rollup in flight finishes under its own
+`JOB_TIMEOUT` (default 30m), and no other starts, so a stop takes one job
+and a stopped compactor leaves a quiet bucket. A job that outlasts
+`terminationGracePeriodSeconds` is killed, which is a crash like any
+other: its temporary objects are swept and its keys folded again. `fold <date> <HH>` and `rollup <date>`
 run one job by hand with the same environment, while no loop runs.
 
 ### Raw deletion
@@ -406,7 +409,8 @@ is what an alert on that bound reads. The secret then needs delete on
 
 - `replicas: 1`, `strategy: Recreate`. A single writer is a correctness
   requirement for incremental folding. `terminationGracePeriodSeconds:
-  300`, so a stop lets the job in flight commit.
+  300`, so a stop lets the job in flight commit; the loop starts no job
+  after a SIGTERM.
 - `automountServiceAccountToken: false`. Non-root 65532/65534,
   `readOnlyRootFilesystem`, drop ALL, seccomp RuntimeDefault.
 - `envFrom` secret `blobs-compactor-s3` (`AWS_ACCESS_KEY_ID`,

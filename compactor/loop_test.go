@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -148,5 +150,41 @@ func TestRawGaugesFollowEveryPassesDeletions(t *testing.T) {
 		if g := gauges(); !strings.Contains(g, want) {
 			t.Fatalf("after the rolling pass deleted hour 09, metrics lack %q:\n%s", want, g)
 		}
+	}
+}
+
+// A stop during a pass lets the job in flight commit and starts no other.
+func TestStopEndsAPassBetweenJobs(t *testing.T) {
+	w := newWorld(t)
+	w.putA()
+	w.putE()
+	h12 := day.Add(12 * time.Hour)
+	w.put(rawKey(h12, "n1", "0000-g"), logs(h12, 2, "ns1", "p1", "u1")...)
+	ctx, stop := context.WithCancel(w.ctx)
+	defer stop()
+	commits := 0
+	w.c.beforeCommit = func(string) error { commits++; stop(); return nil }
+	if err := w.c.past(ctx, day.Add(30*time.Hour), time.Minute); !errors.Is(err, errStopped) {
+		t.Fatalf("past pass err %v, want stopped", err)
+	}
+	if commits != 1 || len(w.folded(h10)) != 1 {
+		t.Fatalf("%d commits, hour 10 sidecar %v: want the job in flight committed", commits, w.folded(h10))
+	}
+	if w.exists(w.c.l.hourlySidecar(h11)) || w.exists(w.c.l.hourlySidecar(h12)) || w.exists(w.c.l.dailySidecar(day)) {
+		t.Fatal("jobs ran after the stop")
+	}
+
+	// the rolling pass: the current hour's fold commits, the previous
+	// hour's does not start
+	w.c.beforeCommit = nil
+	cur := day.Add(13 * time.Hour)
+	w.put(rawKey(cur, "n1", "0000-h"), logs(cur, 2, "ns1", "p1", "u1")...)
+	ctx, stop = context.WithCancel(w.ctx)
+	w.c.beforeCommit = func(string) error { stop(); return nil }
+	if err := w.c.rollingPass(ctx, cur.Add(20*time.Minute), time.Minute); !errors.Is(err, errStopped) {
+		t.Fatalf("rolling pass err %v, want stopped", err)
+	}
+	if !w.exists(w.c.l.hourlySidecar(cur)) || w.exists(w.c.l.hourlySidecar(h12)) {
+		t.Fatal("rolling pass: want the current hour committed and the previous not started")
 	}
 }

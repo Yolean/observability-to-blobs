@@ -31,21 +31,17 @@ func (c *compactor) run(ctx context.Context, cfg config) error {
 		"past", cfg.past.String(), "raw_delete", cfg.rawDelete, "metrics", cfg.metricsAddr)
 	tick := time.NewTicker(cfg.rolling)
 	defer tick.Stop()
-	// A stop (SIGTERM) lets the pass in flight finish rather than leave
-	// objects ahead of their sidecar; that is harmless, the next fold
-	// repeats the keys, but a stopped compactor then leaves a quiet
-	// bucket. Each job keeps its own deadline.
-	jobs := context.WithoutCancel(ctx)
 	var lastPast time.Time
 	for {
 		now := time.Now().UTC()
-		c.rollingPass(jobs, now, cfg.jobTimeout)
+		c.rollingPass(ctx, now, cfg.jobTimeout)
 		if ctx.Err() == nil && (lastPast.IsZero() || now.Sub(lastPast) >= cfg.past) {
-			c.pastPass(jobs, now, cfg.jobTimeout)
+			c.pastPass(ctx, now, cfg.jobTimeout)
 			lastPast = now
 		}
 		select {
 		case <-ctx.Done():
+			c.log.Info("run", "stopped", true)
 			return nil
 		case err := <-srvErr:
 			return err
@@ -55,6 +51,23 @@ func (c *compactor) run(ctx context.Context, cfg config) error {
 }
 
 func dayOf(t time.Time) time.Time { return t.UTC().Truncate(24 * time.Hour) }
+
+// A stop (SIGTERM, ctx done) ends a pass between its jobs: the job in
+// flight finishes, under its own deadline (jobContext), rather than leave
+// objects ahead of their sidecar, and no other starts. So a stop takes at
+// most one job, which terminationGracePeriodSeconds allows for, and a
+// stopped compactor leaves a quiet bucket.
+var errStopped = errors.New("stopped between jobs")
+
+func stopped(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return errStopped
+	}
+	return nil
+}
+
+// jobContext is a pass's context for its jobs: not cancelled by a stop.
+func jobContext(ctx context.Context) context.Context { return context.WithoutCancel(ctx) }
 
 // foldJob is fold with a deadline, logged and counted.
 func (c *compactor) foldJob(ctx context.Context, h time.Time, listed []Object, now time.Time, timeout time.Duration) (foldResult, error) {
@@ -99,25 +112,40 @@ func (c *compactor) rollupJob(ctx context.Context, day time.Time, timeout time.D
 // rollingPass folds the current hour and, until it is final, the previous.
 func (c *compactor) rollingPass(ctx context.Context, now time.Time, timeout time.Duration) error {
 	start := time.Now()
+	err := c.rolling(ctx, now, timeout)
+	c.m.job("rolling", start, err)
+	return err
+}
+
+func (c *compactor) rolling(ctx context.Context, now time.Time, timeout time.Duration) error {
+	jobs := jobContext(ctx)
 	cur := now.UTC().Truncate(time.Hour)
 	prev := cur.Add(-time.Hour)
-	_, err := c.foldJob(ctx, cur, nil, now, timeout)
+	if err := stopped(ctx); err != nil {
+		return err
+	}
+	_, err := c.foldJob(jobs, cur, nil, now, timeout)
 	errs := []error{err}
 	if prev.After(c.finalSeen) {
-		r, err := c.foldJob(ctx, prev, nil, now, timeout)
+		if err := stopped(ctx); err != nil {
+			return errors.Join(append(errs, err)...)
+		}
+		r, err := c.foldJob(jobs, prev, nil, now, timeout)
 		errs = append(errs, err)
 		if err == nil && r.final {
 			c.finalSeen = prev
-			// the day's last hour just became final: the day's first rollup
+			// the day's last hour just became final: the day's first
+			// rollup; after a stop the next past pass makes it
 			if r.wrote && r.full && dayOf(prev).Before(dayOf(cur)) {
-				_, err := c.rollupJob(ctx, dayOf(prev), timeout)
+				if err := stopped(ctx); err != nil {
+					return errors.Join(append(errs, err)...)
+				}
+				_, err := c.rollupJob(jobs, dayOf(prev), timeout)
 				errs = append(errs, err)
 			}
 		}
 	}
-	err = errors.Join(errs...)
-	c.m.job("rolling", start, err)
-	return err
+	return errors.Join(errs...)
 }
 
 // pastPass deletes abandoned temporary objects, lists the cluster's raw
@@ -132,6 +160,7 @@ func (c *compactor) pastPass(ctx context.Context, now time.Time, timeout time.Du
 }
 
 func (c *compactor) past(ctx context.Context, now time.Time, timeout time.Duration) error {
+	jobs := jobContext(ctx)
 	var errs []error
 	lctx, cancel := context.WithTimeout(ctx, timeout)
 	if err := c.sweep(lctx, now, timeout); err != nil {
@@ -168,7 +197,10 @@ func (c *compactor) past(ctx context.Context, now time.Time, timeout time.Durati
 		if h.Equal(cur) {
 			continue
 		}
-		_, err := c.foldJob(ctx, h, byHour[h], now, timeout)
+		if err := stopped(ctx); err != nil {
+			return errors.Join(append(errs, err)...)
+		}
+		_, err := c.foldJob(jobs, h, byHour[h], now, timeout)
 		errs = append(errs, err)
 	}
 
@@ -192,7 +224,10 @@ func (c *compactor) past(ctx context.Context, now time.Time, timeout time.Durati
 	}
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Before(sorted[j]) })
 	for _, d := range sorted {
-		_, err := c.rollupJob(ctx, d, timeout)
+		if err := stopped(ctx); err != nil {
+			return errors.Join(append(errs, err)...)
+		}
+		_, err := c.rollupJob(jobs, d, timeout)
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
