@@ -13,7 +13,7 @@ side on a node and share no credential.
 | The audit log, `/var/log/audit/audit.log` | `tail`, following the file by inode across rotation, never the numbered files | auditd's `audit(timestamp:serial)` identifies each record. Reading it needs auditd's `log_group` set to a group the service is in. |
 | Package changes: `/var/log/dpkg.log`, `/var/log/apt/history.log`, `/var/log/unattended-upgrades/*.log` | `tail` | |
 | Further files, configured | `tail` | For example a Kubernetes API server audit log written on the host. |
-| A heartbeat | every 60 s, a record with the boot id and a counter | The counter is kept in the state directory: it continues across restarts of the service and starts again at a new boot id. A missing counter value or a silence longer than the interval shows a gap at the receiver. |
+| A heartbeat | every 60 s, a record with the boot id, a counter and whether a reboot is pending | The counter is kept in the state directory: it continues across restarts of the service and starts again at a new boot id. A missing counter value or a silence longer than the interval shows a gap at the receiver. |
 
 Every line carries `table` (`journal`, `audit`, `file` or `heartbeat`), the node name, the cluster
 name, the event time as `ts`, and for files the path.
@@ -22,9 +22,13 @@ name, the event time as `ts`, and for files the path.
 
 - One object per upload window (default 30 s, `UPLOAD_TIMEOUT`), JSON lines, zstd, with PutObject only
   (`use_put_object`) and `send_content_md5: true`, which buckets with Object Lock require.
-- Key: `/${KEY_ROOT}/${CLUSTER_NAME}/%Y-%m-%d/%H/${NODE_NAME}/%M%S-$UUID.jsonl.zst`. `KEY_ROOT` is
-  configurable (for example `security1`), so one bucket layout serves several record kinds. Hour
-  before node, as the DaemonSet's `raw1/`, so a consumer lists one hour for the whole cluster.
+- Key: `/${KEY_ROOT}/${CLUSTER_NAME}/%Y-%m-%d/%H/${NODE_NAME}/%M%S-$UUID.jsonl.zst`. `KEY_ROOT`
+  defaults to `host1` and is configurable (for example `security1`). The layout below the root is
+  the DaemonSet's `raw1/`, at the same depth, so the same globs and readers work on either root;
+  hour before node, so a consumer lists one hour for the whole cluster. The root says what the
+  objects are: the host agent never writes under the DaemonSet's root, and the two never share
+  one. No marker such as `_host` in the path: a segment only some objects have splits every
+  fixed-depth glob, and readers in the Hadoop tradition skip paths that start with `_`.
 - The agent never lists, reads, overwrites or deletes an object. Its key can be a write-only one,
   and the bucket can carry Object Lock and a default retention.
 - Every upload attempt gets a fresh key. A retry under the same key would create a second version
@@ -68,11 +72,40 @@ name, the event time as `ts`, and for files the path.
 
 ## Metrics
 
-The service's own metrics (input and output records, errors, retries, buffer use) on
-`HOST_METRICS_LISTEN` (an address on the node, default port 2023), so the DaemonSet scrapes them as a
-static target and they reach the node data bucket: an output that keeps failing alerts there, and no
-key crosses between the two buckets.
+The same signals SRE staff know from the DaemonSet's nodes, under the same names: fluent-bit's
+`node_exporter_metrics` input, configured as in `agent/fluent-bit.yaml` (same collectors, same
+interval), so a host's `node_*` series look like a Kubernetes node's and existing dashboards and
+alert rules apply. `timex` gives the clock offset (`node_timex_offset_seconds`,
+`node_timex_sync_status`), `systemd` the unit states, and `textfile` the restart flag below.
 
+They are served on `HOST_METRICS_LISTEN` (an address on the node, default port 2023), together with
+the service's own metrics (input and output records, errors, retries, buffer use). Where to:
+
+- **On a Kubernetes node** the DaemonSet already exports `node_*` for the machine. The host agent
+  then serves only the series the DaemonSet cannot see (the restart flag, its own metrics), so no
+  series is doubled, and the DaemonSet scrapes `HOST_METRICS_LISTEN` as a static target: they reach
+  the node data bucket and the DaemonSet's re-serving endpoint like any other target, and no key
+  crosses between the two buckets.
+- **On a host without Kubernetes** nothing else exports them: the host agent ships all of them as
+  the `metrics` table (the DaemonSet's schema) under its own root, and serves them for a local
+  Prometheus.
+
+## Restart needed
+
+Packages that need a reboot (a kernel, libc, systemd) leave `/var/run/reboot-required` and the
+list `/var/run/reboot-required.pkgs`. The host agent does not reboot anything; it exposes the flag
+as metrics, in the names the Prometheus community's textfile collector scripts use, so a common
+alert rule fits:
+
+- `node_reboot_required` 1 when the flag exists, else 0;
+- `node_reboot_required_since_seconds` the flag's modification time, so an alert on age survives a
+  restart of whatever evaluates it (a rule's `for:` does not);
+- `node_reboot_required_packages{package="..."}` 1 per package in the list, so a rule can treat a
+  kernel or a package with a known exploited vulnerability differently from the rest.
+
+The heartbeat script writes them every interval to a `.prom` file in the state directory, which the
+`textfile` collector reads. This repository defines the metrics; the alert rules (how old a
+pending reboot may get) belong to whoever runs the alerting.
 ## What the itest verifies (host phase, on the qemu node)
 
 The host agent installed from the tarball as a systemd unit, and versitygw with a bucket that has
