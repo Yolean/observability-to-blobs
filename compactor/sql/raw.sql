@@ -28,8 +28,9 @@ CREATE OR REPLACE VIEW raw AS
       container:'VARCHAR',
       restart:'INTEGER',            -- kubelet restart count: logs from the log path, metrics from
                                     -- the scraped container (absent when the target names none)
-      stream:'VARCHAR',             -- stdout | stderr | journal
-      unit:'VARCHAR',               -- journal rows: systemd unit, syslog identifier or transport
+      stream:'VARCHAR',             -- stdout | stderr | journal | file (host mode, HOST_MODE.md)
+      unit:'VARCHAR',               -- journal rows: systemd unit, syslog identifier or transport;
+                                    -- file rows: the file's path
       priority:'INTEGER',           -- journal rows: syslog priority
       message:'VARCHAR',
       -- metrics: one line per scrape

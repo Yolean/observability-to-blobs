@@ -38,13 +38,13 @@ logs:
 time       TIMESTAMP_NS   CRI timestamp (container rows) / journal realtime
 cluster    VARCHAR
 node       VARCHAR
-namespace  VARCHAR        NULL for journal rows
-pod        VARCHAR        NULL for journal rows
+namespace  VARCHAR        NULL for journal and file rows
+pod        VARCHAR        NULL for journal and file rows
 pod_uid    VARCHAR
 container  VARCHAR
 restart    SMALLINT       kubelet restart count, from the log file name
-stream     VARCHAR        stdout | stderr | journal
-unit       VARCHAR        systemd unit (or syslog identifier) for journal rows
+stream     VARCHAR        stdout | stderr | journal | file (host mode)
+unit       VARCHAR        systemd unit (or syslog identifier) for journal rows, the path for file rows
 priority   TINYINT        syslog priority for journal rows
 message    VARCHAR
 ```

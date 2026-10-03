@@ -13,10 +13,24 @@ side on a node and share no credential.
 | The audit log, `/var/log/audit/audit.log` | `tail`, following the file by inode across rotation, never the numbered files | auditd's `audit(timestamp:serial)` identifies each record. Reading it needs auditd's `log_group` set to a group the service is in. |
 | Package changes: `/var/log/dpkg.log`, `/var/log/apt/history.log`, `/var/log/unattended-upgrades/*.log` | `tail` | |
 | Further files, configured | `tail` | For example a Kubernetes API server audit log written on the host. |
-| A heartbeat | every 60 s, a record with the boot id, a counter and whether a reboot is pending | The counter is kept in the state directory: it continues across restarts of the service and starts again at a new boot id. A missing counter value or a silence longer than the interval shows a gap at the receiver. |
+| A heartbeat | every 60 s, a metrics line with the boot id and a counter | The counter is kept in the state directory: it continues across restarts of the service and starts again at a new boot id. A missing counter value or a silence longer than the interval shows a gap at the receiver. |
+| Node metrics and the restart flag | `node_exporter_metrics` (see Metrics) | |
 
-Every line carries `table` (`journal`, `audit`, `file` or `heartbeat`), the node name, the cluster
-name, the event time as `ts`, and for files the path.
+## Schema: a subset of `raw1`
+
+Host lines use the raw tier's line contract (`compactor/sql/raw.sql`) and add no column, so every
+reader of `raw1` reads them:
+
+- **Journal entries** are `logs` rows exactly as the DaemonSet's journal rows: `stream` `journal`,
+  `unit`, `priority`, `message`, `ts`, `cluster`, `node`.
+- **Lines of tailed files** are `logs` rows with `stream` `file` and `unit` the file's path, for
+  example `/var/log/audit/audit.log`, with `message`, `ts`, `cluster` and `node`. These two values
+  are the only extension, documented in `raw.sql`; the audit log is read from its file because
+  journald's copy of audit events is best effort.
+- **Metrics** are `metrics` rows exactly as the DaemonSet's node scrape (`job` `node`, `instance`,
+  `samples`): the node exporter series, the restart flag, the agent's own metrics, and the
+  heartbeat as one sample, `observability_host_heartbeat{boot_id="..."}` with the counter as value.
+- No `podindex` rows.
 
 ## Where it writes
 
@@ -108,8 +122,9 @@ The heartbeat script writes them every interval to a `.prom` file in the state d
 pending reboot may get) belong to whoever runs the alerting.
 ## What the itest verifies (host phase, on the qemu node)
 
-The host agent installed from the tarball as a systemd unit, and versitygw with a bucket that has
-Object Lock and a write-only user:
+The host agent installed from the tarball as a systemd unit, writing to versitygw. What the storage
+enforces (Object Lock, retention, which key may do what) is the storage's responsibility and not
+tested here; the itest verifies that the agent writes in a way that makes those guarantees possible:
 
 - **Survival:** an authentication event on the host, its local log deleted by root after it was
   read; the event is in the bucket, and the time from event to object is measured.
@@ -117,12 +132,13 @@ Object Lock and a write-only user:
   every event arrives, none twice (deduplicated on record identity, as above).
 - **Gap:** the service stopped for longer than the heartbeat interval; the counter and the time
   show the gap.
-- **Write-only key:** with the agent's key, delete, overwrite, read and list are refused or, for an
-  overwrite on a locked bucket, leave the original intact.
-- **Fresh keys:** an upload that fails and is retried lands under a new key, and no key has more
-  than one version.
-- **Separation:** the host agent's key is refused on the DaemonSet's bucket, and the DaemonSet's key
-  on the host agent's.
+- **Put only:** the agent works with a key allowed nothing but PutObject on its root, and the
+  gateway's request log shows no list, read, head or delete from it.
+- **Content-MD5:** every upload carries a Content-MD5 header that matches the body.
+- **Fresh keys:** an upload that fails and is retried lands under a new key, and no key is written
+  twice.
+- **Schema:** every host line reads through `compactor/sql/raw.sql` with no field outside its
+  columns, and `stream` and `unit` take the values above.
 - **Coverage:** one record each of a login, a failed login, an account change, a privileged
   command, a configuration file change, a service stopped and a package installed.
 
