@@ -58,8 +58,9 @@ input chunks.
 | path | what |
 |---|---|
 | `images/fluentbit/` | Dockerfile (Fluent Bit v5.1.2, one patch), the `cri_scrape` Go input plugin, `UPSTREAM.md` with findings to report |
+| `images/fluentbit/host/` | host mode: the pipeline, heartbeat script and systemd unit, and `build.sh`, which builds them with the same Fluent Bit into the host tarball ([HOST_MODE.md](HOST_MODE.md)) |
 | `agent/` | kustomize base: DaemonSet, `fluent-bit.yaml` pipeline (stock processors, no Lua), the `pipeline-extra.yaml` composition hook |
-| `itest/` | y-cluster configs for a local k3s node (qemu and docker), versitygw, the workloads that exercise each path, the compactor's overlays (bucket mode, and spool mode with stock Fluent Bit as a second shipper) |
+| `itest/` | y-cluster configs for a local k3s node (qemu and docker), versitygw, the workloads that exercise each path, the compactor's overlays (bucket mode, and spool mode with stock Fluent Bit as a second shipper); `itest/host/` the host phase |
 | `images/blobs-to-prometheus/`, `tools/rules-manifest/`, `local/`, `alerts-cf/` | the alerting consumer from the PoC; rewired to the new blob in phase 3 |
 | `compactor/` | `blobs-compactor` (fold, rollup and the loop that runs them, and the logs API), its design (`README.md`), its SQL (`sql/raw.sql` is the raw line contract every consumer reads), its build script and `deploy/` |
 | `examples/gke/` | sketch of a production overlay |

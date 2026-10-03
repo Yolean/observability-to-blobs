@@ -1,0 +1,9 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The bucket of the host phase (HOST_MODE.md): its own gateway with an IAM
+# directory, so that the host agent's key can be a user allowed one action,
+# and an access log, which the phase reads back.
+resources:
+- versitygw-host.yaml
