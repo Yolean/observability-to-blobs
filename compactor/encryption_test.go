@@ -305,3 +305,44 @@ func TestEncryptedRoundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A key file whose content changed under the same id reads nothing that
+// was written with it before: the check decrypts one stored object per id
+// and refuses, rather than fail every fold of those hours later.
+func TestChangedKeyContentRefuses(t *testing.T) {
+	w := newKeyedWorld(t, "k1")
+	w.putA()
+	w.fold(h10, during)
+	if err := os.WriteFile(filepath.Join(w.keysDir, "k1"), []byte(testKey("k1-other")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var refused errKeysMissing
+	if err := w.c.checkKeys(w.ctx); !errors.As(err, &refused) || strings.Join(refused.wrong, ",") != "k1" || len(refused.ids) != 0 {
+		t.Fatalf("checkKeys: %v, want the refusal naming k1 as wrong", err)
+	}
+	if err := w.c.rollingPass(w.ctx, during, time.Minute); !errors.As(err, &refused) {
+		t.Fatalf("rolling pass: %v, want the refusal", err)
+	}
+	// the original content back: the check passes and folds resume
+	w.encrypt("k1")
+	if err := w.c.rollingPass(w.ctx, during, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// With the keys directory but no active key, new objects are plain while
+// the encrypted ones are still rewritten under their keys.
+func TestKeysWithoutActiveKeyStillRewriteEncrypted(t *testing.T) {
+	w := newKeyedWorld(t, "k1")
+	w.putA()
+	w.fold(h10, during)
+	w.c.keyID = ""
+	if err := w.c.init(w.ctx, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	w.putB()
+	w.fold(h10, during.Add(time.Minute))
+	if id := w.keyOf(w.c.l.hourlyStem("logs", h10)); id != "k1" {
+		t.Fatalf("hour 10 logs under %q, want k1 still", id)
+	}
+}

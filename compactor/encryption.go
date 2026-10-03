@@ -103,17 +103,25 @@ func sortedIDs[V any](m map[string]V) []string {
 // in the scratch directory: the engine writes encrypted Parquet only with
 // httpfs's crypto loaded, and this fails at start, not at the first fold.
 func (c *compactor) keyCheck(ctx context.Context, scratch string) error {
-	if c.keyID == "" {
+	id := c.keyID
+	if id == "" {
+		// encryption off for new objects, but existing ones are rewritten
+		// under their keys, so the same crypto must be there
+		if ids := sortedIDs(c.keys); len(ids) > 0 {
+			id = ids[0]
+		}
+	}
+	if id == "" {
 		return nil
 	}
 	f := sqlString(filepath.Join(scratch, "blobs-compactor-key-check.parquet"))
-	cfg := encryptionConfig(c.keyID)
+	cfg := encryptionConfig(id)
 	var n int
 	if _, err := c.db.ExecContext(ctx, "COPY (SELECT 42 AS x) TO "+f+" (FORMAT parquet, ENCRYPTION_CONFIG "+cfg+")"); err != nil {
-		return fmt.Errorf("an encrypted write with PARQUET_KEY_ID %s: %w", c.keyID, err)
+		return fmt.Errorf("an encrypted write with parquet key %s: %w", id, err)
 	}
 	if err := c.db.QueryRowContext(ctx, "SELECT x FROM read_parquet("+f+", encryption_config = "+cfg+")").Scan(&n); err != nil || n != 42 {
-		return fmt.Errorf("an encrypted read with PARQUET_KEY_ID %s: %d %v", c.keyID, n, err)
+		return fmt.Errorf("an encrypted read with parquet key %s: %d %v", id, n, err)
 	}
 	return nil
 }
@@ -121,11 +129,19 @@ func (c *compactor) keyCheck(ctx context.Context, scratch string) error {
 func encryptionConfig(keyID string) string { return "{footer_key: " + sqlString(keyID) + "}" }
 
 // errKeysMissing is the refusal to fold while a tier object's key is gone.
-type errKeysMissing struct{ ids []string }
+type errKeysMissing struct{ ids, wrong []string }
 
 func (e errKeysMissing) Error() string {
-	return fmt.Sprintf("refusing to fold: the tiers hold objects encrypted with parquet keys %s, which PARQUET_KEYS_DIR lacks; "+
-		"retention of the tiers must not outlast their keys' (compactor/README.md, \"Encryption\")", strings.Join(e.ids, ", "))
+	var why []string
+	if len(e.ids) > 0 {
+		why = append(why, fmt.Sprintf("the tiers hold objects encrypted with parquet keys %s, which PARQUET_KEYS_DIR lacks; "+
+			"retention of the tiers must not outlast their keys'", strings.Join(e.ids, ", ")))
+	}
+	if len(e.wrong) > 0 {
+		why = append(why, fmt.Sprintf("parquet keys %s do not decrypt objects stored under them: a key file's content must never "+
+			"change", strings.Join(e.wrong, ", ")))
+	}
+	return "refusing to fold: " + strings.Join(why, "; ") + " (compactor/README.md, \"Encryption\")"
 }
 
 // checkKeys reloads the keys directory and lists the key ids that the
@@ -151,6 +167,9 @@ func (c *compactor) findMissingKeys(ctx context.Context) error {
 	if c.keyID != "" {
 		ids[c.keyID] = true
 	}
+	// one stored object per key id, to prove the key file still holds the
+	// key the objects were written with
+	sample := map[string]string{}
 	for _, p := range c.l.tierPrefixes() {
 		objs, err := c.tiers.List(ctx, p)
 		if err != nil {
@@ -159,20 +178,39 @@ func (c *compactor) findMissingKeys(ctx context.Context) error {
 		for _, o := range objs {
 			if id := tierKeyID(o.Key); id != "" {
 				ids[id] = true
+				if _, ok := sample[id]; !ok {
+					sample[id] = o.Key
+				}
 			}
 		}
 	}
-	var missing []string
+	var missing, wrong []string
 	for _, id := range sortedIDs(ids) {
 		if _, ok := c.keys[id]; !ok {
 			missing = append(missing, id)
+			continue
+		}
+		if key, ok := sample[id]; ok && !c.decrypts(ctx, id, key) {
+			wrong = append(wrong, id)
 		}
 	}
-	c.m.keysMissing(len(missing))
-	if len(missing) > 0 {
-		return errKeysMissing{missing}
+	c.m.keysMissing(len(missing) + len(wrong))
+	if len(missing) > 0 || len(wrong) > 0 {
+		return errKeysMissing{ids: missing, wrong: wrong}
 	}
 	return nil
+}
+
+// decrypts reads one row of a stored object with the key file's content
+// for id. A key whose file content changed reads nothing it wrote before.
+func (c *compactor) decrypts(ctx context.Context, id, key string) bool {
+	var n int64
+	err := c.db.QueryRowContext(ctx, "SELECT count(*) FROM (SELECT * FROM read_parquet("+sqlString(c.tiers.URL(key))+
+		", encryption_config = "+encryptionConfig(id)+") LIMIT 1)").Scan(&n)
+	if err != nil {
+		c.log.Error("parquet key does not decrypt a stored object", "key", id, "object", key, "err", err)
+	}
+	return err == nil
 }
 
 // locate returns stem's object: the one that exists, under whatever key it

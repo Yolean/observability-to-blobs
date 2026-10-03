@@ -184,8 +184,9 @@ func (c config) engineInit() (httpfs string, init []initStmt) {
 	}
 	if c.dir != "" {
 		// httpfs is for the bucket, and for encrypted writes: without it
-		// the engine's crypto is read-only (sqlfiles_test.go)
-		if c.parquetKeyID == "" {
+		// the engine's crypto is read-only (sqlfiles_test.go). A keys
+		// directory without an active key still rewrites encrypted objects
+		if c.parquetKeysDir == "" {
 			return "", init
 		}
 		return c.httpfs, init
