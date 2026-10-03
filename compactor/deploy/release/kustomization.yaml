@@ -7,5 +7,5 @@ resources:
 - ../base
 images:
 - name: ghcr.io/yolean/blobs-compactor
-  newTag: 20261003T152738Z
-  digest: sha256:c7628b74a8680d1a24c31ccba889774bbc2fa896f7a4725b905ebd50ceab7710
+  newTag: 20261003T154109Z
+  digest: sha256:447893a7af6d9988f06f278dc73b24ed4b3eba67a5587d1af4a832230c06a225
