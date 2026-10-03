@@ -1,14 +1,15 @@
 # blobs-compactor: build, image and deployment
 
-> The design for this iteration, final as of 2026-09-25.
-> One Go binary with DuckDB embedded, built
-> reproducibly by one script that runs the same on an Ubuntu host, a Mac
-> with Docker, and GitHub Actions. This document is what the compactor
-> computes, how it is built, shipped and run, and how the fold uses the SQL
-> in `sql/`. Built so far: the build (`build.sh`,
-> the pins, CI), `selftest`, and the embedded SQL with the tests of the
-> engine behaviour the fold relies on. To build: `fold`, `rollup`, the
-> loop, `deploy/base`.
+> The design of this iteration, final as of 2026-09-25,
+> and what is built from it. One Go binary with
+> DuckDB embedded, built reproducibly by one script that runs the same on
+> an Ubuntu host, a Mac with Docker, and GitHub Actions. This document is
+> what the compactor computes, how it is built, shipped and run, and how
+> the fold uses the SQL in `sql/`. Built: the build (`build.sh`, the pins,
+> CI), `selftest`, the embedded SQL with the tests of the engine behaviour
+> the fold relies on, `fold`, `rollup`, the loop (`run`) with optional raw
+> deletion and `/metrics`, and `deploy/base` with the release pin. The
+> itest runs it in a cluster (root `README.md`).
 
 ## Decisions
 
@@ -47,8 +48,8 @@ A minimal `database/sql` program on duckdb-go v2.10505.0 showed:
   a remote read hung for over 14 min. Emulation is only ever used to
   *build*. Images are exercised on their native arch.
 
-Not yet shown: that an Ubuntu amd64 host and GHA produce the same digests
-as this Mac. That is acceptance check 1 below.
+Not yet shown: that an Ubuntu amd64 host produces the same digests as
+this Mac. That is acceptance check 1 below.
 
 ## The build script
 
@@ -132,20 +133,29 @@ rebuild either from source.
 ```
 compactor/
   go.mod go.sum
-  main.go            open (the engine, httpfs), version; to come: run, fold, rollup
+  main.go            the commands, open (the engine, httpfs, the secret), version
+  config.go          the environment
+  keys.go            the key layout of the tiers
+  store.go           RawSource and TierStore, and a local directory as both
+  s3.go              the bucket as both: ListObjectsV2, HeadObject, DeleteObjects, SigV4
+  fold.go            fold of one hour, the sidecar
+  rollup.go          rollup of one day
+  loop.go            run: the rolling and past passes
+  metrics.go         /metrics
   selftest.go        selftest
   sqlfiles.go        go:embed of sql/, setRawFiles, loadSQL
   sql/raw.sql        the raw line contract: view raw over the variable raw_files
   sql/tables.sql     views logs, metrics, podindex over raw: the rows each table gets
   sql/pods.sql       view pods over logs, metrics, podindex: the index
-  *_test.go          the fold's engine behaviour on fixtures the tests write
+  *_test.go          the engine behaviour, and the fold, rollup and passes on
+                     jsonl.zst fixtures the tests write to a directory store
   build.env build.sh contain.yaml
-  compact.sh         the shell prototype of one hour, over the same sql/
-  deploy/release/    the images: pin; deploy/base/ and resources: [../base] to come
+  deploy/base/       the Deployment
+  deploy/release/    resources: [../base] and the images: pin
 ```
 
-`compact.sh` is deleted once `blobs-compactor fold` writes the same
-objects. `local/blobs.sh` and `test.sh` read `sql/raw.sql` and
+The shell prototype `compact.sh` is gone: `blobs-compactor fold` writes
+the same objects. `local/blobs.sh` and `test.sh` read `sql/raw.sql` and
 `sql/tables.sql` (and `local/hourly.sql` for the hourly tier), so every
 consumer and the compactor share one column contract and one definition
 of each table's rows.
@@ -174,10 +184,11 @@ entrypoint: [/usr/local/bin/blobs-compactor]   # args: [run] in deploy/base
 
 - Per-job timeouts are `context` deadlines that interrupt the running
   query in-process. No child process to kill.
-- Row counts, `glob()` listings and the folded-key sets come back as typed
-  Go values. The incremental logic (diff, decide, write) is Go around SQL
-  statements, not text parsing of CLI output.
-- The S3 secret is built in-process from env and never leaves memory.
+- Row counts and the folded-key sets come back as typed Go values. The
+  incremental logic (diff, decide, write) is Go around SQL statements, not
+  text parsing of CLI output.
+- The S3 secret is built in-process from env and never leaves memory; an
+  engine error about it is logged with the secret blanked out.
 - SQL is unit-tested in `go test` against the same engine that ships.
 
 ## Compaction
@@ -195,26 +206,44 @@ this design rests on:
    namespace.
 2. **Folded keys live in a sidecar** written last as the commit marker:
    `hourly/{cluster}/_folded/{date}/{HH}.csv` and
-   `daily/{cluster}/_folded/{date}.csv.zst`. Every write is a `COPY`,
-   which is what keeps the binary free of an S3 client.
+   `daily/{cluster}/_folded/{date}.csv.zst`. Every object write is a
+   `COPY`. The binary's own S3 calls are three that DuckDB cannot make:
+   ListObjectsV2 (keys with their upload times), HeadObject, and
+   DeleteObjects for the optional raw deletion.
 3. **Tiered cadence and hour-first keys**
    (`raw1/{cluster}/{date}/{HH}/{node}/{MMSS}-{uuid}.jsonl.zst`). The
    current hour is folded every 2 min; once an hour, every other hour with
-   raw objects, found by one glob of `raw1/{cluster}/` (lifecycle ages an
-   object from its upload, so late hours are not bounded by retention).
-   DuckDB's S3 glob LISTs the prefix up to the first wildcard, which is why
-   the hour comes first.
+   raw objects, found by one listing of `raw1/{cluster}/` (lifecycle ages
+   an object from its upload, so late hours are not bounded by retention).
+   A listing pages through every key under its prefix, which is why the
+   hour comes first: an hour's fold lists only that hour (measured with
+   DuckDB's glob, which lists the same way).
 4. **The first fold after H+1 plus grace is a full read** of the hour's
    raw. It repairs incremental-fold bugs, partial writes, and an
    overlapping writer: `Recreate` prevents one during rollouts, not when a
    node is unreachable and the ReplicaSet replaces a pod marked for
    deletion.
 
+The tiers' keys:
+
+```
+hourly/{cluster}/{logs,metrics,podindex,pods}/{date}/{HH}.parquet
+hourly/{cluster}/_folded/{date}/{HH}.csv              key,final: the raw keys folded in, written last
+daily/{cluster}/{logs,metrics}/{date}/namespace={namespace}/data_0.parquet
+daily/{cluster}/{podindex,pods}/{date}.parquet
+daily/{cluster}/_folded/{date}.csv.zst                key: the raw keys rolled into the day, written last
+```
+
+The namespace in a daily key is path-escaped the way DuckDB's hive
+partitioning writes it, and the column is in the file too, so readers can
+use `hive_partitioning` to skip the other namespaces' objects or ignore
+the path. Journal rows are in `_node`.
+
 ### The SQL, and the engine behaviour it relies on
 
 The fold runs the files in `sql/`, embedded, on the engine that
 `build.env` pins, which is also the CLI version the itest runs them on.
-Three properties of DuckDB 1.5.5 carry the design, and
+Three properties of DuckDB 1.5 carry the design, and
 `sqlfiles_test.go` asserts each, so a DuckDB bump that changes one fails
 `build.sh test`:
 
@@ -228,14 +257,15 @@ Three properties of DuckDB 1.5.5 carry the design, and
   catalog's schema `main`). Nothing may qualify a name to mean "the view".
 
 Session variables and temp tables belong to a connection, so each fold
-runs on its own `*sql.Conn` and closes it; the temp tables go with it.
+runs on its own `*sql.Conn` and closes it; the engine keeps no idle
+connections, so the temp tables go with it. DuckDB's external file cache
+is off: the compactor rereads objects it has just replaced.
 
 ### A fold of one hour
 
-1. **Keys.** `glob('raw1/{cluster}/{date}/{HH}/*/*.jsonl.zst')` minus the
-   hour's sidecar. No files, or no sidecar, is zero keys, not an error.
-   No new keys: done, nothing written. The full read at H+1 plus grace
-   takes every key and skips the union in step 4.
+1. **Keys.** The listing of `raw1/{cluster}/{date}/{HH}/`, minus the
+   hour's sidecar. No objects, or no sidecar, is zero keys, not an error.
+   No new keys: done, nothing written.
 2. **Views.** `setRawFiles(new keys)`, `loadSQL`.
 3. **Read once.** `CREATE TEMP TABLE raw AS SELECT * FROM raw`: the new
    objects are read once, and the table views now read this table.
@@ -247,63 +277,140 @@ runs on its own `*sql.Conn` and closes it; the temp tables go with it.
    folds retried uploads and keys folded twice.
 5. **Write.** `COPY` `logs`, `metrics` and `podindex` with their sort
    orders, then `pods` (`pods.sql` now reads the three temp tables, so it
-   counts deduplicated rows), each to its hourly key. The keys are the only
-   SQL text Go renders, because `COPY ... TO` takes a literal.
+   counts deduplicated rows), each to its hourly key. All four are written
+   even when one is empty. The keys are the only SQL text Go renders,
+   because `COPY ... TO` takes a literal.
 6. **Commit.** `COPY` the sidecar, the previous keys plus the new ones,
    last.
 
-`compact.sh` is steps 2, 3 and 5 over a whole hour, and writes the same
-objects.
+A crash between steps 5 and 6 leaves rows of keys the sidecar does not
+list; the next fold reads those keys again and `DISTINCT` folds the
+repeat, the same edge an upload retry produces.
+
+**The full read and the final hour.** The first fold at or after
+H+1h+`GRACE` takes every listed key, not only the new ones, and skips the
+union in step 4, so the hour's objects are rebuilt from raw alone. Its
+sidecar marks those keys `final = true`, and an hour is **final** when any
+row of its sidecar is: the marker is in the commit object itself, so it
+commits with the fold that earns it. A final hour is never read in full
+again. Keys that arrive later (a backlog shipped after an outage lands
+under its first record's hour) are folded incrementally by the past pass,
+with `final = false`. If some key the sidecar lists is no longer in the
+listing (lifecycle expired it), the full read unions like an incremental
+fold instead of replacing, so it cannot lose those rows.
 
 ### The rollup of one day
 
 The same pattern at day scale, with hourly objects as input instead of
-raw, so it uses `pods.sql` but not `raw.sql` or `tables.sql`. The
-changed hours are those whose sidecar has keys the daily sidecar lacks.
-Their `logs`, `metrics` and `podindex` objects, united with the day's
-existing objects of the namespaces they hold, become the temp tables;
-`pods` is recomputed for those namespaces, the other namespaces' `pods`
-rows are kept, and the daily sidecar is written last.
+raw, so it uses `pods.sql` but not `raw.sql` or `tables.sql` (except for
+their empty views, which give every table its schema when an input is
+missing). The changed hours are those whose sidecar has keys the daily
+sidecar lacks. Their `logs`, `metrics` and `podindex` objects, united
+with the day's existing objects of the namespaces they hold (and the
+day's whole `podindex`), `DISTINCT`, become the temp tables. Each of
+those namespaces' `logs` and `metrics` objects is rewritten; the other
+namespaces' objects are not touched. `pods` is recomputed for those
+namespaces from the day's tables, an aggregate per `pod_uid`, `container`,
+`restart` over the whole day, never a concatenation of hourly rows; the
+other namespaces' `pods` rows are kept. The daily sidecar, the union of
+the day's keys, is written last. Hourly objects are not clean time
+partitions (an object keyed by its first record carries records past the
+hour), which is why the rollup unions rows and never replaces an hour by
+a `time` filter.
 
 Further rules:
 
 - **Request rate is a job setting.** Hetzner limits a bucket to 750
   requests/s, and a fold over ~2,500 raw objects with DuckDB's default
-  thread count can burst past it. `threads` and `http_retries` are set
-  per job.
+  thread count can burst past it. Every job's connection sets `threads`
+  (`DUCKDB_THREADS`, default 4) and `http_retries`
+  (`DUCKDB_HTTP_RETRIES`, default 5).
 - **No ordering between lifecycle rules.** A sidecar that expires while
   raw objects of its hour remain makes the next pass fold those again,
   into a new hourly object. The rollup's `DISTINCT` removes the repeat.
 - **`pods` is always recomputed** from the tier's own tables, never
   merged from earlier `pods` rows, in both tiers.
 
+### The loop
+
+`blobs-compactor run`:
+
+- every `ROLLING_INTERVAL` (default 2m): fold the current hour, and the
+  previous hour until its final fold has committed. When that final fold
+  is of a day's last hour, roll the day up: its first rollup, which finds
+  all of its hours changed.
+- every `PAST_INTERVAL` (default 1h), and on the first tick after a
+  start: list `raw1/{cluster}/` once and fold every other hour that has
+  keys its sidecar lacks or is past H+1h+`GRACE` and not final (so an
+  hour whose final fold a downtime skipped still gets it); then check
+  every past day that has hourly sidecars for a rollup, which does
+  nothing unless an hour has keys the daily sidecar lacks.
+- `GRACE` (default 10m) is how long after its end an hour waits for its
+  last uploads before the full read. It is refused above 30m: with raw
+  deletion on, an hour's raw objects go at its final fold, so a raw
+  object lives at most about 1h + `GRACE` + `ROLLING_INTERVAL` + one fold
+  from its upload, and 30m keeps that under 2h.
+
 State lives only in the bucket, so every start, whether an upgrade, a
-drain or an OOM kill, is an ordinary tick.
+drain or an OOM kill, is an ordinary tick. A SIGTERM lets the pass in
+flight finish (each job has its `JOB_TIMEOUT`, default 30m), so a stopped
+compactor leaves a quiet bucket. `fold <date> <HH>` and `rollup <date>`
+run one job by hand with the same environment, while no loop runs.
+
+### Raw deletion
+
+Off by default. With `RAW_DELETE=after-final`, once an hour's final fold
+has committed, the raw keys its sidecar lists are deleted; a late key in
+a final hour is deleted once the fold that took it has committed. A key
+that no committed sidecar lists is never deleted, and nothing is deleted
+by age. A deletion that a crash interrupted resumes at the hour's next
+fold. A raw object then normally lives under 2h from its upload (a late
+one under `PAST_INTERVAL` plus a fold), and `blobs_compactor_raw_oldest_age_seconds`
+is what an alert on that bound reads. The secret then needs delete on
+`raw1/`; lifecycle rules still bound everything else.
 
 ## Manifests
 
-`deploy/base/deployment.yaml`:
+`deploy/base/deployment.yaml`, `args: [run]`:
 
 - `replicas: 1`, `strategy: Recreate`. A single writer is a correctness
-  requirement for incremental folding.
+  requirement for incremental folding. `terminationGracePeriodSeconds:
+  300`, so a stop lets the job in flight commit.
 - `automountServiceAccountToken: false`. Non-root 65532/65534,
   `readOnlyRootFilesystem`, drop ALL, seccomp RuntimeDefault.
-- `envFrom` secret `blobs-compactor-s3`. It needs read on `raw1/`, and
-  read and write on `hourly/` and `daily/`, no delete.
-- env `CLUSTER_NAME` (as the agent names it), `S3_BUCKET`, `S3_ENDPOINT` (scheme stripped),
-  `S3_REGION`, `S3_TLS`, `ROLLING_INTERVAL` (2m).
+- `envFrom` secret `blobs-compactor-s3` (`AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`). It needs list and read on `raw1/`, and list,
+  read and write on `hourly/` and `daily/`; delete on `raw1/` only with
+  `RAW_DELETE=after-final`. The compactor never deletes in the tiers.
+- env, set by overlays where the base has none: `CLUSTER_NAME` (as the
+  agent names it), `S3_BUCKET`, `S3_ENDPOINT` (host:port; a scheme is
+  stripped), `S3_REGION` (us-east-1), `S3_TLS` (on), `ROLLING_INTERVAL`
+  (2m), `GRACE` (10m, at most 30m), `PAST_INTERVAL` (1h), `RAW_DELETE`
+  (off), `DUCKDB_THREADS` (4), `DUCKDB_HTTP_RETRIES` (5). Not in the base,
+  with their defaults: `JOB_TIMEOUT` (30m), `METRICS_ADDR` (:9090), and
+  `BLOBS_DIR`, a local directory in place of the bucket.
 - `DUCKDB_MEMORY_LIMIT` from `resourceFieldRef: limits.memory`, with
-  DuckDB given 75% of it. `/scratch` is an emptyDir for `temp_directory`.
-  Starting values: requests 250m/1Gi, limit 4Gi, scratch 10Gi.
-- `prometheus.io/scrape` annotation for `/metrics`
-  (`blobs_compactor_last_success_timestamp_seconds{job}`, durations, rows,
-  written with stdlib text exposition). The node agent scrapes it into the
-  blobs, where alerting sees it. The endpoint exists for this rule, which
-  goes in with the rules that phase 3 wires into the tailer:
-  `time() - blobs_compactor_last_success_timestamp_seconds{job="rolling"} > 600`.
+  DuckDB given 75% of it. `/scratch` is an emptyDir for `temp_directory`
+  (`DUCKDB_TEMP_DIRECTORY`), `/tmp` a small one. Starting values:
+  requests 250m/1Gi, limit 4Gi, scratch 10Gi.
+- `prometheus.io/scrape` and `prometheus.io/port: "9090"` for `/metrics`,
+  written with stdlib text exposition:
+  `blobs_compactor_last_success_timestamp_seconds{job}` and
+  `blobs_compactor_last_duration_seconds{job}` (jobs `rolling`, `past`,
+  `rollup`), `blobs_compactor_runs_total{job,result}`,
+  `blobs_compactor_rows{tier,table}` (rows of the last object written),
+  `blobs_compactor_raw_keys_read_total`, `blobs_compactor_raw_deleted_total`,
+  `blobs_compactor_raw_objects` and `blobs_compactor_raw_oldest_age_seconds`
+  (by upload time, from the past pass's listing, aging between listings).
+  The node agent scrapes it into the blobs, where alerting sees it (the
+  itest asserts that it arrives). The endpoint exists for these rules,
+  which go in with the rules that phase 3 wires into the tailer:
+  `time() - blobs_compactor_last_success_timestamp_seconds{job="rolling"} > 600`,
+  and with raw deletion on, `blobs_compactor_raw_oldest_age_seconds > 7200`.
 
 `deploy/release/kustomization.yaml`: `resources: [../base]`, and `images:`
-with the tag and digest, vendored downstream as buckety-controller's is.
+with the tag and digest (written by `build.sh bump`), to be vendored
+downstream. `itest/compactor` is an overlay.
 
 `deploy/` describes only the in-cluster shape. Reads are free only in
 the bucket's region. On Hetzner that means `eu-central`, which may be
@@ -342,8 +449,8 @@ before pushing, so the pushed digest is the pinned one. The job needs
    the pin: done on the Mac; every GHA run is cold.
 3. `selftest` passes on both arches on native hosts: arm64 on the Mac,
    amd64 in GHA's `check`.
-4. The itest's phase 2 assertions pass with the image loaded into
-   y-cluster: after `fold` exists.
+4. The itest's compactor assertions pass with the image loaded into
+   y-cluster: done 2026-10-03 on this Mac (docker backend).
 
 ## Open
 
@@ -351,3 +458,12 @@ before pushing, so the pushed digest is the pinned one. The job needs
   per node-hour for DuckDB reads; it needs a correction.
 - The node-agent and blobs-to-prometheus images keep their Dockerfile
   builds. blobs-to-prometheus could move to this script's pattern later.
+- Raw deletion is covered by the Go tests and by `TestS3Bucket` (a
+  bucket on versitygw, run by hand), not by the itest: an hour is final
+  only at H+1h+`GRACE` of wall clock, and the itest's raw assertions need
+  the raw objects.
+- A raw object the engine cannot read (truncated, not JSON lines) fails
+  its hour's fold on every pass: `blobs_compactor_runs_total{result="failure"}`
+  shows it, and nothing skips the object.
+- The current day has no daily tier until its last hour is final; the
+  hourly tier is the recent tier. `rollup <date>` makes one by hand.
