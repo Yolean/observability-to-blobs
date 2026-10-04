@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"encoding/base64"
@@ -32,9 +33,11 @@ type putServer struct {
 	secret   string
 	maxBytes int64
 	spool    *spool
-	m        *metrics
-	log      *slog.Logger
-	now      func() time.Time
+	// folded has the keys of committed sidecars (folded.go)
+	folded *foldedKeys
+	m      *metrics
+	log    *slog.Logger
+	now    func() time.Time
 }
 
 // maxSkew is how far a request's x-amz-date may be from the clock, as S3
@@ -71,15 +74,20 @@ func (p *putServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.m.put(result, r.ContentLength)
-	if result == "conflict" {
+	switch result {
+	case "conflict":
 		p.log.Error("put: the key holds other content, which it keeps", "key", strings.TrimPrefix(r.URL.Path, "/"+p.bucket+"/"))
+	case "already_folded":
+		p.log.Warn("put: the key was folded and its file deleted, so its content cannot be compared; nothing is stored",
+			"key", strings.TrimPrefix(r.URL.Path, "/"+p.bucket+"/"))
 	}
 	w.Header().Set("ETag", `"`+hex.EncodeToString(etag)+`"`)
 	w.WriteHeader(http.StatusOK)
 }
 
 // put checks a request and stores its body. It returns the stored
-// object's MD5 and what the write did: stored, duplicate or conflict.
+// object's MD5 and what the write did: stored, duplicate, conflict or
+// already_folded.
 func (p *putServer) put(r *http.Request) ([]byte, string, error) {
 	if r.Method != http.MethodPut || r.URL.RawQuery != "" {
 		return nil, "", &s3Err{http.StatusNotImplemented, "NotImplemented", "only PutObject of a whole object is implemented"}
@@ -113,7 +121,19 @@ func (p *putServer) put(r *http.Request) ([]byte, string, error) {
 			return nil, "", &s3Err{http.StatusBadRequest, "InvalidDigest", "Content-MD5 is not the base64 of 16 bytes"}
 		}
 	}
-	etag, did, err := p.spool.write(key, r.Body, r.ContentLength, payload, contentMD5)
+	var folded func() (bool, error)
+	if p.folded != nil {
+		h, _ := p.l.rawHour(key)
+		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+		defer cancel()
+		// the hour's sidecar, read now on a miss rather than under the
+		// spool's lock
+		if _, err := p.folded.load(ctx, h); err != nil {
+			return nil, "", fmt.Errorf("read the sidecar of %s: %w", key, err)
+		}
+		folded = func() (bool, error) { return p.folded.has(ctx, h, key) }
+	}
+	etag, did, err := p.spool.write(key, r.Body, r.ContentLength, payload, contentMD5, folded)
 	var eb *errBody
 	if errors.As(err, &eb) {
 		return nil, "", &s3Err{http.StatusBadRequest, eb.code, eb.msg}
@@ -121,7 +141,8 @@ func (p *putServer) put(r *http.Request) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	return etag, [...]string{spoolStored: "stored", spoolDuplicate: "duplicate", spoolConflict: "conflict"}[did], nil
+	return etag, [...]string{spoolStored: "stored", spoolDuplicate: "duplicate", spoolConflict: "conflict",
+		spoolAlreadyFolded: "already_folded"}[did], nil
 }
 
 var sha256HexRE = regexp.MustCompile(`^[0-9a-f]{64}$`)

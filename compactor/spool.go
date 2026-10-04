@@ -119,9 +119,10 @@ func (s *spool) Delete(_ context.Context, keys []string) error {
 type spoolWrite int
 
 const (
-	spoolStored    spoolWrite = iota
-	spoolDuplicate            // the key held the same content: nothing written
-	spoolConflict             // the key held other content, which it keeps
+	spoolStored        spoolWrite = iota
+	spoolDuplicate                // the key held the same content: nothing written
+	spoolConflict                 // the key held other content, which it keeps
+	spoolAlreadyFolded            // the key's file is gone and its hour's sidecar lists it: nothing written
 )
 
 // errBody is a body that does not match what the request said of it: its
@@ -136,8 +137,11 @@ func (e *errBody) Error() string { return e.code + ": " + e.msg }
 // what the key holds. A key that exists keeps its content: the same
 // content is a duplicate, other content a conflict, and neither is
 // written; its directory is synced again before either returns, since the
-// file may be one whose sync failed and whose removal did too.
-func (s *spool) write(key string, body io.Reader, size int64, sha256Hex string, contentMD5 []byte) ([]byte, spoolWrite, error) {
+// file may be one whose sync failed and whose removal did too. A key with
+// no file that folded, when not nil, says was folded already is not
+// written either: a fold deleted its file, and would delete it again
+// unread.
+func (s *spool) write(key string, body io.Reader, size int64, sha256Hex string, contentMD5 []byte, folded func() (bool, error)) ([]byte, spoolWrite, error) {
 	f, err := os.CreateTemp(filepath.Join(s.root, spoolTmp), "*.tmp")
 	if err != nil {
 		return nil, 0, err
@@ -171,10 +175,25 @@ func (s *spool) write(key string, body io.Reader, size int64, sha256Hex string, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	dst := s.URL(key)
+	_, err = os.Lstat(dst)
+	exists := err == nil
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, 0, err
+	}
+	// before mkdirs, so that a key already folded leaves no directory
+	if !exists && folded != nil {
+		done, err := folded()
+		if err != nil {
+			return nil, 0, err
+		}
+		if done {
+			return etag, spoolAlreadyFolded, nil
+		}
+	}
 	if err := s.mkdirs(filepath.Dir(dst)); err != nil {
 		return nil, 0, err
 	}
-	if _, err := os.Lstat(dst); err == nil {
+	if exists {
 		have, err := fileMD5(dst)
 		if err != nil {
 			return nil, 0, err
@@ -186,8 +205,6 @@ func (s *spool) write(key string, body io.Reader, size int64, sha256Hex string, 
 			return have, spoolDuplicate, nil
 		}
 		return have, spoolConflict, nil
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return nil, 0, err
 	}
 	if err := os.Rename(tmp, dst); err != nil {
 		return nil, 0, err

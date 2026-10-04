@@ -67,8 +67,9 @@ func newMetrics() *metrics {
 		puts: map[string]float64{}}
 }
 
-// put records one request to the put endpoint: stored, duplicate or
-// conflict with the bytes of a stored body, or the S3 error code it got.
+// put records one request to the put endpoint: stored, duplicate,
+// conflict or already_folded with the bytes of a stored body, or the S3
+// error code it got.
 func (m *metrics) put(result string, bytes int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -211,7 +212,7 @@ func (m *metrics) write(w io.Writer) {
 // spool's gauges are a walk of it now; a failed walk leaves them out.
 func (m *metrics) writeSpool(b *strings.Builder) {
 	fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s counter\n", "blobs_compactor_put_requests_total",
-		"Requests to the put endpoint by result: stored, duplicate (the key held the same content), conflict (the key held other content, which it keeps), or the S3 error code answered.",
+		"Requests to the put endpoint by result: stored, duplicate (the key held the same content), conflict (the key held other content, which it keeps), already_folded (the key's hour was folded with it and its file deleted: nothing stored), or the S3 error code answered.",
 		"blobs_compactor_put_requests_total")
 	for _, k := range sortedKeys(m.puts) {
 		fmt.Fprintf(b, "blobs_compactor_put_requests_total{result=%q} %s\n", k, num(m.puts[k]))

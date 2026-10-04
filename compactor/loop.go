@@ -78,8 +78,9 @@ func (c *compactor) putServer(cfg config) (*http.Server, error) {
 	if !ok {
 		return nil, errors.New("PUT_LISTEN: the raw source is not a spool")
 	}
+	c.foldedKeys = newFoldedKeys(c.readHourFolded)
 	h := &putServer{l: c.l, bucket: cfg.bucket, region: cfg.region, keyID: cfg.putKeyID, secret: cfg.putKey,
-		maxBytes: cfg.putMaxBytes, spool: sp, m: c.m, log: c.log, now: time.Now}
+		maxBytes: cfg.putMaxBytes, spool: sp, folded: c.foldedKeys, m: c.m, log: c.log, now: time.Now}
 	return &http.Server{Addr: cfg.putListen, Handler: h, ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 5 * time.Minute, IdleTimeout: 2 * time.Minute}, nil
 }

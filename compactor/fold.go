@@ -38,6 +38,9 @@ type compactor struct {
 	// finalSeen is the latest previous hour seen final: a cache that spares
 	// the rolling pass a sidecar read, never state
 	finalSeen time.Time
+	// foldedKeys, with the put endpoint on, has every sidecar the folds
+	// read or commit, for the endpoint's PUTs of keys already folded
+	foldedKeys *foldedKeys
 
 	// Parquet encryption (encryption.go): the keys directory, "" without
 	// one; the active key id, "" to write plain objects; the keys the
@@ -298,6 +301,7 @@ func (c *compactor) fold(ctx context.Context, h time.Time, listed []Object, now 
 	if err != nil {
 		return r, err
 	}
+	c.foldedKeys.set(h, folded)
 	for _, f := range folded {
 		r.final = r.final || f
 	}
@@ -359,6 +363,9 @@ func (c *compactor) fold(ctx context.Context, h time.Time, listed []Object, now 
 		if err := c.writeFolded(ctx, conn, sidecar, next); err != nil {
 			return r, err
 		}
+		// before any deletion below: a PUT that finds a file gone finds
+		// its key there
+		c.foldedKeys.set(h, next)
 		folded = next
 		r.wrote = true
 		r.final = r.final || r.full

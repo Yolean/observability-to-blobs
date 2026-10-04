@@ -570,7 +570,7 @@ XML error document, 501 `NotImplemented`. `PUT_LISTEN` (`:9000` in
 | more than `PUT_MAX_BYTES` (64 MiB; `out_s3` uploads its buffer, compressed, once it reaches `total_file_size`, 64M in the agent) | 400 `EntityTooLarge` |
 | a `Content-MD5` that is not 16 bytes | 400 `InvalidDigest` |
 | a body shorter than `Content-Length`, whose SHA-256 is not `x-amz-content-sha256`, or whose MD5 is not `Content-MD5` | 400 `IncompleteBody`, `XAmzContentSHA256Mismatch`, `BadDigest` |
-| a failed write or sync | 500 `InternalError` |
+| a failed write or sync, or a failed read of the key's hour's sidecar (below) | 500 `InternalError` |
 
 The signature covers the headers and the claimed payload hash, and the
 body is held to that hash, so a signed request cannot carry another body.
@@ -596,15 +596,30 @@ itself (one an earlier process made, or one whose removal after a failed
 sync failed too), and a put of a key that exists syncs the key's
 directory before answering.
 
-**A key that exists keeps its first content.** A PUT of the same content
-is a 200 that writes nothing: a retry whose answer was lost. Other content
-under the key is answered 200 too, with the stored object's ETag, and
-counted (`blobs_compactor_put_requests_total{result="conflict"}`, and an
-error in the log): `out_s3` makes a new key for every upload (`$UUID` in
-`s3_key_format`, also on a retry), so a conflict means a bug elsewhere,
-such as two shippers with one node name. The first content was
-acknowledged, so it stays; an error answer would make a shipper whose key
-format has no `$UUID` retry the same key forever.
+**A key is stored once.** While its file is in the spool, a key keeps its
+first content: a PUT of the same content is a 200 that writes nothing (a
+retry whose answer was lost), and other content under the key is answered
+200 too, with the stored object's ETag, and counted
+(`blobs_compactor_put_requests_total{result="conflict"}`, and an error in
+the log). Once its hour's final fold has deleted the file, the content
+cannot be compared any more, but the hour's sidecar still lists the key: a
+PUT of it, whatever its content, is answered 200 with the body's MD5,
+stores nothing, and is counted as `already_folded`, with a warning in the
+log. Storing it would not fold it either: the next fold finds the key in
+the sidecar and deletes the file unread. So the hour keeps the rows of the
+key's first content. `out_s3` makes a new key for every upload (`$UUID` in
+`s3_key_format`, also on a retry), so a conflict or `already_folded` means
+a retry that came after the fold, or a bug elsewhere, such as two
+shippers with one node name. The first content was acknowledged, so it
+stays; an error answer would make a shipper whose key format has no
+`$UUID` retry the same key forever.
+
+The endpoint knows the folded keys without a read per PUT: every fold
+hands it the sidecar it read or committed, before it deletes any file, and
+a PUT for an hour it has no sidecar of (after a start, or an hour no fold
+has had since) reads that sidecar from the bucket once (a HEAD when there
+is none) and keeps it, for the 36 hours most recently used. While that
+read fails the PUT is answered 500 and `out_s3` retries.
 
 **The spool as the raw source.** `RAW_SOURCE=spool` (default `bucket`)
 and `SPOOL_DIR`, an absolute path. A fold lists an hour's keys under
@@ -621,7 +636,7 @@ and their alert apply as they are. `fold` and `rollup` by hand read the
 spool too, so they run where the volume is mounted, while no loop runs.
 
 **Metrics**, besides the others: `blobs_compactor_put_requests_total{result}`
-(`stored`, `duplicate`, `conflict`, or the S3 error code answered),
+(`stored`, `duplicate`, `conflict`, `already_folded`, or the S3 error code answered),
 `blobs_compactor_put_bytes_total`, and from a walk of the spool at every
 scrape `blobs_compactor_spool_files`, `blobs_compactor_spool_bytes` and
 `blobs_compactor_spool_oldest_age_seconds`.
