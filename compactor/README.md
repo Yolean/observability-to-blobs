@@ -9,9 +9,11 @@
 > CI), `selftest`, the embedded SQL with the tests of the engine behaviour
 > the fold relies on, `fold`, `rollup`, the loop (`run`) with optional raw
 > deletion and `/metrics`, optional Parquet encryption of the tiers, the
-> put endpoint and spool mode, `deploy/base` with the release pin and
-> `deploy/spool`. The itest runs it in a cluster, encrypted, and a second
-> one in spool mode fed by stock Fluent Bit (root `README.md`).
+> put endpoint and spool mode, the logs API (`run` on `LOGS_LISTEN`, and
+> `serve`), `deploy/base` with the release pin, `deploy/spool` and
+> `deploy/logs`. The itest runs it in a cluster, encrypted, and a second
+> one in spool mode fed by stock Fluent Bit, and asks both for logs (root
+> `README.md`).
 
 ## Decisions
 
@@ -60,7 +62,7 @@ locally and in CI:
 
 | command | does |
 |---|---|
-| `test` | `go vet` and `go test ./...` in the builder, host arch. Tests run the real embedded engine over `.jsonl.zst` fixtures they write to a temp dir; no `testdata/`, no bucket |
+| `test` | `go vet` and `go test ./...` in the builder, host arch. Tests run the real embedded engine over `.jsonl.zst` fixtures they write to a temp dir, no bucket; `testdata/` holds only the reference's OpenAPI operations (below, "The logs API") |
 | `image [oci-dir]` | for each of `PLATFORMS` (default: the release platforms) builds the binary, fetches and verifies httpfs, runs `selftest` natively, assembles the OCI layout with contain, prints the index digest |
 | `check` | `image`, then fails unless the digest equals the release pin, printing `build.sh bump` as the remedy |
 | `bump` | `image`; if the digest differs from the pin, mint a UTC-seconds tag and rewrite the pin; if equal, no-op |
@@ -146,7 +148,11 @@ compactor/
   spool.go           the spool: a RawSource on a local directory, durable writes
   fold.go            fold of one hour, the sidecar
   rollup.go          rollup of one day
-  loop.go            run: the rolling and past passes
+  loop.go            run: the rolling and past passes, and the servers beside them
+  logs.go            the logs API: huma operations, formatting, the spec
+  logsread.go        the logs API's reads: window, incarnation, lines
+  openapi.json       the logs API's spec, as `blobs-compactor openapi` prints it
+  testdata/          the reference's logs operations, for openapi_test.go
   metrics.go         /metrics
   selftest.go        selftest
   sqlfiles.go        go:embed of sql/, setRawFiles, loadSQL
@@ -159,6 +165,7 @@ compactor/
   deploy/base/       the Deployment
   deploy/release/    resources: [../base] and the images: pin
   deploy/spool/      a component: spool mode, its volume and the put Service
+  deploy/logs/       a component: the logs API and its Service
 ```
 
 The shell prototype `compact.sh` is gone: `blobs-compactor fold` writes
@@ -641,6 +648,157 @@ pair as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, and their usual
 `s3_key_format`. `itest/compactor-put` is an overlay that does this, with
 stock Fluent Bit as the shipper.
 
+## The logs API
+
+Off by default. With it on, the compactor serves container logs by URL,
+with the paths, query parameters, response headers and errors of an
+existing logs server (the reference, below), so that its clients (a web
+UI that generates its types from that server's OpenAPI spec, and a shell
+CLI) switch to this one for retrieval unchanged. Only retrieval: the search endpoints
+(`/api/v1/pods/search`, `/api/v1/pods/recent`,
+`/api/v1/containers/recent`), live logs from the Kubernetes API, and host
+logs (a later `/api/v1/logs/h/...`, once the agent ships them) are not
+served.
+
+**The contract.**
+
+```
+GET /api/v1/logs/n/{namespace}/{pod}/{container}
+GET /api/v1/logs/n/{namespace}/{pod}              all containers, merged by timestamp
+```
+
+| query | |
+|---|---|
+| `timestamps` | bool, default false: prefix each line with its timestamp |
+| `prefix` | bool, default false: prefix each line with `[pod/{pod}/{container}]` |
+| `tail` | int, default 100: the last N lines, after grep; 0 or negative is every line |
+| `grep` | a plain substring, or with a leading `^` a prefix the line starts with |
+| `ansi` | `strip` removes CSI escape sequences (`ESC [`, parameter and intermediate bytes, a final byte) before the grep and in the output; other values do nothing |
+| `source` | `blob` or absent; `k8s` is a 400, as this server has no live source; any other value fails the spec's enum, a 422 |
+
+The answer is `text/plain; charset=utf-8` (set, never sniffed), one line
+per log line, its parts joined by single spaces: prefix, timestamp,
+message; sorted by time, then container, restart and message. Headers:
+
+| | |
+|---|---|
+| `X-Logs-Timestamp-End` | the last returned line's timestamp; absent when no line is |
+| `X-Logs-Pod-Phase` | `Running`, `Succeeded`, `Failed` or `Unknown`: the `pods` table's derived phase (`compactor/sql/pods.sql`) of the incarnation, from its latest row that saw the sandbox go, else `Running` if a row has it running; `Archived` when only the daily tier has the incarnation in the window; never `Pending` |
+| `X-Logs-Tail-Effect` | `cap` when `tail` dropped lines, else `all` |
+| `X-Logs-Source` | always `blob` |
+
+A timestamp is always UTC with nine fractional digits
+(`2026-10-04T10:30:00.123000000Z`), the pattern the spec gives the header
+and what the CRI writes: `logs.time` is the CRI's nanosecond stamp.
+
+Errors are RFC 9457 problem JSON (`application/problem+json`, `title`,
+`status`, `detail`, and huma's `$schema` link), with the reference's
+status codes and details:
+
+| | |
+|---|---|
+| no incarnation of the name in the window | 404 `no archived logs for {ns}/{pod}` |
+| the incarnation has no such container | 404 `container "{c}" not found in pod {ns}/{pod}, known containers: [a, b]`, in the order they started |
+| `source=k8s` | 400 `invalid source value: ...` |
+| a query parameter that does not parse, or another `source` | 422, huma's validation error |
+| a listing or a read that fails, a missing parquet key, the deadline | 500 `blob list failed: ...` or `blob read failed: ...` |
+| `LOGS_CONCURRENCY` requests in flight for all of `LOGS_TIMEOUT` | 503 |
+
+A pod whose containers logged nothing (only podindex rows) is a 200 with
+no body, as in the reference.
+
+**OpenAPI.** The operations are registered with huma v2 (v2.37.2, the
+reference's version) from typed Go input and output structs, so the spec
+is generated from the code that serves it: OpenAPI 3.1 at `/openapi.json`
+(and `.yaml`), docs at `/docs`, on the API's listener. The reference's UI
+generates its TypeScript types from such a spec and calls the API through
+them, so the spec is part of the contract: the operation ids
+(`get-pod-logs-container`, `get-pod-logs`), the parameters with their
+types, defaults, enums and descriptions, and the typed response headers
+(the CRI timestamp pattern, the tail-effect, pod-phase and source enums)
+are the reference's. `blobs-compactor openapi` prints the spec, committed
+as `openapi.json`; `TestOpenAPICommitted` fails when the two differ (`go
+run . openapi > openapi.json` in `compactor/` updates it), and
+`TestOpenAPIMatchesTheReference` compares paths, operation ids,
+summaries, tags, parameters, responses and the error schemas with
+`testdata/reference-logs-openapi.json`, the reference's two logs
+operations as its generator prints them. Only the operations' prose
+descriptions differ. huma is pure Go and links no other module into
+the binary: it adds 0.6 MB to it (59.6 to 60.2 MB, linux/arm64,
+stripped), under 1% of the image with httpfs.
+
+**Where the lines come from.** A request looks back `LOGS_LOOKBACK`
+(default 48h, the reference's today and yesterday) from now. Per day of
+that window, a day before today whose daily `pods` object exists is read
+from the daily tier, every other day from the hourly tier, its hours in
+the window; then the raw keys of the current and the previous hour that
+their hourly sidecars do not list (in spool mode, the spool's files;
+in bucket mode, `raw1/` in the bucket). The sidecar is read before the
+raw listing, so a key is in an object read or among the unfolded ones, or
+in both while a fold commits meanwhile; the rows of those two hours and
+the raw go through one `DISTINCT`, which folds that repeat away, and a
+read that fails while raw is part of it is tried once more (a fold can
+replace an object, and in spool mode delete files, between a listing and
+the read).
+
+- **The name resolves to one incarnation.** The `pods` rows of the
+  planned objects, and those `pods.sql` computes over the unfolded raw,
+  give the name's `pod_uid`s in the namespace; of those whose latest
+  activity is in the window, the one that started last (`pod_started`,
+  else its first container start or line) is the answer, so a reused
+  name (a StatefulSet pod, a bare pod run again) gives its current or
+  last incarnation, never a mix. Its containers come from the same
+  rows.
+- **Restarts** are all there: every restart of the incarnation's
+  containers, in time order. The output does not mark them; `restart` is
+  a column of the tiers.
+- **Only the incarnation's objects are read**: the hourly `logs` objects
+  of the hours whose `pods` rows have it, the daily `logs` partition of
+  its namespace for its days, filtered by namespace, pod, `pod_uid`, the
+  container and the window, which the tiers' sort order (`namespace, pod,
+  pod_uid, container, restart, time`) and 20k-row row groups prune to a
+  few row groups. Encrypted objects are read one by one with their keys,
+  as everywhere (above, "Encryption"); the keys directory is reread on
+  every request.
+- **The engine filters and caps**: the grep (with `ansi=strip`, on the
+  message as `regexp_replace` strips it, which `TestGrepSQLMatchesGo`
+  holds to the Go stripping) and, with `tail` > 0, the last `tail`+1
+  lines. The reference's formatting (sort, strip, grep, tail) then runs
+  in Go on what comes back, so the answer is exactly the reference's.
+
+**Freshness.** In `run`, a line is served once its raw object is in the
+spool or the bucket: about an upload interval after it was written. In
+bucket mode `serve` reads `raw1/` the same way. In spool mode `serve`
+cannot see the spool, so it serves a line once its fold has committed,
+about `ROLLING_INTERVAL` later; a late key of an hour older than the
+previous one waits for the past pass in both. A day's rows that a fold
+adds after the day's rollup are served from the daily tier once the next
+past pass has rolled the day up again.
+
+**Bounds.** A request reads at most the window's hours (some LISTs per
+day, two raw listings and two sidecars, and the objects of one
+incarnation) under a deadline, `LOGS_TIMEOUT` (default 30s), and holds
+one of `LOGS_CONCURRENCY` (default 4) slots. The API has a DuckDB
+database of its own, so its memory limit and spill directory
+(`DUCKDB_TEMP_DIRECTORY/logs`) are its own and a request cannot take a
+fold's memory: in `run` with `LOGS_LISTEN` set, `DUCKDB_MEMORY_LIMIT` is
+split 50% to the fold and 25% to the API (75% to the fold without it);
+`serve` gives the API 75%.
+
+**Running it.** `run` serves the API when `LOGS_LISTEN` is set (`:8080`
+in `deploy/logs`), beside `/metrics` and the put endpoint, from the
+process that sees the spool. `blobs-compactor serve` is the API alone:
+read-only (list and read on `hourly/` and `daily/`, and in bucket mode on
+`raw1/`), the same environment as `run` (`LOGS_LISTEN` default `:8080`),
+no loop, no writes, no `/metrics`, so readers scale apart from the single
+writer: a Deployment of `serve` with any number of replicas, the same
+Secret with read-only rights, and the keys Secret mounted when the tiers
+are encrypted. The component `deploy/logs` adds `LOGS_LISTEN`, the port
+and the Service `blobs-compactor-logs` (port 8080) to the compactor. **The
+API has no authentication**: it serves every pod's logs to whoever
+reaches it, so put an authenticating proxy in front of it and keep the
+Service from everyone else.
+
 ## Manifests
 
 `deploy/base/deployment.yaml`, `args: [run]`:
@@ -670,9 +828,12 @@ stock Fluent Bit as the shipper.
   as `itest/compactor` does. Spool mode (above): `RAW_SOURCE` (bucket),
   `SPOOL_DIR`, `PUT_LISTEN` (unset: no endpoint), `PUT_ACCESS_KEY_ID`,
   `PUT_SECRET_ACCESS_KEY` and `PUT_MAX_BYTES` (64 MiB), which
-  `deploy/spool` sets.
+  `deploy/spool` sets. The logs API (above): `LOGS_LISTEN` (unset: no
+  API in `run`; `:8080` for `serve`), which `deploy/logs` sets,
+  `LOGS_LOOKBACK` (48h), `LOGS_TIMEOUT` (30s) and `LOGS_CONCURRENCY` (4).
 - `DUCKDB_MEMORY_LIMIT` from `resourceFieldRef: limits.memory`, with
-  DuckDB given 75% of it. `/scratch` is an emptyDir for `temp_directory`
+  DuckDB given 75% of it (with the logs API on, 50% to the fold and 25%
+  to the API's engine). `/scratch` is an emptyDir for `temp_directory`
   (`DUCKDB_TEMP_DIRECTORY`), `/tmp` a small one. Starting values:
   requests 250m/1Gi, limit 4Gi, scratch 10Gi.
 - `prometheus.io/scrape` and `prometheus.io/port: "9090"` for `/metrics`,
@@ -698,8 +859,8 @@ stock Fluent Bit as the shipper.
 
 `deploy/release/kustomization.yaml`: `resources: [../base]`, and `images:`
 with the tag and digest (written by `build.sh bump`), to be vendored
-downstream. `itest/compactor` is an overlay; `itest/compactor-put` adds
-the `deploy/spool` component.
+downstream. `itest/compactor` is an overlay with the `deploy/logs`
+component; `itest/compactor-put` adds the `deploy/spool` component too.
 
 `deploy/` describes only the in-cluster shape. Reads are free only in
 the bucket's region. On Hetzner that means `eu-central`, which may be
@@ -767,3 +928,8 @@ before pushing, so the pushed digest is the pinned one. The job needs
   DuckDB bump (`TestEngineParquetEncryption` fails when it is fixed).
 - The current day has no daily tier until its last hour is final; the
   hourly tier is the recent tier. `rollup <date>` makes one by hand.
+- The logs API: no search endpoints, no live source, no host logs yet,
+  and no authentication of its own (above, "The logs API"). A late key
+  of an hour older than the previous one, and a day's rows folded after
+  its rollup, are served after the next past pass. `serve` in spool mode
+  serves a line only after its fold. No `/metrics` of its own yet.

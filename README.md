@@ -12,7 +12,8 @@ Status: the agent and the compactor (its design, build and deployment
 in [compactor/README.md](compactor/README.md)) are built and tested; the
 agents can also upload to the compactor's S3 put endpoint instead of the
 bucket, so that raw objects never reach object storage (spool mode); the
-alerting tailer follows. The PoC-era `CONSUMING.md` and `COMPACTING.md` keep measurements
+compactor serves container logs by URL, for clients of an existing logs
+API; the alerting tailer follows. The PoC-era `CONSUMING.md` and `COMPACTING.md` keep measurements
 from the first iteration and are superseded where they differ.
 
 ## What the agent ships
@@ -60,7 +61,7 @@ input chunks.
 | `agent/` | kustomize base: DaemonSet, `fluent-bit.yaml` pipeline (stock processors, no Lua), the `pipeline-extra.yaml` composition hook |
 | `itest/` | y-cluster configs for a local k3s node (qemu and docker), versitygw, the workloads that exercise each path, the compactor's overlays (bucket mode, and spool mode with stock Fluent Bit as a second shipper) |
 | `images/blobs-to-prometheus/`, `tools/rules-manifest/`, `local/`, `alerts-cf/` | the alerting consumer from the PoC; rewired to the new blob in phase 3 |
-| `compactor/` | `blobs-compactor` (fold, rollup and the loop that runs them), its design (`README.md`), its SQL (`sql/raw.sql` is the raw line contract every consumer reads), its build script and `deploy/` |
+| `compactor/` | `blobs-compactor` (fold, rollup and the loop that runs them, and the logs API), its design (`README.md`), its SQL (`sql/raw.sql` is the raw line contract every consumer reads), its build script and `deploy/` |
 | `examples/gke/` | sketch of a production overlay |
 | `test.sh` | the one command |
 
@@ -128,6 +129,9 @@ covered by the Go tests:
   hold exactly the distinct rows of the raw keys its sidecar lists, read
   through `compactor/sql/`: the same rows both ways, each once
 - the hourly `pods` index has the three incarnations of `reused`
+- with the compactor stopped, `blobs-compactor serve` (the read-only logs
+  API) in a pod of its own serves a line the agent uploaded meanwhile,
+  once, from `raw1/`: the line is in no hourly object
 - with the compactor stopped, `blobs-compactor rollup <day>` in a pod of
   its own, for every day with folded hours (two when the run crosses
   midnight UTC), writes the daily tier: its `logs`, `metrics` and
@@ -171,6 +175,25 @@ after the snapshot:
   signature with `AccessDenied`, and no sidecar lists either key
 - the spool, listed by a pod that mounts its volume, holds no file of an
   hour whose final fold has committed
+
+And the logs API of both compactors (`compactor/deploy/logs`, through a
+port-forward to the Service `blobs-compactor-logs`), at the end of the
+run:
+
+- the generator's last five lines with `tail=5&timestamps=true`: five
+  lines, each a nine-digit CRI timestamp and the message, as
+  `text/plain; charset=utf-8`, with `X-Logs-Source: blob`,
+  `X-Logs-Tail-Effect: cap`, `X-Logs-Timestamp-End` the last line's, and
+  `X-Logs-Pod-Phase: Running` (`Unknown` from the stock shipper, which
+  ships no podindex)
+- the restart, outage and put markers, each by `grep` on all containers,
+  each exactly once
+- the terminated pod `reused`: only its third incarnation's line,
+  prefixed `[pod/reused/reused]`, phase `Succeeded` (`Unknown` from the
+  stock shipper)
+- an unknown pod and an unknown container are 404 problem JSON whose
+  details name the pod, or the container and the known ones;
+  `source=k8s` is a 400, and `/openapi.json` the spec
 
 Not part of `test.sh` because they take the cluster down or load it:
 `itest/node-restart.sh`, `itest/rotation.sh` and `itest/stress.sh` (PoC
@@ -234,6 +257,10 @@ The compactor:
   data is as durable as its volume until folded. The itest's agent keeps
   uploading to the bucket, so the fork's own `out_s3` is not run against
   the put endpoint; stock Fluent Bit v5.1.3's is.
+- The logs API serves retrieval only: no pod search, no live logs from
+  the Kubernetes API, no host logs, and no authentication of its own.
+  `serve` in spool mode sees no spool, so it serves a line after its
+  fold.
 - A raw object the engine cannot read fails its hour's fold on every
   pass, visible in `blobs_compactor_runs_total{result="failure"}`;
   nothing skips it.
