@@ -161,8 +161,9 @@ after the snapshot:
   path; the restart marker, the outage marker and a marker written while
   the put compactor was down each arrive exactly once, and the
   generator's counter has no gap
-- the put compactor stopped for 60 s: the shipper's uploads failed
-  meanwhile, and it gave up on no chunk
+- the put compactor stopped for 60 s: the shipper's log has failed
+  uploads between the pod's end and its return, and it gave up on no
+  chunk
 - no `raw1/itest-put/` object exists in the bucket
 - aws-cli as another client: its signed PutObject of an object for an
   hour three hours back is stored, folded by the past pass in a full read,
@@ -170,7 +171,9 @@ after the snapshot:
   with a wrong secret is refused with `SignatureDoesNotMatch`, without a
   signature with `AccessDenied`, and no sidecar lists either key
 - the spool, listed by a pod that mounts its volume, holds no file of an
-  hour whose final fold has committed
+  hour whose final fold has committed that was written before the put
+  compactor's last past pass (a later upload to that hour waits for the
+  next one)
 
 Not part of `test.sh` because they take the cluster down or load it:
 `itest/node-restart.sh`, `itest/rotation.sh` and `itest/stress.sh` (PoC
