@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -30,9 +32,10 @@ func newSpoolWorld(t *testing.T) *spoolWorld {
 		t.Fatal(err)
 	}
 	w.c.raw, w.c.rawDelete, w.c.m.spool = sp, true, sp.stats
+	w.c.foldedKeys = newFoldedKeys(w.c.readHourFolded)
 	return &spoolWorld{world: w, sp: sp, put: &putServer{l: w.c.l, bucket: "b", region: "us-east-1", keyID: "k",
-		secret: "s", maxBytes: 1 << 20, spool: sp, m: w.c.m, log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		now: time.Now}}
+		secret: "s", maxBytes: 1 << 20, spool: sp, folded: w.c.foldedKeys, m: w.c.m,
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)), now: time.Now}}
 }
 
 // upload PUTs a raw object through the endpoint and returns its key.
@@ -198,5 +201,168 @@ func TestSpoolConfig(t *testing.T) {
 		if _, err := parseConfig(envOf(kv)); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%v: err %v, want %q", tc.env, err, tc.want)
 		}
+	}
+}
+
+// putResult PUTs a raw object through the endpoint and returns the
+// result it was counted under.
+func (w *spoolWorld) putResult(key string, lines ...line) string {
+	w.t.Helper()
+	before := map[string]float64{}
+	for k, v := range w.c.m.puts {
+		before[k] = v
+	}
+	w.upload(key, lines...)
+	for k, v := range w.c.m.puts {
+		if v != before[k] {
+			return k
+		}
+	}
+	w.t.Fatalf("PUT %s: not counted", key)
+	return ""
+}
+
+// Once a key's final fold has deleted its file, its content cannot be
+// compared any more: a PUT of the key, other content or the same, is
+// answered 200 and dropped, counted as already_folded, and the hour keeps
+// the rows of the first content. A new key in that hour is a late upload,
+// stored and folded.
+func TestSpoolPutOfAKeyAlreadyFolded(t *testing.T) {
+	w := newSpoolWorld(t)
+	k := rawKey(h10, "n1", "0000-a")
+	w.upload(k, logs(h10, 5, "ns1", "p1", "u1")...)
+	if r := w.fold(h10, afterG); !r.final || len(r.deleted) != 1 {
+		t.Fatalf("the final fold: %+v", r)
+	}
+	for _, lines := range [][]line{logs(h10.Add(time.Minute), 7, "ns2", "p2", "u2"), logs(h10, 5, "ns1", "p1", "u1")} {
+		if got := w.putResult(k, lines...); got != "already_folded" {
+			t.Fatalf("a PUT of the folded key: %s", got)
+		}
+		if w.spooled(k) {
+			t.Fatal("a PUT of the folded key stored it")
+		}
+	}
+	if _, err := os.Stat(filepath.Join(w.sp.root, "raw1")); !os.IsNotExist(err) {
+		t.Fatalf("a PUT of the folded key made directories: %v", err)
+	}
+	late := w.upload(rawKey(h10, "n1", "5959-late"), logs(h10.Add(59*time.Minute), 2, "ns1", "p1", "u1")...)
+	if err := w.c.past(w.ctx, h11.Add(2*time.Hour), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if n := w.hourlyRows("logs", h10); n != 7 {
+		t.Fatalf("hourly logs %d, want the first content's 5 and the late key's 2", n)
+	}
+	if w.spooled(late) {
+		t.Fatal("the late key is still in the spool")
+	}
+	var m strings.Builder
+	w.c.m.write(&m)
+	for _, want := range []string{`blobs_compactor_put_requests_total{result="already_folded"} 2`,
+		`blobs_compactor_put_requests_total{result="stored"} 2`} {
+		if !strings.Contains(m.String(), want) {
+			t.Errorf("metrics lack %q:\n%s", want, m.String())
+		}
+	}
+}
+
+// The sidecars the folds read and commit are the put endpoint's: a PUT
+// reads an hour's sidecar from the tiers only when no fold has had it
+// since the start, once.
+func TestSpoolPutReadsAHoursSidecarOnce(t *testing.T) {
+	w := newSpoolWorld(t)
+	k := w.upload(rawKey(h10, "n1", "0000-a"), logs(h10, 5, "ns1", "p1", "u1")...)
+	w.fold(h10, afterG)
+
+	// a start: nothing in memory
+	reads := map[time.Time]int{}
+	restart := func() {
+		reads = map[time.Time]int{}
+		w.c.foldedKeys = newFoldedKeys(func(ctx context.Context, h time.Time) (map[string]bool, error) {
+			reads[h]++
+			return w.c.readHourFolded(ctx, h)
+		})
+		w.put.folded = w.c.foldedKeys
+	}
+	restart()
+	if got := w.putResult(k, logs(h10, 1, "ns2", "p2", "u2")...); got != "already_folded" {
+		t.Fatalf("a PUT of the folded key after a start: %s", got)
+	}
+	w.upload(rawKey(h10, "n1", "0001-b"), logs(h10, 1, "ns1", "p1", "u1")...)
+	w.upload(rawKey(h11, "n1", "0000-c"), logs(h11, 1, "ns1", "p1", "u1")...)
+	w.upload(rawKey(h11, "n1", "0001-d"), logs(h11, 1, "ns1", "p1", "u1")...)
+	if reads[h10] != 1 || reads[h11] != 1 {
+		t.Fatalf("sidecar reads %v, want one per hour", reads)
+	}
+	// a fold of an hour gives the endpoint its sidecar
+	restart()
+	w.fold(h11, during)
+	w.upload(rawKey(h11, "n1", "0002-e"), logs(h11, 1, "ns1", "p1", "u1")...)
+	if len(reads) != 0 {
+		t.Fatalf("sidecar reads %v after a fold of the hour, want none", reads)
+	}
+	// a read that fails answers 500, and is not kept
+	w.c.foldedKeys = newFoldedKeys(func(context.Context, time.Time) (map[string]bool, error) {
+		return nil, errors.New("the bucket is down")
+	})
+	w.put.folded = w.c.foldedKeys
+	body := rawObject(t, logs(h10, 1, "ns1", "p1", "u1")...)
+	r := httptest.NewRequest(http.MethodPut, "http://compactor:9000/b/"+rawKey(h10, "n1", "0002-f"), bytes.NewReader(body))
+	signV4(r, hashHex(body), "us-east-1", "k", "s", time.Now())
+	rec := httptest.NewRecorder()
+	w.put.ServeHTTP(rec, r)
+	if rec.Code != http.StatusInternalServerError || w.spooled(rawKey(h10, "n1", "0002-f")) {
+		t.Fatalf("a PUT whose sidecar read fails: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// foldedKeys keeps a bounded number of hours, the least recently used
+// out first, and a read that a set overtook is not kept.
+func TestFoldedKeysBoundsAndOvertaking(t *testing.T) {
+	ctx := context.Background()
+	var setDuring func()
+	f := newFoldedKeys(func(_ context.Context, h time.Time) (map[string]bool, error) {
+		if setDuring != nil {
+			setDuring()
+		}
+		return map[string]bool{"read": true}, nil
+	})
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i <= foldedKeysHours; i++ {
+		f.set(base.Add(time.Duration(i)*time.Hour), map[string]bool{"set": true})
+		if i == 0 {
+			continue
+		}
+		// hour 0 used after each set keeps it
+		if _, ok := f.lookup(base); !ok {
+			t.Fatalf("hour 0 evicted after %d sets", i)
+		}
+	}
+	if len(f.hours) != foldedKeysHours {
+		t.Fatalf("%d hours kept, want %d", len(f.hours), foldedKeysHours)
+	}
+	if _, ok := f.lookup(base.Add(time.Hour)); ok {
+		t.Fatal("the least recently used hour was kept")
+	}
+	// a read of h during which a fold commits h's sidecar: the set's keys stay
+	h := base.Add(-time.Hour)
+	setDuring = func() { f.set(h, map[string]bool{"newer": true}) }
+	if keys, err := f.load(ctx, h); err != nil || !keys["newer"] {
+		t.Fatalf("load %v %v, want the set's keys", keys, err)
+	}
+	// a read during which another hour's set comes: answered, not kept
+	h2 := base.Add(-2 * time.Hour)
+	setDuring = func() { f.set(base.Add(-3*time.Hour), nil) }
+	if keys, err := f.load(ctx, h2); err != nil || !keys["read"] {
+		t.Fatalf("load %v %v", keys, err)
+	}
+	if _, ok := f.lookup(h2); ok {
+		t.Fatal("a read that a set may have overtaken was kept")
+	}
+	setDuring = nil
+	if ok, err := f.has(ctx, h2, "read"); err != nil || !ok {
+		t.Fatalf("has %v %v", ok, err)
+	}
+	if _, ok := f.lookup(h2); !ok {
+		t.Fatal("a read with no set during it was not kept")
 	}
 }

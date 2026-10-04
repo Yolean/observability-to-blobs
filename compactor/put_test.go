@@ -215,7 +215,7 @@ func TestPutRefuses(t *testing.T) {
 			r := tp.captured()
 			r.Header.Set("Authorization", strings.Replace(r.Header.Get("Authorization"), "AKIDCAPTURE", "AKIDOTHER", 1))
 			return r
-		}, 403, "InvalidAccessKeyId"},
+		}, 403, "SignatureDoesNotMatch"},
 		{"no signature", func(tp *testPut) *http.Request {
 			r := tp.captured()
 			r.Header.Del("Authorization")
@@ -249,7 +249,21 @@ func TestPutRefuses(t *testing.T) {
 		{"another region", func(tp *testPut) *http.Request {
 			tp.p.region = "eu-central"
 			return tp.captured()
-		}, 400, "AuthorizationHeaderMalformed"},
+		}, 403, "SignatureDoesNotMatch"},
+		{"a clock 20 minutes ahead and another secret", func(tp *testPut) *http.Request {
+			tp.p.now = func() time.Time { return capturedAt.Add(20 * time.Minute) }
+			return tp.signed(key, body, "wrong", "")
+		}, 403, "SignatureDoesNotMatch"},
+		{"no x-amz-date", func(tp *testPut) *http.Request {
+			r := tp.captured()
+			r.Header.Del("X-Amz-Date")
+			return r
+		}, 403, "SignatureDoesNotMatch"},
+		{"not SigV4", func(tp *testPut) *http.Request {
+			r := tp.captured()
+			r.Header.Set("Authorization", "AWS AKIDCAPTURE:c2ln")
+			return r
+		}, 403, "SignatureDoesNotMatch"},
 		{"another bucket", func(tp *testPut) *http.Request {
 			return tp.signed(strings.Replace(key, "node-agent", "other", 1), body, capturedSecret, "")
 		}, 404, "NoSuchBucket"},
@@ -276,6 +290,15 @@ func TestPutRefuses(t *testing.T) {
 			rec := tp.do(tc.req(tp))
 			if rec.Code != tc.status || errorCode(rec) != tc.code {
 				t.Fatalf("%d %s, want %d %s", rec.Code, rec.Body, tc.status, tc.code)
+			}
+			// an unauthenticated caller learns neither the key id nor
+			// the region nor the clock
+			if tc.code == "SignatureDoesNotMatch" {
+				for _, secret := range []string{tp.p.keyID, tp.p.region, "AKIDOTHER", "x-amz-date", "server's clock"} {
+					if strings.Contains(rec.Body.String(), secret) {
+						t.Fatalf("the answer says %q: %s", secret, rec.Body)
+					}
+				}
 			}
 			if ct := rec.Header().Get("Content-Type"); ct != "application/xml" {
 				t.Fatalf("Content-Type %s", ct)
@@ -392,5 +415,177 @@ func TestPutIsDurableBeforeItsAnswer(t *testing.T) {
 		if tp.stored(capturedKey) != nil {
 			t.Fatalf("a failed %s sync left the key", fail)
 		}
+	}
+}
+
+// A put that answered 500 because a directory sync failed leaves the next
+// put of the key to sync that directory entry before its 200, whether the
+// failed put's undo (removing the directory it made, or the file it
+// renamed) worked or failed too: a directory made by a new directory's
+// failed parent sync, and the key's directory after the rename.
+func TestPutRetryAfterAFailedSyncSyncsWhatItDependsOn(t *testing.T) {
+	for _, tc := range []struct {
+		name, failing string
+		removeFails   bool
+	}{
+		{"a new directory's parent", "raw1/capture/2026-10-04", false},
+		{"a new directory's parent, its removal failing", "raw1/capture/2026-10-04", true},
+		{"the key's directory after the rename", "raw1/capture/2026-10-04/07/node-1", false},
+		{"the key's directory after the rename, the file's removal failing", "raw1/capture/2026-10-04/07/node-1", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tp := newTestPut(t)
+			sp := tp.p.spool
+			dst := sp.URL(capturedKey)
+			failOnce := true
+			var events []string
+			sp.syncDir = func(p string) error {
+				rel, _ := filepath.Rel(sp.root, p)
+				rel = filepath.ToSlash(rel)
+				if _, err := os.Stat(dst); err == nil {
+					rel += " with the key"
+				}
+				events = append(events, "dir "+rel)
+				if failOnce && strings.HasPrefix(rel, tc.failing) {
+					failOnce = false
+					return errors.New("sync failed")
+				}
+				return syncDir(p)
+			}
+			if tc.removeFails {
+				sp.remove = func(string) error { return errors.New("remove failed") }
+			}
+			if rec := tp.do(tp.captured()); rec.Code != http.StatusInternalServerError {
+				t.Fatalf("the put whose sync fails: %d %s", rec.Code, rec.Body)
+			}
+			if failOnce {
+				t.Fatalf("no sync of %s: %v", tc.failing, events)
+			}
+			events = nil
+			tp.p.ServeHTTP(answerRecorder{httptest.NewRecorder(), &events}, tp.captured())
+			want := "dir " + tc.failing
+			if strings.HasSuffix(tc.failing, "node-1") {
+				want += " with the key"
+			}
+			synced := false
+			for _, e := range events {
+				if e == "answer" {
+					break
+				}
+				synced = synced || e == want
+			}
+			if !synced || events[len(events)-1] != "answer" {
+				t.Fatalf("the retry: events %v, want %q before the answer", events, want)
+			}
+			body, _ := base64.StdEncoding.DecodeString(capturedBody)
+			if !bytes.Equal(tp.stored(capturedKey), body) {
+				t.Fatal("the retry did not leave the body at the key")
+			}
+			// a third put of the key finds every directory known durable:
+			// it syncs only the key's directory, for the duplicate
+			events = nil
+			if rec := tp.do(tp.captured()); rec.Code != http.StatusOK {
+				t.Fatalf("the third put: %d %s", rec.Code, rec.Body)
+			}
+			if strings.Join(events, ", ") != "dir raw1/capture/2026-10-04/07/node-1 with the key" {
+				t.Fatalf("the third put synced %v", events)
+			}
+		})
+	}
+}
+
+// countRecorder fails a test whose put is counted before it is answered.
+type countRecorder struct {
+	*httptest.ResponseRecorder
+	t *testing.T
+	m *metrics
+}
+
+func (c countRecorder) WriteHeader(code int) {
+	c.m.mu.Lock()
+	n := len(c.m.puts)
+	c.m.mu.Unlock()
+	if n != 0 {
+		c.t.Errorf("the put was counted before its answer: %v", c.m.puts)
+	}
+	c.ResponseRecorder.WriteHeader(code)
+}
+
+// A scrape walks the spool without the metrics' lock, and a put is
+// answered before it is counted: a slow walk delays no acknowledgement.
+func TestPutIsAnsweredWhileAScrapeWalksTheSpool(t *testing.T) {
+	tp := newTestPut(t)
+	walking, release, scraped := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	tp.p.m.spool = func() (spoolStats, error) {
+		close(walking)
+		<-release
+		return tp.p.spool.stats()
+	}
+	go func() {
+		var b strings.Builder
+		tp.p.m.write(&b)
+		if !strings.Contains(b.String(), "blobs_compactor_spool_files 1\n") {
+			t.Errorf("the scrape:\n%s", b.String())
+		}
+		close(scraped)
+	}()
+	<-walking
+	answered := make(chan int)
+	go func() {
+		rec := countRecorder{httptest.NewRecorder(), t, tp.p.m}
+		tp.p.ServeHTTP(rec, tp.captured())
+		answered <- rec.Code
+	}()
+	select {
+	case code := <-answered:
+		if code != http.StatusOK {
+			t.Fatalf("the put: %d", code)
+		}
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("the put waited for the scrape's walk of the spool")
+	}
+	close(release)
+	<-scraped
+	tp.p.m.mu.Lock()
+	defer tp.p.m.mu.Unlock()
+	if tp.p.m.puts["stored"] != 1 {
+		t.Fatalf("counted %v", tp.p.m.puts)
+	}
+}
+
+// Refusals are logged with what the answer did not say, at most
+// refusalLogs a minute, the next line counting the ones dropped; a body
+// over PUT_MAX_BYTES is an error, with a message that says what to change.
+func TestPutRefusalLogs(t *testing.T) {
+	tp := newTestPut(t)
+	var logs bytes.Buffer
+	tp.p.log = slog.New(slog.NewJSONHandler(&logs, nil))
+	other := func() *http.Request {
+		r := tp.captured()
+		r.Header.Set("Authorization", strings.Replace(r.Header.Get("Authorization"), "AKIDCAPTURE", "AKIDOTHER", 1))
+		return r
+	}
+	for i := 0; i < refusalLogs+5; i++ {
+		tp.do(other())
+	}
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != refusalLogs {
+		t.Fatalf("%d log lines for %d refusals in a minute, want %d:\n%s", len(lines), refusalLogs+5, refusalLogs, logs.String())
+	}
+	if !strings.Contains(lines[0], `"detail":"the access key id AKIDOTHER is not PUT_ACCESS_KEY_ID"`) ||
+		!strings.Contains(lines[0], `"level":"WARN"`) {
+		t.Fatalf("the log line: %s", lines[0])
+	}
+	logs.Reset()
+	tp.p.now = func() time.Time { return capturedAt.Add(61 * time.Second) }
+	tp.p.maxBytes = 5
+	body := []byte("a body")
+	rec := tp.do(tp.signed("/node-agent/raw1/capture/2026-10-04/07/node-1/0000-x.jsonl.zst", body, capturedSecret, ""))
+	if errorCode(rec) != "EntityTooLarge" || !strings.Contains(rec.Body.String(), "total_file_size") {
+		t.Fatalf("a body over PUT_MAX_BYTES: %d %s", rec.Code, rec.Body)
+	}
+	if l := logs.String(); !strings.Contains(l, `"level":"ERROR"`) || !strings.Contains(l, `"refusals_not_logged":5`) {
+		t.Fatalf("the next minute's first line: %s", l)
 	}
 }

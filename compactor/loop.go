@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -26,17 +28,29 @@ import (
 //
 // Nothing is remembered between ticks that the bucket does not say, so a
 // start is an ordinary tick. One writer: replicas 1, strategy Recreate.
+//
+// The metrics, put and logs listeners are bound before the first pass, so that
+// an address that cannot be bound ends the run at once, as does a
+// listener that fails later.
 func (c *compactor) run(ctx context.Context, cfg config) error {
 	srv := &http.Server{Addr: cfg.metricsAddr, Handler: c.m, ReadHeaderTimeout: 10 * time.Second}
+	ml, err := net.Listen("tcp", cfg.metricsAddr)
+	if err != nil {
+		return fmt.Errorf("METRICS_ADDR: %w", err)
+	}
 	srvErr := make(chan error, 3)
-	go func() { srvErr <- srv.ListenAndServe() }()
+	go func() { srvErr <- fmt.Errorf("METRICS_ADDR: %w", srv.Serve(ml)) }()
 	defer srv.Close()
 	if cfg.putListen != "" {
 		put, err := c.putServer(cfg)
 		if err != nil {
 			return err
 		}
-		go func() { srvErr <- put.ListenAndServe() }()
+		pl, err := net.Listen("tcp", cfg.putListen)
+		if err != nil {
+			return fmt.Errorf("PUT_LISTEN: %w", err)
+		}
+		go func() { srvErr <- fmt.Errorf("PUT_LISTEN: %w", put.Serve(pl)) }()
 		// a stop lets the uploads in flight finish: each is answered
 		// only once it is synced
 		defer func() {
@@ -51,8 +65,12 @@ func (c *compactor) run(ctx context.Context, cfg config) error {
 			return err
 		}
 		defer r.Close()
+		ll, err := net.Listen("tcp", cfg.logsListen)
+		if err != nil {
+			return fmt.Errorf("LOGS_LISTEN: %w", err)
+		}
 		logs := logsServer(cfg.logsListen, newLogsHandler(r, cfg.logsTimeout, cfg.logsConcurrency, c.log))
-		go func() { srvErr <- logs.ListenAndServe() }()
+		go func() { srvErr <- fmt.Errorf("LOGS_LISTEN: %w", logs.Serve(ll)) }()
 		defer func() {
 			sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
@@ -92,8 +110,9 @@ func (c *compactor) putServer(cfg config) (*http.Server, error) {
 	if !ok {
 		return nil, errors.New("PUT_LISTEN: the raw source is not a spool")
 	}
+	c.foldedKeys = newFoldedKeys(c.readHourFolded)
 	h := &putServer{l: c.l, bucket: cfg.bucket, region: cfg.region, keyID: cfg.putKeyID, secret: cfg.putKey,
-		maxBytes: cfg.putMaxBytes, spool: sp, m: c.m, log: c.log, now: time.Now}
+		maxBytes: cfg.putMaxBytes, spool: sp, folded: c.foldedKeys, m: c.m, log: c.log, now: time.Now}
 	return &http.Server{Addr: cfg.putListen, Handler: h, ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 5 * time.Minute, IdleTimeout: 2 * time.Minute}, nil
 }

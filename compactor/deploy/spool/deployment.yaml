@@ -12,8 +12,10 @@ spec:
     spec:
       securityContext:
         # the volume's files are the compactor's group's, where the
-        # volume plugin supports it
+        # volume plugin supports it; changed only when the volume's root
+        # is not already, not on every start of a pod over a full spool
         fsGroup: 65534
+        fsGroupChangePolicy: OnRootMismatch
       containers:
       - name: compactor
         env:

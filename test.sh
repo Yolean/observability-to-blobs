@@ -105,6 +105,7 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
   kubectl kustomize compactor/deploy/release >/dev/null
   kubectl kustomize itest/compactor >/dev/null
   kubectl kustomize itest/compactor-put >/dev/null
+  kubectl kustomize compactor/deploy/spool-networkpolicy >/dev/null
 fi
 
 [ "$MODE" != checks ] || exit 0
@@ -403,11 +404,15 @@ while [ -n "$($KUBECTL -n "$PUT_NS" get pods -l app=blobs-compactor -o name)" ];
   [ $SECONDS -lt $deadline ] || fail "the put compactor's pod is still there 330s after scaling to 0"
   sleep 2
 done
+# the outage window, for the shipper's failed uploads (kubelet log
+# timestamps are UTC RFC 3339)
+PUT_DOWN_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 PUT_MARKER="put-marker-$(date +%s)"
 $KUBECTL exec deploy/log-generator -- sh -c "echo '$PUT_MARKER' > /proc/1/fd/1"
 sleep 60
 $KUBECTL -n "$PUT_NS" scale deployment/blobs-compactor --replicas=1 >/dev/null
 $KUBECTL -n "$PUT_NS" rollout status deployment/blobs-compactor --timeout=180s >/dev/null
+PUT_UP_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 echo "  the put compactor is back"
 
 # ---------------------------------------------------------------- assert --
@@ -1013,13 +1018,16 @@ assert "put: the generator's counter is contiguous in $PUT_CLUSTER's hourly logs
    SELECT count(*) > 0 AND bool_and(seen = (SELECT count(*) FROM range(lo, hi + 1) r WHERE r.range % 10 <> 0)) FROM per_pod"
 assert "put: no raw1/$PUT_CLUSTER/ object is in the bucket (the agent's raw1/$CLUSTER/ ones are)" \
   "SELECT (SELECT count(*) FROM glob('s3://$BUCKET/raw1/$PUT_CLUSTER/*/*/*/*')) = 0 AND (SELECT count(*) FROM $RAW_KEYS) > 0"
-if ! shipper_logs=$($KUBECTL -n "$PUT_NS" logs ds/stock-shipper 2>&1); then
-  echo "  FAIL: could not read the stock shipper's logs: $shipper_logs" >&2; ERRORS=$((ERRORS + 1))
+if ! shipper_logs=$($KUBECTL -n "$PUT_NS" logs ds/stock-shipper 2>&1) \
+  || ! outage_logs=$($KUBECTL -n "$PUT_NS" logs ds/stock-shipper --timestamps --since-time="$PUT_DOWN_AT" 2>&1); then
+  echo "  FAIL: could not read the stock shipper's logs: $shipper_logs $outage_logs" >&2; ERRORS=$((ERRORS + 1))
 else
-  if grep -q 'PutObject request failed' <<<"$shipper_logs"; then
-    echo "  PASS: the shipper's uploads failed while the put compactor was down"
+  # only the lines of the outage: the shipper's start, before the put
+  # compactor's, fails uploads too
+  if awk -v up="$PUT_UP_AT" '$1 < up' <<<"$outage_logs" | grep -q 'PutObject request failed'; then
+    echo "  PASS: the shipper's uploads failed while the put compactor was down ($PUT_DOWN_AT to $PUT_UP_AT)"
   else
-    echo "  FAIL: no upload of the shipper failed while the put compactor was down" >&2; ERRORS=$((ERRORS + 1))
+    echo "  FAIL: no upload of the shipper failed while the put compactor was down ($PUT_DOWN_AT to $PUT_UP_AT)" >&2; ERRORS=$((ERRORS + 1))
   fi
   if grep -iE 'will not retry|retry-exhausted|quarantine|cannot be retried' <<<"$shipper_logs" >&2; then
     echo "  FAIL: the shipper gave up on a chunk (lines above)" >&2; ERRORS=$((ERRORS + 1))
@@ -1050,11 +1058,23 @@ assert "put: the late object's hour is final, its sidecar lists the key and the 
 assert "put: no sidecar lists the refused keys" \
   "SELECT count(*) = 0 FROM $PUT_FOLDED WHERE key LIKE '%/itest-late/0001-wrong.%' OR key LIKE '%/itest-late/0002-unsigned.%'"
 # The spool after the final folds: no file of a final hour is left, the
-# late object's hour included
-if spool_sh "find /spool -type f"; then
-  spool_files=$POD_LOG
-  final_hours=$(q "SELECT DISTINCT regexp_extract(filename, '_folded/(.*)\\.csv\$', 1) AS h FROM $PUT_FOLDED WHERE final ORDER BY h")
-  echo "  the spool holds $(grep -c . <<<"$spool_files" || true) files; final hours: ${final_hours//$'\n'/ }"
+# late object's hour included. Only files older than the last past pass's
+# start count: a late upload to a final hour waits for the next past pass,
+# and a file's time is its write's, which precedes its rename into the key
+# by the time the body took (30 s allowed). The final hours are read
+# first: an hour final then had its files of before that pass deleted by
+# the time of the listing.
+final_hours=$(q "SELECT DISTINCT regexp_extract(filename, '_folded/(.*)\\.csv\$', 1) AS h FROM $PUT_FOLDED WHERE final ORDER BY h")
+past_started=$($KUBECTL get --raw "/api/v1/namespaces/$PUT_NS/pods/$($KUBECTL -n "$PUT_NS" get pods -l app=blobs-compactor \
+    -o jsonpath='{.items[0].metadata.name}'):9090/proxy/metrics" 2>/dev/null \
+  | awk '$1 == "blobs_compactor_last_success_timestamp_seconds{job=\"past\"}" { e = $2 }
+         $1 == "blobs_compactor_last_duration_seconds{job=\"past\"}" { d = $2 }
+         END { if (e != "" && d != "") printf "%d\n", e - d - 30 }')
+if [ -z "$past_started" ]; then
+  echo "  FAIL: put: no past pass of the put compactor in its metrics" >&2; ERRORS=$((ERRORS + 1))
+elif spool_sh "find /spool -type f -exec stat -c '%Y %n' {} +"; then
+  spool_files=$(awk -v t="$past_started" '$1 < t { print $2 }' <<<"$POD_LOG")
+  echo "  the spool holds $(grep -c . <<<"$POD_LOG" || true) files, $(grep -c . <<<"$spool_files" || true) of them written before the last past pass; final hours: ${final_hours//$'\n'/ }"
   left=$(for h in $final_hours; do grep -F "/spool/raw1/$PUT_CLUSTER/$h/" <<<"$spool_files" || true; done)
   if grep -qxF "$LATE_PUT_HOUR" <<<"$final_hours" && [ -z "$left" ] && ! grep -qF /itest-late/ <<<"$spool_files"; then
     echo "  PASS: put: the spool keeps no file of a final hour, the late object's included"

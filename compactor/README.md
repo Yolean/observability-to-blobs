@@ -146,6 +146,7 @@ compactor/
                      DeleteObjects, SigV4
   put.go             the put endpoint: PutObject, SigV4 verification, S3 errors
   spool.go           the spool: a RawSource on a local directory, durable writes
+  folded.go          the put endpoint's cache of the hours' folded keys
   fold.go            fold of one hour, the sidecar
   rollup.go          rollup of one day
   loop.go            run: the rolling and past passes, and the servers beside them
@@ -165,6 +166,8 @@ compactor/
   deploy/base/       the Deployment
   deploy/release/    resources: [../base] and the images: pin
   deploy/spool/      a component: spool mode, its volume and the put Service
+  deploy/spool-networkpolicy/
+                     an optional component: the put port open to the agents' namespace only
   deploy/logs/       a component: the logs API and its Service
 ```
 
@@ -557,27 +560,42 @@ with `send_content_md5 on`, a `Content-MD5`. It makes no other call, at
 startup or around an upload. Any other method, a query string
 (multipart uploads, ACLs, tagging) or `aws-chunked` is answered with S3's
 XML error document, 501 `NotImplemented`. `PUT_LISTEN` (`:9000` in
-`deploy/spool`) turns it on; it needs `RAW_SOURCE=spool`.
+`deploy/spool`) turns it on; it needs `RAW_SOURCE=spool`. `run` binds it,
+and `METRICS_ADDR`, before its first pass: an address it cannot bind ends
+the process at once, as does a listener that fails later.
 
-**What it checks**, each refusal an S3 error document:
+**What it checks**, each refusal an S3 error document. Until the
+signature is verified, every refusal but the anonymous one is the same
+403 `SignatureDoesNotMatch` with S3's generic message, so a caller without
+the key pair learns neither the key id, nor the region, nor the server's
+clock; the log line says which check failed:
 
 | | |
 |---|---|
 | no `Authorization` | 403 `AccessDenied` |
-| not `AWS4-HMAC-SHA256`, a credential not `{id}/{date}/{region}/s3/aws4_request`, a region other than `S3_REGION`, a credential date other than `x-amz-date`'s | 400 `AuthorizationHeaderMalformed` |
-| a key id other than `PUT_ACCESS_KEY_ID` | 403 `InvalidAccessKeyId` |
-| no valid `x-amz-date` | 403 `AccessDenied` |
-| `x-amz-date` more than 15 min from the clock, as S3 allows | 403 `RequestTimeTooSkewed` |
+| not `AWS4-HMAC-SHA256`, a credential not `{id}/{date}/{region}/s3/aws4_request`, a key id other than `PUT_ACCESS_KEY_ID`, a region other than `S3_REGION`, no valid `x-amz-date`, a credential date other than `x-amz-date`'s, `SignedHeaders` not sorted, or a signature other than the one `PUT_SECRET_ACCESS_KEY` makes | 403 `SignatureDoesNotMatch` |
+| then: `x-amz-date` more than 15 min from the clock, as S3 allows | 403 `RequestTimeTooSkewed` |
 | `host`, `x-amz-date` or `x-amz-content-sha256` not signed, or any other `x-amz-*` header present and not signed | 403 `AccessDenied` |
-| the signature, computed with `PUT_SECRET_ACCESS_KEY` | 403 `SignatureDoesNotMatch` |
 | `x-amz-content-sha256` not a SHA-256 (`UNSIGNED-PAYLOAD`, the streaming forms: `out_s3` sends neither) | 403 `AccessDenied` |
 | a bucket other than `S3_BUCKET` | 404 `NoSuchBucket` |
 | a key that is not `raw1/{CLUSTER_NAME}/{date}/{HH}/{node}/{name}.jsonl.zst`, node and name of `[A-Za-z0-9._-]` starting with a letter or a digit | 403 `AccessDenied` |
 | no `Content-Length` | 411 `MissingContentLength` |
-| more than `PUT_MAX_BYTES` (64 MiB; `out_s3` uploads its buffer, compressed, once it reaches `total_file_size`, 64M in the agent) | 400 `EntityTooLarge` |
+| more than `PUT_MAX_BYTES` (128 MiB), with a message that names it and `total_file_size` | 400 `EntityTooLarge` |
 | a `Content-MD5` that is not 16 bytes | 400 `InvalidDigest` |
 | a body shorter than `Content-Length`, whose SHA-256 is not `x-amz-content-sha256`, or whose MD5 is not `Content-MD5` | 400 `IncompleteBody`, `XAmzContentSHA256Mismatch`, `BadDigest` |
-| a failed write or sync | 500 `InternalError` |
+| a failed write or sync, or a failed read of the key's hour's sidecar (below) | 500 `InternalError` |
+
+Each refusal is logged with its code and the reason, at most 10 a minute,
+the next line counting those dropped (`refusals_not_logged`): anyone who
+reaches the port can send them. `EntityTooLarge` is logged as an error,
+since `out_s3` retries such an upload forever: **keep `out_s3`'s
+`total_file_size` well below `PUT_MAX_BYTES`**. `out_s3` uploads its
+buffer once it reaches `total_file_size` (64M in the agent), compressed,
+so an object is normally far smaller, but a buffer can pass the size by
+the last chunk it took, and incompressible lines do not shrink. The body
+is streamed to its file as it is hashed, never held in memory, so the
+limit bounds the spool's disk, per upload in flight, not the compactor's
+memory.
 
 The signature covers the headers and the claimed payload hash, and the
 body is held to that hash, so a signed request cannot carry another body.
@@ -595,18 +613,38 @@ the file synced, renamed to `{SPOOL_DIR}/{key}` (every directory that
 creates is synced in its parent) and the key's directory synced; only then
 is the answer 200, with the body's MD5, quoted, as `ETag`. A crash before
 the rename leaves a file in `_tmp/` that was never acknowledged, and a
-start deletes those. A failed sync answers 500 and removes the key's
-file, and `out_s3` uploads again.
+start deletes those. A failed sync answers 500 and removes what the put
+made, the key's file or a new directory, and `out_s3` uploads again. No
+200 rests on a directory entry that was not synced: a put syncs the parent
+of every directory on the key's path that this process has not synced
+itself (one an earlier process made, or one whose removal after a failed
+sync failed too), and a put of a key that exists syncs the key's
+directory before answering.
 
-**A key that exists keeps its first content.** A PUT of the same content
-is a 200 that writes nothing: a retry whose answer was lost. Other content
-under the key is answered 200 too, with the stored object's ETag, and
-counted (`blobs_compactor_put_requests_total{result="conflict"}`, and an
-error in the log): `out_s3` makes a new key for every upload (`$UUID` in
-`s3_key_format`, also on a retry), so a conflict means a bug elsewhere,
-such as two shippers with one node name. The first content was
-acknowledged, so it stays; an error answer would make a shipper whose key
-format has no `$UUID` retry the same key forever.
+**A key is stored once.** While its file is in the spool, a key keeps its
+first content: a PUT of the same content is a 200 that writes nothing (a
+retry whose answer was lost), and other content under the key is answered
+200 too, with the stored object's ETag, and counted
+(`blobs_compactor_put_requests_total{result="conflict"}`, and an error in
+the log). Once its hour's final fold has deleted the file, the content
+cannot be compared any more, but the hour's sidecar still lists the key: a
+PUT of it, whatever its content, is answered 200 with the body's MD5,
+stores nothing, and is counted as `already_folded`, with a warning in the
+log. Storing it would not fold it either: the next fold finds the key in
+the sidecar and deletes the file unread. So the hour keeps the rows of the
+key's first content. `out_s3` makes a new key for every upload (`$UUID` in
+`s3_key_format`, also on a retry), so a conflict or `already_folded` means
+a retry that came after the fold, or a bug elsewhere, such as two
+shippers with one node name. The first content was acknowledged, so it
+stays; an error answer would make a shipper whose key format has no
+`$UUID` retry the same key forever.
+
+The endpoint knows the folded keys without a read per PUT: every fold
+hands it the sidecar it read or committed, before it deletes any file, and
+a PUT for an hour it has no sidecar of (after a start, or an hour no fold
+has had since) reads that sidecar from the bucket once (a HEAD when there
+is none) and keeps it, for the 36 hours most recently used. While that
+read fails the PUT is answered 500 and `out_s3` retries.
 
 **The spool as the raw source.** `RAW_SOURCE=spool` (default `bucket`)
 and `SPOOL_DIR`, an absolute path. A fold lists an hour's keys under
@@ -623,19 +661,28 @@ and their alert apply as they are. `fold` and `rollup` by hand read the
 spool too, so they run where the volume is mounted, while no loop runs.
 
 **Metrics**, besides the others: `blobs_compactor_put_requests_total{result}`
-(`stored`, `duplicate`, `conflict`, or the S3 error code answered),
+(`stored`, `duplicate`, `conflict`, `already_folded`, or the S3 error code answered),
 `blobs_compactor_put_bytes_total`, and from a walk of the spool at every
 scrape `blobs_compactor_spool_files`, `blobs_compactor_spool_bytes` and
-`blobs_compactor_spool_oldest_age_seconds`.
+`blobs_compactor_spool_oldest_age_seconds`. A put is counted after it is
+answered, and the walk holds no lock a put waits for, so a large spool or
+a slow disk slows scrapes, not acknowledgements.
 
 **Deployment.** The component `deploy/spool` adds to `deploy/base` (or
 `deploy/release`): a PersistentVolumeClaim `blobs-compactor-spool`
 (ReadWriteOnce, 10Gi), mounted at `/spool`; a Service
 `blobs-compactor-put` on port 9000; the env above; `envFrom` the Secret
 `blobs-compactor-put` (`PUT_ACCESS_KEY_ID`, `PUT_SECRET_ACCESS_KEY`), which
-the overlay provides; `fsGroup` 65534; a readiness probe on the put port;
-and `replicas: 1` with `strategy: Recreate`, which the volume needs as
-much as the fold does. **Data the endpoint has acknowledged lives only on
+the overlay provides; `fsGroup` 65534 with `fsGroupChangePolicy:
+OnRootMismatch`, so a start does not walk a full spool to change its
+files' group; a readiness probe on the put port; and `replicas: 1` with
+`strategy: Recreate`, which the volume needs as much as the fold does.
+The optional component `deploy/spool-networkpolicy`, added after
+`deploy/spool`, is a NetworkPolicy that admits connections to port 9000
+only from the agents' namespace (`observability`; an overlay patches the
+`namespaceSelector` for its own) and leaves port 9090 open as before. It
+needs a network plugin that enforces NetworkPolicy and agents that upload
+from pod networking; the endpoint authenticates every request either way. **Data the endpoint has acknowledged lives only on
 that volume until its hour is folded**, about two hours of every agent's
 uploads, more while folds fail: losing the volume loses them. Give it the
 durability the raw tier would have had: a replicated storage class, or a
@@ -827,7 +874,7 @@ Service from everyone else.
   overlay that turns encryption on mounts the keys Secret and sets both,
   as `itest/compactor` does. Spool mode (above): `RAW_SOURCE` (bucket),
   `SPOOL_DIR`, `PUT_LISTEN` (unset: no endpoint), `PUT_ACCESS_KEY_ID`,
-  `PUT_SECRET_ACCESS_KEY` and `PUT_MAX_BYTES` (64 MiB), which
+  `PUT_SECRET_ACCESS_KEY` and `PUT_MAX_BYTES` (128 MiB), which
   `deploy/spool` sets. The logs API (above): `LOGS_LISTEN` (unset: no
   API in `run`; `:8080` for `serve`), which `deploy/logs` sets,
   `LOGS_LOOKBACK` (48h), `LOGS_TIMEOUT` (30s) and `LOGS_CONCURRENCY` (4).

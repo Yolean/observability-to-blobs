@@ -31,7 +31,9 @@ type metrics struct {
 	// parquet key ids the tiers' object names carry with no key file
 	keysMissed float64
 	// spool mode: the put endpoint's requests by result, the bytes it
-	// stored, and the spool's files now
+	// stored, and the spool's files now, a walk of it that a scrape makes
+	// without holding mu, so that a put's count never waits for a walk.
+	// spool is set before the metrics are served.
 	puts     map[string]float64
 	putBytes float64
 	spool    func() (spoolStats, error)
@@ -67,8 +69,9 @@ func newMetrics() *metrics {
 		puts: map[string]float64{}}
 }
 
-// put records one request to the put endpoint: stored, duplicate or
-// conflict with the bytes of a stored body, or the S3 error code it got.
+// put records one request to the put endpoint: stored, duplicate,
+// conflict or already_folded with the bytes of a stored body, or the S3
+// error code it got.
 func (m *metrics) put(result string, bytes int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -150,6 +153,11 @@ func (m *metrics) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (m *metrics) write(w io.Writer) {
+	var st spoolStats
+	var stErr error
+	if m.spool != nil {
+		st, stErr = m.spool()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var b strings.Builder
@@ -202,23 +210,22 @@ func (m *metrics) write(w io.Writer) {
 	family("blobs_compactor_parquet_keys_missing", "gauge", "Parquet key ids that tier object names (or PARQUET_KEY_ID) carry and PARQUET_KEYS_DIR lacks; folds and rollups refuse while it is above 0.")
 	fmt.Fprintf(&b, "blobs_compactor_parquet_keys_missing %s\n", num(m.keysMissed))
 	if m.spool != nil {
-		m.writeSpool(&b)
+		m.writeSpool(&b, st, stErr)
 	}
 	io.WriteString(w, b.String())
 }
 
 // writeSpool writes the put endpoint's and the spool's families. The
-// spool's gauges are a walk of it now; a failed walk leaves them out.
-func (m *metrics) writeSpool(b *strings.Builder) {
+// spool's gauges are st, a walk of it now; a failed walk leaves them out.
+func (m *metrics) writeSpool(b *strings.Builder, st spoolStats, err error) {
 	fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s counter\n", "blobs_compactor_put_requests_total",
-		"Requests to the put endpoint by result: stored, duplicate (the key held the same content), conflict (the key held other content, which it keeps), or the S3 error code answered.",
+		"Requests to the put endpoint by result: stored, duplicate (the key held the same content), conflict (the key held other content, which it keeps), already_folded (the key's hour was folded with it and its file deleted: nothing stored), or the S3 error code answered.",
 		"blobs_compactor_put_requests_total")
 	for _, k := range sortedKeys(m.puts) {
 		fmt.Fprintf(b, "blobs_compactor_put_requests_total{result=%q} %s\n", k, num(m.puts[k]))
 	}
 	fmt.Fprintf(b, "# HELP blobs_compactor_put_bytes_total Bytes of the objects the put endpoint stored.\n# TYPE blobs_compactor_put_bytes_total counter\n")
 	fmt.Fprintf(b, "blobs_compactor_put_bytes_total %s\n", num(m.putBytes))
-	st, err := m.spool()
 	if err != nil {
 		return
 	}
