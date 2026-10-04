@@ -58,21 +58,28 @@ func malformed(msg string) *s3Err {
 	return &s3Err{http.StatusBadRequest, "AuthorizationHeaderMalformed", msg}
 }
 
+// ServeHTTP answers a request, and only then counts and logs it.
 func (p *putServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	etag, result, err := p.put(r)
 	if err != nil {
 		var e *s3Err
 		if !errors.As(err, &e) {
-			p.log.Error("put", "path", r.URL.Path, "err", err)
 			e = &s3Err{http.StatusInternalServerError, "InternalError", "the object was not stored"}
+		}
+		writeS3Error(w, r, e)
+		http.NewResponseController(w).Flush()
+		p.m.put(e.code, 0)
+		if e.code == "InternalError" {
+			p.log.Error("put", "path", r.URL.Path, "err", err)
 		} else {
 			p.log.Warn("put refused", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr,
 				"code", e.code, "message", e.message)
 		}
-		p.m.put(e.code, 0)
-		writeS3Error(w, r, e)
 		return
 	}
+	w.Header().Set("ETag", `"`+hex.EncodeToString(etag)+`"`)
+	w.WriteHeader(http.StatusOK)
+	http.NewResponseController(w).Flush()
 	p.m.put(result, r.ContentLength)
 	switch result {
 	case "conflict":
@@ -81,8 +88,6 @@ func (p *putServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.log.Warn("put: the key was folded and its file deleted, so its content cannot be compared; nothing is stored",
 			"key", strings.TrimPrefix(r.URL.Path, "/"+p.bucket+"/"))
 	}
-	w.Header().Set("ETag", `"`+hex.EncodeToString(etag)+`"`)
-	w.WriteHeader(http.StatusOK)
 }
 
 // put checks a request and stores its body. It returns the stored

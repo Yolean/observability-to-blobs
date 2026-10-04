@@ -470,3 +470,63 @@ func TestPutRetryAfterAFailedSyncSyncsWhatItDependsOn(t *testing.T) {
 		})
 	}
 }
+
+// countRecorder fails a test whose put is counted before it is answered.
+type countRecorder struct {
+	*httptest.ResponseRecorder
+	t *testing.T
+	m *metrics
+}
+
+func (c countRecorder) WriteHeader(code int) {
+	c.m.mu.Lock()
+	n := len(c.m.puts)
+	c.m.mu.Unlock()
+	if n != 0 {
+		c.t.Errorf("the put was counted before its answer: %v", c.m.puts)
+	}
+	c.ResponseRecorder.WriteHeader(code)
+}
+
+// A scrape walks the spool without the metrics' lock, and a put is
+// answered before it is counted: a slow walk delays no acknowledgement.
+func TestPutIsAnsweredWhileAScrapeWalksTheSpool(t *testing.T) {
+	tp := newTestPut(t)
+	walking, release, scraped := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	tp.p.m.spool = func() (spoolStats, error) {
+		close(walking)
+		<-release
+		return tp.p.spool.stats()
+	}
+	go func() {
+		var b strings.Builder
+		tp.p.m.write(&b)
+		if !strings.Contains(b.String(), "blobs_compactor_spool_files 1\n") {
+			t.Errorf("the scrape:\n%s", b.String())
+		}
+		close(scraped)
+	}()
+	<-walking
+	answered := make(chan int)
+	go func() {
+		rec := countRecorder{httptest.NewRecorder(), t, tp.p.m}
+		tp.p.ServeHTTP(rec, tp.captured())
+		answered <- rec.Code
+	}()
+	select {
+	case code := <-answered:
+		if code != http.StatusOK {
+			t.Fatalf("the put: %d", code)
+		}
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("the put waited for the scrape's walk of the spool")
+	}
+	close(release)
+	<-scraped
+	tp.p.m.mu.Lock()
+	defer tp.p.m.mu.Unlock()
+	if tp.p.m.puts["stored"] != 1 {
+		t.Fatalf("counted %v", tp.p.m.puts)
+	}
+}

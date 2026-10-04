@@ -639,7 +639,9 @@ spool too, so they run where the volume is mounted, while no loop runs.
 (`stored`, `duplicate`, `conflict`, `already_folded`, or the S3 error code answered),
 `blobs_compactor_put_bytes_total`, and from a walk of the spool at every
 scrape `blobs_compactor_spool_files`, `blobs_compactor_spool_bytes` and
-`blobs_compactor_spool_oldest_age_seconds`.
+`blobs_compactor_spool_oldest_age_seconds`. A put is counted after it is
+answered, and the walk holds no lock a put waits for, so a large spool or
+a slow disk slows scrapes, not acknowledgements.
 
 **Deployment.** The component `deploy/spool` adds to `deploy/base` (or
 `deploy/release`): a PersistentVolumeClaim `blobs-compactor-spool`
