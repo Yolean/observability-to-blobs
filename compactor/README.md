@@ -588,8 +588,13 @@ the file synced, renamed to `{SPOOL_DIR}/{key}` (every directory that
 creates is synced in its parent) and the key's directory synced; only then
 is the answer 200, with the body's MD5, quoted, as `ETag`. A crash before
 the rename leaves a file in `_tmp/` that was never acknowledged, and a
-start deletes those. A failed sync answers 500 and removes the key's
-file, and `out_s3` uploads again.
+start deletes those. A failed sync answers 500 and removes what the put
+made, the key's file or a new directory, and `out_s3` uploads again. No
+200 rests on a directory entry that was not synced: a put syncs the parent
+of every directory on the key's path that this process has not synced
+itself (one an earlier process made, or one whose removal after a failed
+sync failed too), and a put of a key that exists syncs the key's
+directory before answering.
 
 **A key that exists keeps its first content.** A PUT of the same content
 is a 200 that writes nothing: a retry whose answer was lost. Other content

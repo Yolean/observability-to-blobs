@@ -394,3 +394,79 @@ func TestPutIsDurableBeforeItsAnswer(t *testing.T) {
 		}
 	}
 }
+
+// A put that answered 500 because a directory sync failed leaves the next
+// put of the key to sync that directory entry before its 200, whether the
+// failed put's undo (removing the directory it made, or the file it
+// renamed) worked or failed too: a directory made by a new directory's
+// failed parent sync, and the key's directory after the rename.
+func TestPutRetryAfterAFailedSyncSyncsWhatItDependsOn(t *testing.T) {
+	for _, tc := range []struct {
+		name, failing string
+		removeFails   bool
+	}{
+		{"a new directory's parent", "raw1/capture/2026-10-04", false},
+		{"a new directory's parent, its removal failing", "raw1/capture/2026-10-04", true},
+		{"the key's directory after the rename", "raw1/capture/2026-10-04/07/node-1", false},
+		{"the key's directory after the rename, the file's removal failing", "raw1/capture/2026-10-04/07/node-1", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tp := newTestPut(t)
+			sp := tp.p.spool
+			dst := sp.URL(capturedKey)
+			failOnce := true
+			var events []string
+			sp.syncDir = func(p string) error {
+				rel, _ := filepath.Rel(sp.root, p)
+				rel = filepath.ToSlash(rel)
+				if _, err := os.Stat(dst); err == nil {
+					rel += " with the key"
+				}
+				events = append(events, "dir "+rel)
+				if failOnce && strings.HasPrefix(rel, tc.failing) {
+					failOnce = false
+					return errors.New("sync failed")
+				}
+				return syncDir(p)
+			}
+			if tc.removeFails {
+				sp.remove = func(string) error { return errors.New("remove failed") }
+			}
+			if rec := tp.do(tp.captured()); rec.Code != http.StatusInternalServerError {
+				t.Fatalf("the put whose sync fails: %d %s", rec.Code, rec.Body)
+			}
+			if failOnce {
+				t.Fatalf("no sync of %s: %v", tc.failing, events)
+			}
+			events = nil
+			tp.p.ServeHTTP(answerRecorder{httptest.NewRecorder(), &events}, tp.captured())
+			want := "dir " + tc.failing
+			if strings.HasSuffix(tc.failing, "node-1") {
+				want += " with the key"
+			}
+			synced := false
+			for _, e := range events {
+				if e == "answer" {
+					break
+				}
+				synced = synced || e == want
+			}
+			if !synced || events[len(events)-1] != "answer" {
+				t.Fatalf("the retry: events %v, want %q before the answer", events, want)
+			}
+			body, _ := base64.StdEncoding.DecodeString(capturedBody)
+			if !bytes.Equal(tp.stored(capturedKey), body) {
+				t.Fatal("the retry did not leave the body at the key")
+			}
+			// a third put of the key finds every directory known durable:
+			// it syncs only the key's directory, for the duplicate
+			events = nil
+			if rec := tp.do(tp.captured()); rec.Code != http.StatusOK {
+				t.Fatalf("the third put: %d %s", rec.Code, rec.Body)
+			}
+			if strings.Join(events, ", ") != "dir raw1/capture/2026-10-04/07/node-1 with the key" {
+				t.Fatalf("the third put synced %v", events)
+			}
+		})
+	}
+}

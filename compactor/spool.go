@@ -31,9 +31,16 @@ type spool struct {
 	// mu orders a put's new directories and rename against Delete, which
 	// removes the directories it empties
 	mu sync.Mutex
-	// syncFile and syncDir make a write durable; tests replace them
+	// durable holds the directories whose entry in their parent this
+	// process has synced: a directory that exists without being here (a
+	// sync failed and so did its removal, or an earlier process made it)
+	// has its parent synced before a put that needs it is acknowledged
+	durable map[string]bool
+	// syncFile and syncDir make a write durable, remove undoes one that
+	// failed; tests replace them
 	syncFile func(*os.File) error
 	syncDir  func(path string) error
+	remove   func(path string) error
 }
 
 // spoolTmp holds the writes in progress, on the spool's file system so
@@ -44,7 +51,7 @@ const spoolTmp = "_tmp"
 // interrupted before its rename, never acknowledged; it goes.
 func openSpool(root string) (*spool, error) {
 	root = filepath.Clean(root)
-	s := &spool{root: root, syncFile: (*os.File).Sync, syncDir: syncDir}
+	s := &spool{root: root, durable: map[string]bool{}, syncFile: (*os.File).Sync, syncDir: syncDir, remove: os.Remove}
 	tmp := filepath.Join(root, spoolTmp)
 	if err := os.MkdirAll(tmp, 0o700); err != nil {
 		return nil, fmt.Errorf("spool %s: %w", root, err)
@@ -102,6 +109,7 @@ func (s *spool) Delete(_ context.Context, keys []string) error {
 			if err := os.Remove(d); err != nil {
 				break
 			}
+			delete(s.durable, d)
 		}
 	}
 	return nil
@@ -124,9 +132,11 @@ func (e *errBody) Error() string { return e.code + ": " + e.msg }
 
 // write stores the size bytes of body at key, once they read whole and
 // match sha256Hex and, when it is not nil, contentMD5. It returns once the
-// file and its directory entry are synced, with the MD5 of what the key
-// holds. A key that exists keeps its content: the same content is a
-// duplicate, other content a conflict, and neither is written.
+// file and every directory entry on its path are synced, with the MD5 of
+// what the key holds. A key that exists keeps its content: the same
+// content is a duplicate, other content a conflict, and neither is
+// written; its directory is synced again before either returns, since the
+// file may be one whose sync failed and whose removal did too.
 func (s *spool) write(key string, body io.Reader, size int64, sha256Hex string, contentMD5 []byte) ([]byte, spoolWrite, error) {
 	f, err := os.CreateTemp(filepath.Join(s.root, spoolTmp), "*.tmp")
 	if err != nil {
@@ -169,6 +179,9 @@ func (s *spool) write(key string, body io.Reader, size int64, sha256Hex string, 
 		if err != nil {
 			return nil, 0, err
 		}
+		if err := s.syncDir(filepath.Dir(dst)); err != nil {
+			return nil, 0, err
+		}
 		if bytes.Equal(have, etag) {
 			return have, spoolDuplicate, nil
 		}
@@ -181,8 +194,9 @@ func (s *spool) write(key string, body io.Reader, size int64, sha256Hex string, 
 	}
 	renamed = true
 	if err := s.syncDir(filepath.Dir(dst)); err != nil {
-		// not acknowledged, so not kept: the agent uploads it again
-		os.Remove(dst)
+		// not acknowledged, so not kept: the agent uploads it again; if
+		// the removal fails too, the next put of the key syncs it
+		s.remove(dst)
 		return nil, 0, err
 	}
 	return etag, spoolStored, nil
@@ -198,9 +212,12 @@ func checkSums(sum, md hash.Hash, sha256Hex string, contentMD5 []byte) error {
 	return nil
 }
 
-// mkdirs creates dir and its missing parents under the root, syncing the
-// parent of each directory it creates, so the new file's path is durable
-// along with the file.
+// mkdirs creates dir and its missing parents under the root, and syncs
+// the parent of each directory on the path that is not known durable, the
+// ones it creates and any it finds that this process has not synced, so
+// the new file's path is durable along with the file. A directory it
+// created whose parent's sync fails is removed again: the put answers 500
+// and the next one creates it anew.
 func (s *spool) mkdirs(dir string) error {
 	rel, err := filepath.Rel(s.root, dir)
 	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
@@ -211,15 +228,20 @@ func (s *spool) mkdirs(dir string) error {
 		parent := p
 		p = filepath.Join(p, part)
 		err := os.Mkdir(p, 0o755)
-		if errors.Is(err, fs.ErrExist) {
+		created := err == nil
+		if err != nil && !errors.Is(err, fs.ErrExist) {
+			return err
+		}
+		if !created && s.durable[p] {
 			continue
 		}
-		if err != nil {
-			return err
-		}
 		if err := s.syncDir(parent); err != nil {
+			if created {
+				s.remove(p)
+			}
 			return err
 		}
+		s.durable[p] = true
 	}
 	return nil
 }
