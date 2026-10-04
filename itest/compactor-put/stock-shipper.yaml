@@ -1,0 +1,69 @@
+# Stock Fluent Bit as a node shipper: no fork, no Go plugins, only what the
+# official image has. It tails the CRI logs and enriches them the way the
+# node agent's pipeline does (agent/fluent-bit.yaml), and uploads with
+# out_s3 to the compactor's put endpoint.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: stock-shipper
+spec:
+  selector:
+    matchLabels:
+      app: stock-shipper
+  template:
+    metadata:
+      labels:
+        app: stock-shipper
+    spec:
+      automountServiceAccountToken: false
+      tolerations:
+      - operator: Exists
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: shipper
+        image: fluent/fluent-bit
+        args: [-c, /fluent-bit/etc/config/fluent-bit.yaml]
+        securityContext:
+          # /var/log/pods is root's on the node
+          runAsUser: 0
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]
+        env:
+        - name: CLUSTER_NAME
+          value: itest-put
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        envFrom:
+        - secretRef:
+            name: stock-shipper-s3
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            memory: 512Mi
+        volumeMounts:
+        - name: config
+          mountPath: /fluent-bit/etc/config
+          readOnly: true
+        - name: pods
+          mountPath: /var/log/pods
+          readOnly: true
+        # buffers and positions; an emptyDir, so a new shipper pod reads
+        # every log from its start again (the fold's DISTINCT takes the
+        # repeat)
+        - name: state
+          mountPath: /state
+      volumes:
+      - name: config
+        configMap:
+          name: stock-shipper
+      - name: pods
+        hostPath:
+          path: /var/log/pods
+      - name: state
+        emptyDir: {}

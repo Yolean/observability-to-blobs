@@ -1,0 +1,98 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# A second compactor, in spool mode (compactor/deploy/spool), with a
+# cluster name of its own, and stock Fluent Bit as the shipper that uploads
+# to it: the official image, out_s3 with use_put_object on, pointed at the
+# compactor's put endpoint instead of the bucket. The node agent and the
+# bucket-mode compactor (itest/compactor) run beside it, unchanged. Its
+# own namespace keeps the two compactors' names and selectors apart.
+namespace: observability-put
+
+resources:
+- namespace.yaml
+- ../../compactor/deploy/base
+- stock-shipper.yaml
+
+components:
+- ../../compactor/deploy/spool
+
+# test.sh runs pods that name the secrets
+generatorOptions:
+  disableNameSuffixHash: true
+
+secretGenerator:
+- name: blobs-compactor-s3
+  literals:
+  - AWS_ACCESS_KEY_ID=demoaccess
+  - AWS_SECRET_ACCESS_KEY=demosecret
+# the put endpoint's key pair, and the shipper's copy of it
+- name: blobs-compactor-put
+  literals:
+  - PUT_ACCESS_KEY_ID=itestput
+  - PUT_SECRET_ACCESS_KEY=itest-put-secret
+- name: stock-shipper-s3
+  literals:
+  - AWS_ACCESS_KEY_ID=itestput
+  - AWS_SECRET_ACCESS_KEY=itest-put-secret
+
+configMapGenerator:
+- name: stock-shipper
+  files:
+  - fluent-bit.yaml
+
+images:
+- name: ghcr.io/yolean/blobs-compactor
+  newTag: build
+# Fluent Bit v5.1.3, the official multi-arch index
+- name: fluent/fluent-bit
+  newTag: 5.1.3
+  digest: sha256:c5542543523c9678398dd78d927c05e8425ec15b038f226b67b3b019b1a70845
+
+patches:
+- patch: |
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: blobs-compactor-spool
+    spec:
+      resources:
+        requests:
+          storage: 1Gi
+- patch: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: blobs-compactor
+    spec:
+      template:
+        spec:
+          containers:
+          - name: compactor
+            imagePullPolicy: Never
+            env:
+            - name: CLUSTER_NAME
+              value: itest-put
+            - name: S3_BUCKET
+              value: node-agent
+            - name: S3_ENDPOINT
+              value: versitygw.default.svc.cluster.local:7070
+            - name: S3_TLS
+              value: "off"
+            - name: ROLLING_INTERVAL
+              value: 20s
+            - name: GRACE
+              value: 1m
+            - name: PAST_INTERVAL
+              value: 5m
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                memory: 1Gi
+          volumes:
+          - name: scratch
+            emptyDir:
+              sizeLimit: 1Gi

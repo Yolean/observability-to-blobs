@@ -1,0 +1,71 @@
+# The node agent's container log pipeline (agent/fluent-bit.yaml) on stock
+# Fluent Bit: tail with the CRI multiline parser, the pod identity from the
+# path, the contract's keys with stock processors. The journal, the
+# scrapes and the pod index need the agent's inputs; the docker backend
+# has no journal anyway. out_s3 uploads to the compactor's put endpoint.
+service:
+  flush: 1
+  log_level: info
+  storage.path: /state/storage
+  storage.sync: normal
+
+parsers:
+  - name: podpath
+    format: regex
+    regex: '^/var/log/pods/(?<namespace>[^_/]+)_(?<pod>[^_/]+)_(?<pod_uid>[^/]+)/(?<container>[^/]+)/(?<restart>\d+)\.log$'
+    types: restart:integer
+
+pipeline:
+  inputs:
+    - name: tail
+      tag: blob
+      path: /var/log/pods/*/*/*.log
+      # its own output would feed back into it
+      exclude_path: /var/log/pods/observability-put_stock-shipper-*/*/*.log
+      multiline.parser: cri
+      path_key: file
+      read_from_head: true
+      db: /state/tail.db
+      refresh_interval: 5
+      rotate_wait: 30
+      buffer_chunk_size: 256k
+      buffer_max_size: 2M
+      skip_long_lines: on
+      storage.type: filesystem
+      processors:
+        logs:
+          - name: parser
+            key_name: file
+            parser: podpath
+            reserve_data: true
+            preserve_key: false
+          - name: modify
+            add:
+              - table logs
+              - cluster ${CLUSTER_NAME}
+              - node ${NODE_NAME}
+            rename:
+              - log message
+            remove:
+              - _p
+
+  outputs:
+    - name: s3
+      match: blob
+      bucket: node-agent
+      endpoint: http://blobs-compactor-put.observability-put.svc.cluster.local:9000
+      region: us-east-1
+      tls: off
+      use_put_object: on
+      send_content_md5: on
+      format: json_lines
+      compression: zstd
+      json_date_key: ts
+      json_date_format: iso8601
+      upload_timeout: 30s
+      total_file_size: 64M
+      store_dir: /state/s3
+      # buffer and retry while the compactor is down, as the agent does
+      # with the bucket
+      retry_limit: 100000
+      s3_key_format: /raw1/${CLUSTER_NAME}/%Y-%m-%d/%H/${NODE_NAME}/%M%S-$UUID.jsonl.zst
