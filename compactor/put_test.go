@@ -215,7 +215,7 @@ func TestPutRefuses(t *testing.T) {
 			r := tp.captured()
 			r.Header.Set("Authorization", strings.Replace(r.Header.Get("Authorization"), "AKIDCAPTURE", "AKIDOTHER", 1))
 			return r
-		}, 403, "InvalidAccessKeyId"},
+		}, 403, "SignatureDoesNotMatch"},
 		{"no signature", func(tp *testPut) *http.Request {
 			r := tp.captured()
 			r.Header.Del("Authorization")
@@ -249,7 +249,21 @@ func TestPutRefuses(t *testing.T) {
 		{"another region", func(tp *testPut) *http.Request {
 			tp.p.region = "eu-central"
 			return tp.captured()
-		}, 400, "AuthorizationHeaderMalformed"},
+		}, 403, "SignatureDoesNotMatch"},
+		{"a clock 20 minutes ahead and another secret", func(tp *testPut) *http.Request {
+			tp.p.now = func() time.Time { return capturedAt.Add(20 * time.Minute) }
+			return tp.signed(key, body, "wrong", "")
+		}, 403, "SignatureDoesNotMatch"},
+		{"no x-amz-date", func(tp *testPut) *http.Request {
+			r := tp.captured()
+			r.Header.Del("X-Amz-Date")
+			return r
+		}, 403, "SignatureDoesNotMatch"},
+		{"not SigV4", func(tp *testPut) *http.Request {
+			r := tp.captured()
+			r.Header.Set("Authorization", "AWS AKIDCAPTURE:c2ln")
+			return r
+		}, 403, "SignatureDoesNotMatch"},
 		{"another bucket", func(tp *testPut) *http.Request {
 			return tp.signed(strings.Replace(key, "node-agent", "other", 1), body, capturedSecret, "")
 		}, 404, "NoSuchBucket"},
@@ -276,6 +290,15 @@ func TestPutRefuses(t *testing.T) {
 			rec := tp.do(tc.req(tp))
 			if rec.Code != tc.status || errorCode(rec) != tc.code {
 				t.Fatalf("%d %s, want %d %s", rec.Code, rec.Body, tc.status, tc.code)
+			}
+			// an unauthenticated caller learns neither the key id nor
+			// the region nor the clock
+			if tc.code == "SignatureDoesNotMatch" {
+				for _, secret := range []string{tp.p.keyID, tp.p.region, "AKIDOTHER", "x-amz-date", "server's clock"} {
+					if strings.Contains(rec.Body.String(), secret) {
+						t.Fatalf("the answer says %q: %s", secret, rec.Body)
+					}
+				}
 			}
 			if ct := rec.Header().Get("Content-Type"); ct != "application/xml" {
 				t.Fatalf("Content-Type %s", ct)
@@ -528,5 +551,41 @@ func TestPutIsAnsweredWhileAScrapeWalksTheSpool(t *testing.T) {
 	defer tp.p.m.mu.Unlock()
 	if tp.p.m.puts["stored"] != 1 {
 		t.Fatalf("counted %v", tp.p.m.puts)
+	}
+}
+
+// Refusals are logged with what the answer did not say, at most
+// refusalLogs a minute, the next line counting the ones dropped; a body
+// over PUT_MAX_BYTES is an error, with a message that says what to change.
+func TestPutRefusalLogs(t *testing.T) {
+	tp := newTestPut(t)
+	var logs bytes.Buffer
+	tp.p.log = slog.New(slog.NewJSONHandler(&logs, nil))
+	other := func() *http.Request {
+		r := tp.captured()
+		r.Header.Set("Authorization", strings.Replace(r.Header.Get("Authorization"), "AKIDCAPTURE", "AKIDOTHER", 1))
+		return r
+	}
+	for i := 0; i < refusalLogs+5; i++ {
+		tp.do(other())
+	}
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != refusalLogs {
+		t.Fatalf("%d log lines for %d refusals in a minute, want %d:\n%s", len(lines), refusalLogs+5, refusalLogs, logs.String())
+	}
+	if !strings.Contains(lines[0], `"detail":"the access key id AKIDOTHER is not PUT_ACCESS_KEY_ID"`) ||
+		!strings.Contains(lines[0], `"level":"WARN"`) {
+		t.Fatalf("the log line: %s", lines[0])
+	}
+	logs.Reset()
+	tp.p.now = func() time.Time { return capturedAt.Add(61 * time.Second) }
+	tp.p.maxBytes = 5
+	body := []byte("a body")
+	rec := tp.do(tp.signed("/node-agent/raw1/capture/2026-10-04/07/node-1/0000-x.jsonl.zst", body, capturedSecret, ""))
+	if errorCode(rec) != "EntityTooLarge" || !strings.Contains(rec.Body.String(), "total_file_size") {
+		t.Fatalf("a body over PUT_MAX_BYTES: %d %s", rec.Code, rec.Body)
+	}
+	if l := logs.String(); !strings.Contains(l, `"level":"ERROR"`) || !strings.Contains(l, `"refusals_not_logged":5`) {
+		t.Fatalf("the next minute's first line: %s", l)
 	}
 }

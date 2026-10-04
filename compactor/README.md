@@ -557,25 +557,38 @@ XML error document, 501 `NotImplemented`. `PUT_LISTEN` (`:9000` in
 and `METRICS_ADDR`, before its first pass: an address it cannot bind ends
 the process at once, as does a listener that fails later.
 
-**What it checks**, each refusal an S3 error document:
+**What it checks**, each refusal an S3 error document. Until the
+signature is verified, every refusal but the anonymous one is the same
+403 `SignatureDoesNotMatch` with S3's generic message, so a caller without
+the key pair learns neither the key id, nor the region, nor the server's
+clock; the log line says which check failed:
 
 | | |
 |---|---|
 | no `Authorization` | 403 `AccessDenied` |
-| not `AWS4-HMAC-SHA256`, a credential not `{id}/{date}/{region}/s3/aws4_request`, a region other than `S3_REGION`, a credential date other than `x-amz-date`'s | 400 `AuthorizationHeaderMalformed` |
-| a key id other than `PUT_ACCESS_KEY_ID` | 403 `InvalidAccessKeyId` |
-| no valid `x-amz-date` | 403 `AccessDenied` |
-| `x-amz-date` more than 15 min from the clock, as S3 allows | 403 `RequestTimeTooSkewed` |
+| not `AWS4-HMAC-SHA256`, a credential not `{id}/{date}/{region}/s3/aws4_request`, a key id other than `PUT_ACCESS_KEY_ID`, a region other than `S3_REGION`, no valid `x-amz-date`, a credential date other than `x-amz-date`'s, `SignedHeaders` not sorted, or a signature other than the one `PUT_SECRET_ACCESS_KEY` makes | 403 `SignatureDoesNotMatch` |
+| then: `x-amz-date` more than 15 min from the clock, as S3 allows | 403 `RequestTimeTooSkewed` |
 | `host`, `x-amz-date` or `x-amz-content-sha256` not signed, or any other `x-amz-*` header present and not signed | 403 `AccessDenied` |
-| the signature, computed with `PUT_SECRET_ACCESS_KEY` | 403 `SignatureDoesNotMatch` |
 | `x-amz-content-sha256` not a SHA-256 (`UNSIGNED-PAYLOAD`, the streaming forms: `out_s3` sends neither) | 403 `AccessDenied` |
 | a bucket other than `S3_BUCKET` | 404 `NoSuchBucket` |
 | a key that is not `raw1/{CLUSTER_NAME}/{date}/{HH}/{node}/{name}.jsonl.zst`, node and name of `[A-Za-z0-9._-]` starting with a letter or a digit | 403 `AccessDenied` |
 | no `Content-Length` | 411 `MissingContentLength` |
-| more than `PUT_MAX_BYTES` (64 MiB; `out_s3` uploads its buffer, compressed, once it reaches `total_file_size`, 64M in the agent) | 400 `EntityTooLarge` |
+| more than `PUT_MAX_BYTES` (128 MiB), with a message that names it and `total_file_size` | 400 `EntityTooLarge` |
 | a `Content-MD5` that is not 16 bytes | 400 `InvalidDigest` |
 | a body shorter than `Content-Length`, whose SHA-256 is not `x-amz-content-sha256`, or whose MD5 is not `Content-MD5` | 400 `IncompleteBody`, `XAmzContentSHA256Mismatch`, `BadDigest` |
 | a failed write or sync, or a failed read of the key's hour's sidecar (below) | 500 `InternalError` |
+
+Each refusal is logged with its code and the reason, at most 10 a minute,
+the next line counting those dropped (`refusals_not_logged`): anyone who
+reaches the port can send them. `EntityTooLarge` is logged as an error,
+since `out_s3` retries such an upload forever: **keep `out_s3`'s
+`total_file_size` well below `PUT_MAX_BYTES`**. `out_s3` uploads its
+buffer once it reaches `total_file_size` (64M in the agent), compressed,
+so an object is normally far smaller, but a buffer can pass the size by
+the last chunk it took, and incompressible lines do not shrink. The body
+is streamed to its file as it is hashed, never held in memory, so the
+limit bounds the spool's disk, per upload in flight, not the compactor's
+memory.
 
 The signature covers the headers and the claimed payload hash, and the
 body is held to that hash, so a signed request cannot carry another body.
@@ -703,7 +716,7 @@ stock Fluent Bit as the shipper.
   overlay that turns encryption on mounts the keys Secret and sets both,
   as `itest/compactor` does. Spool mode (above): `RAW_SOURCE` (bucket),
   `SPOOL_DIR`, `PUT_LISTEN` (unset: no endpoint), `PUT_ACCESS_KEY_ID`,
-  `PUT_SECRET_ACCESS_KEY` and `PUT_MAX_BYTES` (64 MiB), which
+  `PUT_SECRET_ACCESS_KEY` and `PUT_MAX_BYTES` (128 MiB), which
   `deploy/spool` sets.
 - `DUCKDB_MEMORY_LIMIT` from `resourceFieldRef: limits.memory`, with
   DuckDB given 75% of it. `/scratch` is an emptyDir for `temp_directory`

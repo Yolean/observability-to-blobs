@@ -63,8 +63,10 @@ type config struct {
 
 // defaultPutMaxBytes bounds a PutObject's body (PUT_MAX_BYTES). out_s3
 // uploads once its buffer reaches total_file_size, 64M in the agent's
-// config, and compresses the buffer, so its objects are well below it.
-const defaultPutMaxBytes = 64 << 20
+// config, and compresses the buffer, so its objects stay below it with a
+// margin of as much again. The body is streamed to a file in the spool's
+// _tmp/ as it is hashed, never held in memory, so the bound is on disk.
+const defaultPutMaxBytes = 128 << 20
 
 func configFromEnv() (config, error) { return parseConfig(os.Getenv) }
 

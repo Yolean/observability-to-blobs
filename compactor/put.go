@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -38,24 +39,52 @@ type putServer struct {
 	m      *metrics
 	log    *slog.Logger
 	now    func() time.Time
+	// refusals limits the refusals' log lines
+	refusals logLimit
+}
+
+// refusalLogs is how many refusals a minute are logged.
+const refusalLogs = 10
+
+// logLimit allows refusalLogs log lines a minute, and counts the lines it
+// drops for the next one it allows.
+type logLimit struct {
+	mu         sync.Mutex
+	start      time.Time
+	n, dropped int
+}
+
+func (l *logLimit) allow(now time.Time) (bool, int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if now.Sub(l.start) >= time.Minute || now.Before(l.start) {
+		l.start, l.n = now, 0
+	}
+	if l.n >= refusalLogs {
+		l.dropped++
+		return false, 0
+	}
+	l.n++
+	dropped := l.dropped
+	l.dropped = 0
+	return true, dropped
 }
 
 // maxSkew is how far a request's x-amz-date may be from the clock, as S3
 // allows.
 const maxSkew = 15 * time.Minute
 
-// s3Err is an S3 error response.
+// s3Err is an S3 error response, and the detail the log adds to it.
 type s3Err struct {
 	status        int
 	code, message string
+	detail        string
 }
 
 func (e *s3Err) Error() string { return e.code + ": " + e.message }
 
-func denied(code, msg string) *s3Err { return &s3Err{http.StatusForbidden, code, msg} }
-
-func malformed(msg string) *s3Err {
-	return &s3Err{http.StatusBadRequest, "AuthorizationHeaderMalformed", msg}
+func denied(code, msg string) *s3Err {
+	return &s3Err{status: http.StatusForbidden, code: code, message: msg}
 }
 
 // ServeHTTP answers a request, and only then counts and logs it.
@@ -64,17 +93,34 @@ func (p *putServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var e *s3Err
 		if !errors.As(err, &e) {
-			e = &s3Err{http.StatusInternalServerError, "InternalError", "the object was not stored"}
+			e = &s3Err{status: http.StatusInternalServerError, code: "InternalError", message: "the object was not stored"}
 		}
 		writeS3Error(w, r, e)
 		http.NewResponseController(w).Flush()
 		p.m.put(e.code, 0)
 		if e.code == "InternalError" {
 			p.log.Error("put", "path", r.URL.Path, "err", err)
-		} else {
-			p.log.Warn("put refused", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr,
-				"code", e.code, "message", e.message)
+			return
 		}
+		// a refusal is the caller's, and anyone can send them: logged at
+		// most refusalLogs a minute, the next line counting those dropped
+		ok, dropped := p.refusals.allow(p.now())
+		if !ok {
+			return
+		}
+		level := slog.LevelWarn
+		if e.code == "EntityTooLarge" {
+			// the shipper retries it forever: its config must change
+			level = slog.LevelError
+		}
+		attrs := []any{"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr, "code", e.code, "message", e.message}
+		if e.detail != "" {
+			attrs = append(attrs, "detail", e.detail)
+		}
+		if dropped > 0 {
+			attrs = append(attrs, "refusals_not_logged", dropped)
+		}
+		p.log.Log(r.Context(), level, "put refused", attrs...)
 		return
 	}
 	w.Header().Set("ETag", `"`+hex.EncodeToString(etag)+`"`)
@@ -95,7 +141,7 @@ func (p *putServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // already_folded.
 func (p *putServer) put(r *http.Request) ([]byte, string, error) {
 	if r.Method != http.MethodPut || r.URL.RawQuery != "" {
-		return nil, "", &s3Err{http.StatusNotImplemented, "NotImplemented", "only PutObject of a whole object is implemented"}
+		return nil, "", &s3Err{status: http.StatusNotImplemented, code: "NotImplemented", message: "only PutObject of a whole object is implemented"}
 	}
 	payload, err := verifySigV4(r, p.region, p.keyID, p.secret, p.now())
 	if err != nil {
@@ -111,19 +157,20 @@ func (p *putServer) put(r *http.Request) ([]byte, string, error) {
 		return nil, "", err
 	}
 	if r.ContentLength < 0 || len(r.TransferEncoding) > 0 {
-		return nil, "", &s3Err{http.StatusLengthRequired, "MissingContentLength", "Content-Length is required"}
+		return nil, "", &s3Err{status: http.StatusLengthRequired, code: "MissingContentLength", message: "Content-Length is required"}
 	}
 	if r.ContentLength > p.maxBytes {
-		return nil, "", &s3Err{http.StatusBadRequest, "EntityTooLarge",
-			fmt.Sprintf("%d bytes, PUT_MAX_BYTES is %d", r.ContentLength, p.maxBytes)}
+		return nil, "", &s3Err{status: http.StatusBadRequest, code: "EntityTooLarge",
+			message: fmt.Sprintf("the body is %d bytes, over this endpoint's limit of %d (PUT_MAX_BYTES): keep out_s3's total_file_size well below it",
+				r.ContentLength, p.maxBytes)}
 	}
 	if strings.Contains(r.Header.Get("Content-Encoding"), "aws-chunked") {
-		return nil, "", &s3Err{http.StatusNotImplemented, "NotImplemented", "aws-chunked uploads are not implemented"}
+		return nil, "", &s3Err{status: http.StatusNotImplemented, code: "NotImplemented", message: "aws-chunked uploads are not implemented"}
 	}
 	var contentMD5 []byte
 	if v := r.Header.Get("Content-MD5"); v != "" {
 		if contentMD5, err = base64.StdEncoding.DecodeString(v); err != nil || len(contentMD5) != 16 {
-			return nil, "", &s3Err{http.StatusBadRequest, "InvalidDigest", "Content-MD5 is not the base64 of 16 bytes"}
+			return nil, "", &s3Err{status: http.StatusBadRequest, code: "InvalidDigest", message: "Content-MD5 is not the base64 of 16 bytes"}
 		}
 	}
 	var folded func() (bool, error)
@@ -141,7 +188,7 @@ func (p *putServer) put(r *http.Request) ([]byte, string, error) {
 	etag, did, err := p.spool.write(key, r.Body, r.ContentLength, payload, contentMD5, folded)
 	var eb *errBody
 	if errors.As(err, &eb) {
-		return nil, "", &s3Err{http.StatusBadRequest, eb.code, eb.msg}
+		return nil, "", &s3Err{status: http.StatusBadRequest, code: eb.code, message: eb.msg}
 	}
 	if err != nil {
 		return nil, "", err
@@ -164,7 +211,7 @@ var spoolKeyRE = regexp.MustCompile(`^raw1/([^/]+)/(\d{4}-\d{2}-\d{2})/(\d{2})/[
 func (p *putServer) key(path string) (string, error) {
 	bucket, key, _ := strings.Cut(strings.TrimPrefix(path, "/"), "/")
 	if bucket != p.bucket {
-		return "", &s3Err{http.StatusNotFound, "NoSuchBucket", "the bucket is " + p.bucket}
+		return "", &s3Err{status: http.StatusNotFound, code: "NoSuchBucket", message: "the bucket is " + p.bucket}
 	}
 	m := spoolKeyRE.FindStringSubmatch(key)
 	if m == nil || m[1] != p.l.cluster {
@@ -188,7 +235,7 @@ func verifySigV4(r *http.Request, region, keyID, secret string, now time.Time) (
 	}
 	params, ok := strings.CutPrefix(auth, "AWS4-HMAC-SHA256 ")
 	if !ok {
-		return "", malformed("only AWS4-HMAC-SHA256 is supported")
+		return "", unverified("the Authorization header is not AWS4-HMAC-SHA256")
 	}
 	var cred, signedList, sig string
 	for _, f := range strings.Split(params, ",") {
@@ -203,32 +250,46 @@ func verifySigV4(r *http.Request, region, keyID, secret string, now time.Time) (
 		}
 	}
 	if cred == "" || signedList == "" || sig == "" {
-		return "", malformed("Credential, SignedHeaders and Signature are required")
+		return "", unverified("Credential, SignedHeaders and Signature are required")
 	}
 	scope := strings.Split(cred, "/")
 	if len(scope) != 5 || scope[3] != "s3" || scope[4] != "aws4_request" {
-		return "", malformed("the credential is not {key id}/{date}/{region}/s3/aws4_request")
+		return "", unverified("the credential is not {key id}/{date}/{region}/s3/aws4_request")
 	}
 	if scope[0] != keyID {
-		return "", denied("InvalidAccessKeyId", "the access key id is not this endpoint's")
+		return "", unverified("the access key id " + scope[0] + " is not PUT_ACCESS_KEY_ID")
 	}
 	if scope[2] != region {
-		return "", malformed("the region '" + scope[2] + "' is wrong; expecting '" + region + "'")
+		return "", unverified("the credential's region " + scope[2] + " is not S3_REGION " + region)
 	}
 	amzDate := r.Header.Get("X-Amz-Date")
 	t, err := time.Parse("20060102T150405Z", amzDate)
 	if err != nil {
-		return "", denied("AccessDenied", "a valid x-amz-date header is required")
+		return "", unverified("no valid x-amz-date header")
 	}
 	if scope[1] != amzDate[:8] {
-		return "", malformed("the credential's date is not x-amz-date's")
-	}
-	if d := now.Sub(t); d > maxSkew || d < -maxSkew {
-		return "", denied("RequestTimeTooSkewed", fmt.Sprintf("x-amz-date %s is %s from the server's clock", amzDate, d.Round(time.Second)))
+		return "", unverified("the credential's date is not x-amz-date's")
 	}
 	signed := strings.Split(signedList, ";")
 	if !sort.StringsAreSorted(signed) {
-		return "", malformed("SignedHeaders are not sorted")
+		return "", unverified("SignedHeaders are not sorted")
+	}
+	payload := r.Header.Get("X-Amz-Content-Sha256")
+	var headers strings.Builder
+	for _, h := range signed {
+		headers.WriteString(h + ":" + canonicalHeaderValue(r, h) + "\n")
+	}
+	canonical := strings.Join([]string{
+		r.Method, s3Escape(r.URL.Path, false), canonicalQuery(r.URL.Query()), headers.String(), signedList, payload,
+	}, "\n")
+	want := sigV4(secret, region, amzDate, canonical)
+	if !hmac.Equal([]byte(sig), []byte(want)) {
+		return "", unverified("the signature is not the one PUT_SECRET_ACCESS_KEY makes")
+	}
+
+	// the caller holds the key pair: from here the answers say what is wrong
+	if d := now.Sub(t); d > maxSkew || d < -maxSkew {
+		return "", denied("RequestTimeTooSkewed", fmt.Sprintf("x-amz-date %s is %s from the server's clock", amzDate, d.Round(time.Second)))
 	}
 	isSigned := map[string]bool{}
 	for _, h := range signed {
@@ -244,19 +305,17 @@ func verifySigV4(r *http.Request, region, keyID, secret string, now time.Time) (
 			return "", denied("AccessDenied", "the header "+l+" is not signed")
 		}
 	}
-	payload := r.Header.Get("X-Amz-Content-Sha256")
-	var headers strings.Builder
-	for _, h := range signed {
-		headers.WriteString(h + ":" + canonicalHeaderValue(r, h) + "\n")
-	}
-	canonical := strings.Join([]string{
-		r.Method, s3Escape(r.URL.Path, false), canonicalQuery(r.URL.Query()), headers.String(), signedList, payload,
-	}, "\n")
-	want := sigV4(secret, region, amzDate, canonical)
-	if !hmac.Equal([]byte(sig), []byte(want)) {
-		return "", denied("SignatureDoesNotMatch", "the request signature we calculated does not match the signature you provided")
-	}
 	return payload, nil
+}
+
+// unverified is the one answer to a signed request whose signature is not
+// verified, whatever the reason: a caller without the key pair learns
+// neither the key id nor the region nor the clock. detail, the reason, is
+// for the log.
+func unverified(detail string) *s3Err {
+	return &s3Err{status: http.StatusForbidden, code: "SignatureDoesNotMatch",
+		message: "The request signature we calculated does not match the signature you provided. Check your key and signing method.",
+		detail:  detail}
 }
 
 // canonicalHeaderValue is a header's values as SigV4 signs them: joined by
