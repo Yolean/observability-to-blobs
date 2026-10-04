@@ -8,9 +8,10 @@
 > the fold uses the SQL in `sql/`. Built: the build (`build.sh`, the pins,
 > CI), `selftest`, the embedded SQL with the tests of the engine behaviour
 > the fold relies on, `fold`, `rollup`, the loop (`run`) with optional raw
-> deletion and `/metrics`, optional Parquet encryption of the tiers, and
-> `deploy/base` with the release pin. The itest runs it in a cluster,
-> encrypted (root `README.md`).
+> deletion and `/metrics`, optional Parquet encryption of the tiers, the
+> put endpoint and spool mode, `deploy/base` with the release pin and
+> `deploy/spool`. The itest runs it in a cluster, encrypted, and a second
+> one in spool mode fed by stock Fluent Bit (root `README.md`).
 
 ## Decisions
 
@@ -141,6 +142,8 @@ compactor/
   store.go           RawSource and TierStore, and a local directory as both
   s3.go              the bucket as both: ListObjectsV2, HeadObject, CopyObject,
                      DeleteObjects, SigV4
+  put.go             the put endpoint: PutObject, SigV4 verification, S3 errors
+  spool.go           the spool: a RawSource on a local directory, durable writes
   fold.go            fold of one hour, the sidecar
   rollup.go          rollup of one day
   loop.go            run: the rolling and past passes
@@ -155,6 +158,7 @@ compactor/
   build.env build.sh contain.yaml
   deploy/base/       the Deployment
   deploy/release/    resources: [../base] and the images: pin
+  deploy/spool/      a component: spool mode, its volume and the put Service
 ```
 
 The shell prototype `compact.sh` is gone: `blobs-compactor fold` writes
@@ -421,7 +425,8 @@ fold. A raw object then lives under 2h from its upload, a bound the
 configuration enforces (above, "The loop"), and
 `blobs_compactor_raw_oldest_age_seconds` is what an alert on that bound
 reads. The secret then needs delete on
-`raw1/`; lifecycle rules still bound everything else.
+`raw1/`; lifecycle rules still bound everything else. In spool mode
+(below) the raw tier is the spool, and this deletion is always on.
 
 ## Encryption
 
@@ -525,6 +530,117 @@ The unit tests write encrypted objects without httpfs, with
 writes and reads back encrypted Parquet with the image's httpfs, and the
 itest runs the compactor encrypted with a key rotation.
 
+## The put endpoint and spool mode
+
+Off by default. With it on, the agents upload their raw objects to the
+compactor instead of to the bucket, with Fluent Bit's stock `out_s3`, and
+the compactor keeps them on a local volume, the spool, until their hour's
+final fold has committed. The raw tier is then never stored in object
+storage. There is one compactor and no high availability: while it is
+down, `out_s3` buffers and retries, within the agent's buffer limits
+(`agent/fluent-bit.yaml`).
+
+**What the endpoint implements** is what stock Fluent Bit v5.1.3's
+`out_s3` sends with `use_put_object on`, read from its source and
+captured off the wire, and nothing more: a path-style `PUT
+/{bucket}/{key}` (with a custom `endpoint`, `out_s3` always addresses the
+bucket in the path), signed with AWS Signature Version 4 over the
+payload's SHA-256, with `Content-Encoding: zstd` (stored as it comes) and,
+with `send_content_md5 on`, a `Content-MD5`. It makes no other call, at
+startup or around an upload. Any other method, a query string
+(multipart uploads, ACLs, tagging) or `aws-chunked` is answered with S3's
+XML error document, 501 `NotImplemented`. `PUT_LISTEN` (`:9000` in
+`deploy/spool`) turns it on; it needs `RAW_SOURCE=spool`.
+
+**What it checks**, each refusal an S3 error document:
+
+| | |
+|---|---|
+| no `Authorization` | 403 `AccessDenied` |
+| not `AWS4-HMAC-SHA256`, a credential not `{id}/{date}/{region}/s3/aws4_request`, a region other than `S3_REGION`, a credential date other than `x-amz-date`'s | 400 `AuthorizationHeaderMalformed` |
+| a key id other than `PUT_ACCESS_KEY_ID` | 403 `InvalidAccessKeyId` |
+| no valid `x-amz-date` | 403 `AccessDenied` |
+| `x-amz-date` more than 15 min from the clock, as S3 allows | 403 `RequestTimeTooSkewed` |
+| `host`, `x-amz-date` or `x-amz-content-sha256` not signed, or any other `x-amz-*` header present and not signed | 403 `AccessDenied` |
+| the signature, computed with `PUT_SECRET_ACCESS_KEY` | 403 `SignatureDoesNotMatch` |
+| `x-amz-content-sha256` not a SHA-256 (`UNSIGNED-PAYLOAD`, the streaming forms: `out_s3` sends neither) | 403 `AccessDenied` |
+| a bucket other than `S3_BUCKET` | 404 `NoSuchBucket` |
+| a key that is not `raw1/{CLUSTER_NAME}/{date}/{HH}/{node}/{name}.jsonl.zst`, node and name of `[A-Za-z0-9._-]` starting with a letter or a digit | 403 `AccessDenied` |
+| no `Content-Length` | 411 `MissingContentLength` |
+| more than `PUT_MAX_BYTES` (64 MiB; `out_s3` uploads its buffer, compressed, once it reaches `total_file_size`, 64M in the agent) | 400 `EntityTooLarge` |
+| a `Content-MD5` that is not 16 bytes | 400 `InvalidDigest` |
+| a body shorter than `Content-Length`, whose SHA-256 is not `x-amz-content-sha256`, or whose MD5 is not `Content-MD5` | 400 `IncompleteBody`, `XAmzContentSHA256Mismatch`, `BadDigest` |
+| a failed write or sync | 500 `InternalError` |
+
+The signature covers the headers and the claimed payload hash, and the
+body is held to that hash, so a signed request cannot carry another body.
+The Go tests verify against two signers other than this repository's: the
+PUT example of the S3 API reference, and a request captured from stock
+`out_s3` v5.1.3. The endpoint is plain HTTP: SigV4 authenticates the
+agent and protects the request's integrity, not its confidentiality, so
+where the network between the agents and the compactor is not trusted,
+put TLS in front of it (a mesh, or a TLS-terminating proxy) and point
+`out_s3` at that with `tls on`.
+
+**Durable before the answer.** The body goes to a new file in
+`{SPOOL_DIR}/_tmp/`, hashed as it is written, and only once it matches is
+the file synced, renamed to `{SPOOL_DIR}/{key}` (every directory that
+creates is synced in its parent) and the key's directory synced; only then
+is the answer 200, with the body's MD5, quoted, as `ETag`. A crash before
+the rename leaves a file in `_tmp/` that was never acknowledged, and a
+start deletes those. A failed sync answers 500 and removes the key's
+file, and `out_s3` uploads again.
+
+**A key that exists keeps its first content.** A PUT of the same content
+is a 200 that writes nothing: a retry whose answer was lost. Other content
+under the key is answered 200 too, with the stored object's ETag, and
+counted (`blobs_compactor_put_requests_total{result="conflict"}`, and an
+error in the log): `out_s3` makes a new key for every upload (`$UUID` in
+`s3_key_format`, also on a retry), so a conflict means a bug elsewhere,
+such as two shippers with one node name. The first content was
+acknowledged, so it stays; an error answer would make a shipper whose key
+format has no `$UUID` retry the same key forever.
+
+**The spool as the raw source.** `RAW_SOURCE=spool` (default `bucket`)
+and `SPOOL_DIR`, an absolute path. A fold lists an hour's keys under
+`{SPOOL_DIR}/raw1/{cluster}/{date}/{HH}/` (a file's modification time is
+its upload time) and DuckDB reads the local paths; the past pass finds
+dates and hours by listing directories. Everything else is as in bucket
+mode: the sidecars list the same raw keys, the tiers are in the bucket.
+Raw deletion is always on (`RAW_DELETE=after-final`, the default here; `off`
+is refused): once an hour's final fold has committed its files are
+deleted, a late file once the fold that took it has, and the directories
+they leave empty go with them. So a file lives under 2h from its upload,
+as raw objects do with deletion on (above, "The loop"), and the raw gauges
+and their alert apply as they are. `fold` and `rollup` by hand read the
+spool too, so they run where the volume is mounted, while no loop runs.
+
+**Metrics**, besides the others: `blobs_compactor_put_requests_total{result}`
+(`stored`, `duplicate`, `conflict`, or the S3 error code answered),
+`blobs_compactor_put_bytes_total`, and from a walk of the spool at every
+scrape `blobs_compactor_spool_files`, `blobs_compactor_spool_bytes` and
+`blobs_compactor_spool_oldest_age_seconds`.
+
+**Deployment.** The component `deploy/spool` adds to `deploy/base` (or
+`deploy/release`): a PersistentVolumeClaim `blobs-compactor-spool`
+(ReadWriteOnce, 10Gi), mounted at `/spool`; a Service
+`blobs-compactor-put` on port 9000; the env above; `envFrom` the Secret
+`blobs-compactor-put` (`PUT_ACCESS_KEY_ID`, `PUT_SECRET_ACCESS_KEY`), which
+the overlay provides; `fsGroup` 65534; a readiness probe on the put port;
+and `replicas: 1` with `strategy: Recreate`, which the volume needs as
+much as the fold does. **Data the endpoint has acknowledged lives only on
+that volume until its hour is folded**, about two hours of every agent's
+uploads, more while folds fail: losing the volume loses them. Give it the
+durability the raw tier would have had: a replicated storage class, or a
+node whose disk is trusted, and an alert on
+`blobs_compactor_spool_oldest_age_seconds`. The bucket's secret then needs
+nothing on `raw1/`. The agents point `out_s3` at the Service: `endpoint
+http://blobs-compactor-put.<namespace>.svc.cluster.local:9000`, `bucket`
+the compactor's `S3_BUCKET`, `tls off` (or on, behind TLS), the put key
+pair as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, and their usual
+`s3_key_format`. `itest/compactor-put` is an overlay that does this, with
+stock Fluent Bit as the shipper.
+
 ## Manifests
 
 `deploy/base/deployment.yaml`, `args: [run]`:
@@ -551,7 +667,10 @@ itest runs the compactor encrypted with a key rotation.
   `BLOBS_DIR`, a local directory in place of the bucket, and
   `PARQUET_KEYS_DIR` and `PARQUET_KEY_ID` (unset: no encryption); an
   overlay that turns encryption on mounts the keys Secret and sets both,
-  as `itest/compactor` does.
+  as `itest/compactor` does. Spool mode (above): `RAW_SOURCE` (bucket),
+  `SPOOL_DIR`, `PUT_LISTEN` (unset: no endpoint), `PUT_ACCESS_KEY_ID`,
+  `PUT_SECRET_ACCESS_KEY` and `PUT_MAX_BYTES` (64 MiB), which
+  `deploy/spool` sets.
 - `DUCKDB_MEMORY_LIMIT` from `resourceFieldRef: limits.memory`, with
   DuckDB given 75% of it. `/scratch` is an emptyDir for `temp_directory`
   (`DUCKDB_TEMP_DIRECTORY`), `/tmp` a small one. Starting values:
@@ -565,7 +684,8 @@ itest runs the compactor encrypted with a key rotation.
   `blobs_compactor_raw_keys_read_total`, `blobs_compactor_raw_deleted_total`,
   `blobs_compactor_raw_objects` and `blobs_compactor_raw_oldest_age_seconds`
   (by upload time, aging between listings), and
-  `blobs_compactor_parquet_keys_missing`. The raw gauges are per hour as its
+  `blobs_compactor_parquet_keys_missing`, and in spool mode the put and
+  spool families (above). The raw gauges are per hour as its
   latest listing saw it, less what was deleted since: every fold lists its
   hour, the rolling pass's folds too, and the past pass lists every hour,
   so a deletion by either pass shows at once.
@@ -578,7 +698,8 @@ itest runs the compactor encrypted with a key rotation.
 
 `deploy/release/kustomization.yaml`: `resources: [../base]`, and `images:`
 with the tag and digest (written by `build.sh bump`), to be vendored
-downstream. `itest/compactor` is an overlay.
+downstream. `itest/compactor` is an overlay; `itest/compactor-put` adds
+the `deploy/spool` component.
 
 `deploy/` describes only the in-cluster shape. Reads are free only in
 the bucket's region. On Hetzner that means `eu-central`, which may be
@@ -626,10 +747,16 @@ before pushing, so the pushed digest is the pinned one. The job needs
   per node-hour for DuckDB reads; it needs a correction.
 - The node-agent and blobs-to-prometheus images keep their Dockerfile
   builds. blobs-to-prometheus could move to this script's pattern later.
-- Raw deletion is covered by the Go tests and by `TestS3Bucket` (a
-  bucket on versitygw, run by hand), not by the itest: an hour is final
-  only at H+1h+`GRACE` of wall clock, and the itest's raw assertions need
-  the raw objects.
+- Raw deletion from the bucket is covered by the Go tests and by
+  `TestS3Bucket` (a bucket on versitygw, run by hand), not by the itest:
+  an hour is final only at H+1h+`GRACE` of wall clock, and the itest's raw
+  assertions need the raw objects. Deletion from the spool is in the
+  itest, through objects uploaded for hours already past.
+- Spool mode: the itest's shipper is stock Fluent Bit v5.1.3; the node
+  agent (the fork, at v5.1.2) keeps uploading to the bucket there, so its
+  own `out_s3` is not run against the endpoint. One compactor holds the
+  spool, so the put endpoint is down while it restarts, and the spool's
+  durability is its volume's.
 - A raw object the engine cannot read (truncated, not JSON lines) fails
   its hour's fold on every pass: `blobs_compactor_runs_total{result="failure"}`
   shows it, and nothing skips the object.

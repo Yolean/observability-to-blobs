@@ -10,6 +10,8 @@ built on a fork of Fluent Bit that carries a single patch.
 
 Status: the agent and the compactor (its design, build and deployment
 in [compactor/README.md](compactor/README.md)) are built and tested; the
+agents can also upload to the compactor's S3 put endpoint instead of the
+bucket, so that raw objects never reach object storage (spool mode); the
 alerting tailer follows. The PoC-era `CONSUMING.md` and `COMPACTING.md` keep measurements
 from the first iteration and are superseded where they differ.
 
@@ -56,7 +58,7 @@ input chunks.
 |---|---|
 | `images/fluentbit/` | Dockerfile (Fluent Bit v5.1.2, one patch), the `cri_scrape` Go input plugin, `UPSTREAM.md` with findings to report |
 | `agent/` | kustomize base: DaemonSet, `fluent-bit.yaml` pipeline (stock processors, no Lua), the `pipeline-extra.yaml` composition hook |
-| `itest/` | y-cluster configs for a local k3s node (qemu and docker), versitygw, the workloads that exercise each path, the compactor's overlay |
+| `itest/` | y-cluster configs for a local k3s node (qemu and docker), versitygw, the workloads that exercise each path, the compactor's overlays (bucket mode, and spool mode with stock Fluent Bit as a second shipper) |
 | `images/blobs-to-prometheus/`, `tools/rules-manifest/`, `local/`, `alerts-cf/` | the alerting consumer from the PoC; rewired to the new blob in phase 3 |
 | `compactor/` | `blobs-compactor` (fold, rollup and the loop that runs them), its design (`README.md`), its SQL (`sql/raw.sql` is the raw line contract every consumer reads), its build script and `deploy/` |
 | `examples/gke/` | sketch of a production overlay |
@@ -145,6 +147,31 @@ covered by the Go tests:
   under `itest-2`; every hourly and daily object is encrypted, one per
   hour, table and namespace; a read without the key fails
 
+And a second compactor in spool mode (`itest/compactor-put`:
+`compactor/deploy/spool` in namespace `observability-put`, cluster
+`itest-put`, plain tiers in the same bucket), fed by stock Fluent Bit
+v5.1.3 (the official image, pinned by digest) as a second shipper: it
+tails the same pod logs with the agent's enrichment in stock processors
+and uploads with `out_s3` to the compactor's put endpoint, never to the
+bucket. After a rolling and a past pass of that compactor that started
+after the snapshot:
+
+- the shipper's log-generator lines are in `hourly/itest-put/` with
+  namespace, pod, `pod_uid`, container, restart and stream from the CRI
+  path; the restart marker, the outage marker and a marker written while
+  the put compactor was down each arrive exactly once, and the
+  generator's counter has no gap
+- the put compactor stopped for 60 s: the shipper's uploads failed
+  meanwhile, and it gave up on no chunk
+- no `raw1/itest-put/` object exists in the bucket
+- aws-cli as another client: its signed PutObject of an object for an
+  hour three hours back is stored, folded by the past pass in a full read,
+  so its hour is final, and its file is gone from the spool; the same PUT
+  with a wrong secret is refused with `SignatureDoesNotMatch`, without a
+  signature with `AccessDenied`, and no sidecar lists either key
+- the spool, listed by a pod that mounts its volume, holds no file of an
+  hour whose final fold has committed
+
 Not part of `test.sh` because they take the cluster down or load it:
 `itest/node-restart.sh`, `itest/rotation.sh` and `itest/stress.sh` (PoC
 era; to be re-run against the new blob). They still read the PoC's
@@ -197,9 +224,16 @@ The compactor:
   as succeeded. Since the agent now retries a failed status call, a NULL
   exit code means the container was removed before its status could be
   read.
-- Raw deletion (`RAW_DELETE=after-final`) is tested in Go, against a
-  directory and, by hand, against versitygw, but not in the itest: a
-  final hour needs an hour of wall clock past the test's start.
+- Raw deletion from the bucket (`RAW_DELETE=after-final`) is tested in
+  Go, against a directory and, by hand, against versitygw, but not in the
+  itest: a final hour needs an hour of wall clock past the test's start.
+  Deletion from the spool is in the itest, through an object uploaded for
+  an hour already past.
+- Spool mode has one compactor holding the spool: its put endpoint is
+  down while it restarts (shippers buffer and retry), and acknowledged
+  data is as durable as its volume until folded. The itest's agent keeps
+  uploading to the bucket, so the fork's own `out_s3` is not run against
+  the put endpoint; stock Fluent Bit v5.1.3's is.
 - A raw object the engine cannot read fails its hour's fold on every
   pass, visible in `blobs_compactor_runs_total{result="failure"}`;
   nothing skips it.
