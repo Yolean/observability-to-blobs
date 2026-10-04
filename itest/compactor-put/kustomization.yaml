@@ -17,6 +17,8 @@ resources:
 
 components:
 - ../../compactor/deploy/spool
+# the logs API, which test.sh asserts through a port-forward
+- ../../compactor/deploy/logs
 
 # test.sh runs pods that name the secrets
 generatorOptions:
