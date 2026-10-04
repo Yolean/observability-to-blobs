@@ -8,9 +8,9 @@ tiers that people and alerting read. Successor to
 [kubernetes-logs-datalake](https://github.com/Yolean/kubernetes-logs-datalake),
 built on a fork of Fluent Bit that carries a single patch.
 
-Status: the agent is built and tested; the compactor (its design and build
-in [compactor/README.md](compactor/README.md)) and the alerting tailer
-follow. The PoC-era `CONSUMING.md` and `COMPACTING.md` keep measurements
+Status: the agent and the compactor (its design, build and deployment
+in [compactor/README.md](compactor/README.md)) are built and tested; the
+alerting tailer follows. The PoC-era `CONSUMING.md` and `COMPACTING.md` keep measurements
 from the first iteration and are superseded where they differ.
 
 ## What the agent ships
@@ -56,9 +56,9 @@ input chunks.
 |---|---|
 | `images/fluentbit/` | Dockerfile (Fluent Bit v5.1.2, one patch), the `cri_scrape` Go input plugin, `UPSTREAM.md` with findings to report |
 | `agent/` | kustomize base: DaemonSet, `fluent-bit.yaml` pipeline (stock processors, no Lua), the `pipeline-extra.yaml` composition hook |
-| `itest/` | y-cluster configs for a local k3s node (qemu and docker), versitygw, the workloads that exercise each path |
+| `itest/` | y-cluster configs for a local k3s node (qemu and docker), versitygw, the workloads that exercise each path, the compactor's overlay |
 | `images/blobs-to-prometheus/`, `tools/rules-manifest/`, `local/`, `alerts-cf/` | the alerting consumer from the PoC; rewired to the new blob in phase 3 |
-| `compactor/` | the compactor design (`README.md`), its SQL (`sql/raw.sql` is the raw line contract every consumer reads) and the shell prototype |
+| `compactor/` | `blobs-compactor` (fold, rollup and the loop that runs them), its design (`README.md`), its SQL (`sql/raw.sql` is the raw line contract every consumer reads), its build script and `deploy/` |
 | `examples/gke/` | sketch of a production overlay |
 | `test.sh` | the one command |
 
@@ -67,20 +67,22 @@ input chunks.
 ```bash
 ./test.sh            # checks, unit tests, image build, itest on a local k3s node
 ./test.sh checks     # checks and unit tests only
-./test.sh up         # provision + deploy the agent and sample workloads, no tests
+./test.sh up         # provision + deploy the agent, the compactor and sample workloads, no tests
 ```
 
 Needs docker, go, kubectl, shellcheck, duckdb and
 [y-cluster](https://github.com/Yolean/y-cluster/releases). With `/dev/kvm`
 the itest node is a qemu VM (Ubuntu, systemd, containerd: node logs and CRI
 discovery behave as in production); otherwise k3s-in-docker, which has no
-journal. CI runs the same script. `SKIP_BUILD=1 ./test.sh itest` reuses the
-last image for a quick loop against the running cluster.
+journal. CI runs the same script. The compactor's image is built by
+`compactor/build.sh` for the host's arch, which needs only docker.
+`SKIP_BUILD=1 ./test.sh itest` reuses the last images for a quick loop
+against the running cluster.
 
 ## What the itest verifies
 
 Against a real k3s node, from the raw objects read back with DuckDB's
-`read_json` and the column types the compactor will pin:
+`read_json` and the column types the compactor pins:
 
 - keys `/raw1/cluster/date/HH/node/MMSS-uuid.jsonl.zst`, one to three
   objects in every minute after the outage, each carrying logs and
@@ -107,6 +109,32 @@ Against a real k3s node, from the raw objects read back with DuckDB's
   node_exporter and self metrics through the static target with the agent
   pod's identity, a healthy target scraped three to five times in every
   minute after the outage
+
+And the compactor, deployed from `compactor/deploy/base` (the
+`itest/compactor` overlay: versitygw, a 20 s rolling interval, a 1 min
+grace), folding the same bucket while all of the above runs:
+
+- after a rolling and a past pass that both started after a snapshot of
+  the raw keys (read from the compactor's `/metrics`), every key of the
+  snapshot is listed in its hour's sidecar, and the sidecars list no key
+  the raw tier lacks
+- per folded hour, the hourly `logs`, `metrics` and `podindex` objects
+  hold exactly the distinct rows of the raw keys its sidecar lists, read
+  through `compactor/sql/`: the same rows both ways, each once
+- the hourly `pods` index has the three incarnations of `reused`
+- with the compactor stopped, `blobs-compactor rollup <day>` in a pod of
+  its own, for every day with folded hours (two when the run crosses
+  midnight UTC), writes the daily tier: its `logs`, `metrics` and
+  `podindex` hold exactly the distinct rows of every raw key of the day,
+  a namespace's logs are one object under its hive key, the daily sidecar
+  lists the day's keys, and the daily `pods` has the three incarnations,
+  each with its line and exit 0
+- an incremental rollup: a raw object of a namespace of its own, in a
+  free hour of the last day, folded with `blobs-compactor fold` and
+  rolled up again, rewrites that one namespace, leaves the other
+  namespaces' `pods` rows as they were, and the day still holds exactly
+  the distinct rows of its keys
+- the compactor's `/metrics` reach the blobs through the agent's scrape
 
 Not part of `test.sh` because they take the cluster down or load it:
 `itest/node-restart.sh`, `itest/rotation.sh` and `itest/stress.sh` (PoC
@@ -159,12 +187,12 @@ The compactor:
   as succeeded. Since the agent now retries a failed status call, a NULL
   exit code means the container was removed before its status could be
   read.
-- `tables.sql`'s comment says node-level scrapes get namespace `_node`;
-  only journal rows do, since metrics lines always carry a namespace (the
-  agent's own, or `""`). The comment is corrected with the next change
-  to `sql/`, because `sql/` is embedded and any change moves the image
-  pin; so are two comments there and in `compactor/main.go` that point at
-  a design document this repository no longer has.
+- Raw deletion (`RAW_DELETE=after-final`) is tested in Go, against a
+  directory and, by hand, against versitygw, but not in the itest: a
+  final hour needs an hour of wall clock past the test's start.
+- A raw object the engine cannot read fails its hour's fold on every
+  pass, visible in `blobs_compactor_runs_total{result="failure"}`;
+  nothing skips it.
 
 The alerting tailer, as requirements for its rewrite onto `raw1/`:
 

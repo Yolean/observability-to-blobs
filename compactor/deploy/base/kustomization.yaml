@@ -1,0 +1,11 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Base. Overlays set the namespace, CLUSTER_NAME (as the node agent names
+# the cluster), S3_BUCKET, S3_ENDPOINT and the blobs-compactor-s3 secret
+# (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY: read on raw1/, read and write
+# on hourly/ and daily/; delete on raw1/ only with RAW_DELETE=after-final).
+# ../release adds the pinned image; itest/compactor shows an overlay.
+resources:
+- deployment.yaml

@@ -1,0 +1,64 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The compactor as it runs in the itest cluster: the image test.sh builds
+# and loads, versitygw as S3, a cadence short enough for the test to see
+# folds (and, when a run crosses an hour, a final fold) within minutes.
+namespace: observability
+
+resources:
+- ../../compactor/deploy/base
+
+# test.sh runs the rollup in a pod of its own, which names the secret
+generatorOptions:
+  disableNameSuffixHash: true
+
+secretGenerator:
+- name: blobs-compactor-s3
+  literals:
+  - AWS_ACCESS_KEY_ID=demoaccess
+  - AWS_SECRET_ACCESS_KEY=demosecret
+
+# the OCI layout's own ref, as build.sh image names it
+images:
+- name: ghcr.io/yolean/blobs-compactor
+  newTag: build
+
+patches:
+- patch: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: blobs-compactor
+    spec:
+      template:
+        spec:
+          containers:
+          - name: compactor
+            imagePullPolicy: Never
+            env:
+            - name: CLUSTER_NAME
+              value: itest
+            - name: S3_BUCKET
+              value: node-agent
+            - name: S3_ENDPOINT
+              value: versitygw.default.svc.cluster.local:7070
+            - name: S3_TLS
+              value: "off"
+            - name: ROLLING_INTERVAL
+              value: 20s
+            - name: GRACE
+              value: 1m
+            - name: PAST_INTERVAL
+              value: 5m
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                memory: 1Gi
+          volumes:
+          - name: scratch
+            emptyDir:
+              sizeLimit: 1Gi

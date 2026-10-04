@@ -9,8 +9,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"runtime/debug"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/duckdb/duckdb-go/v2"
 )
@@ -21,47 +24,122 @@ const defaultHTTPFS = "/usr/local/lib/duckdb/httpfs.duckdb_extension"
 
 const usage = `usage: blobs-compactor <command>
 
-  selftest   load httpfs, round-trip JSON lines, zstd and parquet through the engine
-  version    print the engine and module versions`
+  run               fold and roll up on the loop's cadence (ROLLING_INTERVAL, GRACE, PAST_INTERVAL)
+  fold <date> <HH>  fold one hour of raw1 into the hourly tier, as the loop would now
+  rollup <date>     roll one day's changed hours up into the daily tier
+  selftest          load httpfs, round-trip JSON lines, zstd and parquet through the engine
+  version           print the engine and module versions
+
+fold, rollup and run take the cluster and the bucket from the environment
+(compactor/README.md); date is YYYY-MM-DD, hours are UTC. Run fold and
+rollup by hand only while no loop runs: the tiers want a single writer.`
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	if len(os.Args) != 2 {
+	args := os.Args[1:]
+	nargs := map[string]int{"run": 0, "fold": 2, "rollup": 1, "selftest": 0, "version": 0}
+	if n, ok := nargs[first(args)]; !ok || len(args) != n+1 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
 	var err error
-	switch os.Args[1] {
+	switch args[0] {
 	case "selftest":
 		err = selftest(ctx, log)
 	case "version":
 		err = version(ctx, log)
 	default:
-		fmt.Fprintln(os.Stderr, usage)
-		os.Exit(2)
+		err = command(ctx, log, args)
 	}
 	if err != nil {
-		log.Error(os.Args[1], "err", err)
+		log.Error(args[0], "err", err)
 		os.Exit(1)
 	}
 }
 
+func first(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return args[0]
+}
+
+// command runs run, fold or rollup with the environment's config.
+func command(ctx context.Context, log *slog.Logger, args []string) error {
+	cfg, err := configFromEnv()
+	if err != nil {
+		return err
+	}
+	if err := version(ctx, log); err != nil {
+		return err
+	}
+	c, err := newCompactor(cfg, log)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	switch args[0] {
+	case "run":
+		return c.run(ctx, cfg)
+	case "fold":
+		h, err := time.Parse(dateLayout+"/15", args[1]+"/"+args[2])
+		if err != nil {
+			return fmt.Errorf("fold %s %s: want YYYY-MM-DD HH", args[1], args[2])
+		}
+		r, err := c.foldJob(ctx, h, nil, time.Now().UTC(), cfg.jobTimeout)
+		if err == nil && !r.wrote && len(r.deleted) == 0 {
+			log.Info("fold", "hour", h.Format(dateLayout+"T15"), "keys", 0, "final", r.final)
+		}
+		return err
+	default:
+		d, err := time.Parse(dateLayout, args[1])
+		if err != nil {
+			return fmt.Errorf("rollup %s: want YYYY-MM-DD", args[1])
+		}
+		r, err := c.rollupJob(ctx, d, cfg.jobTimeout)
+		if err == nil && len(r.hours) == 0 {
+			log.Info("rollup", "day", args[1], "hours", 0)
+		}
+		return err
+	}
+}
+
+// initStmt is a statement every connection runs first. label, when set,
+// stands in for the statement in errors, and the redact strings are blanked
+// out of the engine's message, so a secret is never logged.
+type initStmt struct {
+	label, sql string
+	redact     []string
+}
+
 // open returns an in-memory engine whose every connection has autoinstall
-// off and, when httpfs is non-empty, the extension loaded from that path.
-// Settings are per connection, so they go in the connector's init.
-func open(httpfs string) (*sql.DB, error) {
+// off, when httpfs is non-empty the extension loaded from that path, and
+// then runs init. Settings are per connection, so they go in the
+// connector's init.
+func open(httpfs string, init ...initStmt) (*sql.DB, error) {
 	c, err := duckdb.NewConnector("", func(e driver.ExecerContext) error {
-		stmts := []string{
-			"SET autoinstall_known_extensions = false",
-			"SET autoload_known_extensions = false",
+		stmts := []initStmt{
+			{sql: "SET autoinstall_known_extensions = false"},
+			{sql: "SET autoload_known_extensions = false"},
 		}
 		if httpfs != "" {
-			stmts = append(stmts, "LOAD "+sqlString(httpfs))
+			stmts = append(stmts, initStmt{sql: "LOAD " + sqlString(httpfs)})
 		}
-		for _, s := range stmts {
-			if _, err := e.ExecContext(context.Background(), s, nil); err != nil {
-				return fmt.Errorf("%s: %w", s, err)
+		for _, s := range append(stmts, init...) {
+			if _, err := e.ExecContext(context.Background(), s.sql, nil); err != nil {
+				label, msg := s.label, err.Error()
+				if label == "" {
+					label = s.sql
+				}
+				for _, r := range s.redact {
+					if r == "" {
+						continue
+					}
+					msg = strings.ReplaceAll(msg, r, "<redacted>")
+				}
+				return fmt.Errorf("%s: %s", label, msg)
 			}
 		}
 		return nil
