@@ -142,23 +142,29 @@ func rawKey(h time.Time, node, name string) string {
 // put writes a raw object and returns its key.
 func (w *world) put(key string, lines ...line) string {
 	w.t.Helper()
-	var b strings.Builder
-	for _, l := range lines {
-		j, err := json.Marshal(l)
-		if err != nil {
-			w.t.Fatal(err)
-		}
-		b.Write(j)
-		b.WriteByte('\n')
-	}
 	p := filepath.Join(w.dir, filepath.FromSlash(key))
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		w.t.Fatal(err)
 	}
-	if err := os.WriteFile(p, zstdFrame([]byte(b.String())), 0o644); err != nil {
+	if err := os.WriteFile(p, rawObject(w.t, lines...), 0o644); err != nil {
 		w.t.Fatal(err)
 	}
 	return key
+}
+
+// rawObject is a raw object's content: JSON lines, zstd.
+func rawObject(t *testing.T, lines ...line) []byte {
+	t.Helper()
+	var b strings.Builder
+	for _, l := range lines {
+		j, err := json.Marshal(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(j)
+		b.WriteByte('\n')
+	}
+	return zstdFrame([]byte(b.String()))
 }
 
 // zstdFrame wraps data in a zstd frame of raw (stored) blocks: valid zstd

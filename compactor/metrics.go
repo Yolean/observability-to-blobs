@@ -30,6 +30,11 @@ type metrics struct {
 	rawHours map[time.Time]rawSummary
 	// parquet key ids the tiers' object names carry with no key file
 	keysMissed float64
+	// spool mode: the put endpoint's requests by result, the bytes it
+	// stored, and the spool's files now
+	puts     map[string]float64
+	putBytes float64
+	spool    func() (spoolStats, error)
 }
 
 // rawSummary is one hour's raw objects: how many, and the oldest upload.
@@ -58,7 +63,19 @@ func summarize(objs []Object, deleted []string) rawSummary {
 
 func newMetrics() *metrics {
 	return &metrics{now: time.Now, lastSuccess: map[string]float64{}, lastDuration: map[string]float64{},
-		runs: map[[2]string]float64{}, rows: map[[2]string]float64{}, rawHours: map[time.Time]rawSummary{}}
+		runs: map[[2]string]float64{}, rows: map[[2]string]float64{}, rawHours: map[time.Time]rawSummary{},
+		puts: map[string]float64{}}
+}
+
+// put records one request to the put endpoint: stored, duplicate or
+// conflict with the bytes of a stored body, or the S3 error code it got.
+func (m *metrics) put(result string, bytes int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.puts[result]++
+	if result == "stored" {
+		m.putBytes += float64(bytes)
+	}
 }
 
 // job records one run of a job: rolling, past or rollup.
@@ -184,7 +201,41 @@ func (m *metrics) write(w io.Writer) {
 	fmt.Fprintf(&b, "blobs_compactor_raw_oldest_age_seconds %s\n", num(age))
 	family("blobs_compactor_parquet_keys_missing", "gauge", "Parquet key ids that tier object names (or PARQUET_KEY_ID) carry and PARQUET_KEYS_DIR lacks; folds and rollups refuse while it is above 0.")
 	fmt.Fprintf(&b, "blobs_compactor_parquet_keys_missing %s\n", num(m.keysMissed))
+	if m.spool != nil {
+		m.writeSpool(&b)
+	}
 	io.WriteString(w, b.String())
+}
+
+// writeSpool writes the put endpoint's and the spool's families. The
+// spool's gauges are a walk of it now; a failed walk leaves them out.
+func (m *metrics) writeSpool(b *strings.Builder) {
+	fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s counter\n", "blobs_compactor_put_requests_total",
+		"Requests to the put endpoint by result: stored, duplicate (the key held the same content), conflict (the key held other content, which it keeps), or the S3 error code answered.",
+		"blobs_compactor_put_requests_total")
+	for _, k := range sortedKeys(m.puts) {
+		fmt.Fprintf(b, "blobs_compactor_put_requests_total{result=%q} %s\n", k, num(m.puts[k]))
+	}
+	fmt.Fprintf(b, "# HELP blobs_compactor_put_bytes_total Bytes of the objects the put endpoint stored.\n# TYPE blobs_compactor_put_bytes_total counter\n")
+	fmt.Fprintf(b, "blobs_compactor_put_bytes_total %s\n", num(m.putBytes))
+	st, err := m.spool()
+	if err != nil {
+		return
+	}
+	age := 0.0
+	if !st.oldest.IsZero() {
+		age = m.now().Sub(st.oldest).Seconds()
+	}
+	for _, g := range []struct {
+		name, help string
+		v          float64
+	}{
+		{"blobs_compactor_spool_files", "Raw files in the spool, uploaded and not yet deleted after their hour's final fold.", float64(st.files)},
+		{"blobs_compactor_spool_bytes", "Bytes of those files.", float64(st.bytes)},
+		{"blobs_compactor_spool_oldest_age_seconds", "Age now of the oldest of those files, by write time; 0 when there are none.", age},
+	} {
+		fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s gauge\n%s %s\n", g.name, g.help, g.name, g.name, num(g.v))
+	}
 }
 
 // num renders a sample value without an exponent, so timestamps keep

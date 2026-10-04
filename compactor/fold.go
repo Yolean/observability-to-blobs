@@ -50,7 +50,10 @@ type compactor struct {
 }
 
 func newCompactor(c config, log *slog.Logger) (*compactor, error) {
-	raw, tiers := c.stores()
+	raw, tiers, err := c.stores()
+	if err != nil {
+		return nil, err
+	}
 	httpfs, init := c.engineInit()
 	db, err := open(httpfs, init...)
 	if err != nil {
@@ -63,6 +66,9 @@ func newCompactor(c config, log *slog.Logger) (*compactor, error) {
 	cp := &compactor{l: layout{c.cluster}, raw: raw, tiers: tiers, db: db, grace: c.grace,
 		rawDelete: c.rawDelete, threads: c.threads, retries: retries, log: log, m: newMetrics(),
 		keysDir: c.parquetKeysDir, keyID: c.parquetKeyID}
+	if sp, ok := raw.(*spool); ok {
+		cp.m.spool = sp.stats
+	}
 	scratch := c.tempDir
 	if scratch == "" {
 		scratch = os.TempDir()

@@ -28,11 +28,26 @@ import (
 // start is an ordinary tick. One writer: replicas 1, strategy Recreate.
 func (c *compactor) run(ctx context.Context, cfg config) error {
 	srv := &http.Server{Addr: cfg.metricsAddr, Handler: c.m, ReadHeaderTimeout: 10 * time.Second}
-	srvErr := make(chan error, 1)
+	srvErr := make(chan error, 2)
 	go func() { srvErr <- srv.ListenAndServe() }()
 	defer srv.Close()
+	if cfg.putListen != "" {
+		put, err := c.putServer(cfg)
+		if err != nil {
+			return err
+		}
+		go func() { srvErr <- put.ListenAndServe() }()
+		// a stop lets the uploads in flight finish: each is answered
+		// only once it is synced
+		defer func() {
+			sctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			put.Shutdown(sctx)
+		}()
+	}
 	c.log.Info("run", "cluster", c.l.cluster, "rolling", cfg.rolling.String(), "grace", cfg.grace.String(),
 		"past", cfg.past.String(), "raw_delete", cfg.rawDelete, "metrics", cfg.metricsAddr,
+		"raw_source", cfg.rawSource, "put", cfg.putListen,
 		"parquet_key", c.keyID, "parquet_keys", sortedIDs(c.keys))
 	c.keysJob(jobContext(ctx), cfg.jobTimeout)
 	tick := time.NewTicker(cfg.rolling)
@@ -54,6 +69,19 @@ func (c *compactor) run(ctx context.Context, cfg config) error {
 		case <-tick.C:
 		}
 	}
+}
+
+// putServer is the put endpoint's server, which stores into the spool
+// the fold reads.
+func (c *compactor) putServer(cfg config) (*http.Server, error) {
+	sp, ok := c.raw.(*spool)
+	if !ok {
+		return nil, errors.New("PUT_LISTEN: the raw source is not a spool")
+	}
+	h := &putServer{l: c.l, bucket: cfg.bucket, region: cfg.region, keyID: cfg.putKeyID, secret: cfg.putKey,
+		maxBytes: cfg.putMaxBytes, spool: sp, m: c.m, log: c.log, now: time.Now}
+	return &http.Server{Addr: cfg.putListen, Handler: h, ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout: 5 * time.Minute, IdleTimeout: 2 * time.Minute}, nil
 }
 
 func dayOf(t time.Time) time.Time { return t.UTC().Truncate(24 * time.Hour) }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -47,7 +48,23 @@ type config struct {
 
 	// parquet encryption: the keys directory, and the key of new objects
 	parquetKeysDir, parquetKeyID string
+
+	// the raw source: "bucket" (raw1/ in the bucket, or BLOBS_DIR), or
+	// "spool", the directory spoolDir that the put endpoint fills
+	rawSource string
+	spoolDir  string
+	// the put endpoint (put.go): its address, "" for none, the key pair
+	// the agents sign with (in S3_REGION, for S3_BUCKET), and the largest
+	// body it takes
+	putListen        string
+	putKeyID, putKey string
+	putMaxBytes      int64
 }
+
+// defaultPutMaxBytes bounds a PutObject's body (PUT_MAX_BYTES). out_s3
+// uploads once its buffer reaches total_file_size, 64M in the agent's
+// config, and compresses the buffer, so its objects are well below it.
+const defaultPutMaxBytes = 64 << 20
 
 func configFromEnv() (config, error) { return parseConfig(os.Getenv) }
 
@@ -70,6 +87,11 @@ func parseConfig(env func(string) string) (config, error) {
 		httpfs:         httpfsPath(),
 		parquetKeysDir: env("PARQUET_KEYS_DIR"),
 		parquetKeyID:   env("PARQUET_KEY_ID"),
+		rawSource:      get("RAW_SOURCE", "bucket"),
+		spoolDir:       env("SPOOL_DIR"),
+		putListen:      env("PUT_LISTEN"),
+		putKeyID:       env("PUT_ACCESS_KEY_ID"),
+		putKey:         env("PUT_SECRET_ACCESS_KEY"),
 	}
 	if !clusterRE.MatchString(c.cluster) {
 		return c, fmt.Errorf("CLUSTER_NAME %q: want a lowercase name of letters, digits, '-', '_' and '.'", c.cluster)
@@ -120,12 +142,49 @@ func parseConfig(env func(string) string) (config, error) {
 			return c, fmt.Errorf("%s %s: at most %s, so that with RAW_DELETE=after-final a raw object is deleted within 2h of its upload", b.name, b.v, b.limit)
 		}
 	}
-	switch get("RAW_DELETE", "off") {
+	// The spool is a buffer, not storage: its files go once their hour's
+	// final fold has committed, so spool mode deletes by default and
+	// refuses RAW_DELETE=off.
+	rawDelete := "off"
+	switch c.rawSource {
+	case "bucket":
+		if c.spoolDir != "" {
+			return c, fmt.Errorf("SPOOL_DIR %s: only with RAW_SOURCE=spool", c.spoolDir)
+		}
+	case "spool":
+		rawDelete = "after-final"
+		if !filepath.IsAbs(c.spoolDir) {
+			return c, fmt.Errorf("RAW_SOURCE=spool: SPOOL_DIR %q must be an absolute path", c.spoolDir)
+		}
+	default:
+		return c, fmt.Errorf("RAW_SOURCE %q: want bucket or spool", c.rawSource)
+	}
+	switch get("RAW_DELETE", rawDelete) {
 	case "off":
+		if c.rawSource == "spool" {
+			return c, fmt.Errorf("RAW_DELETE off: RAW_SOURCE=spool deletes its files after their hour's final fold, want after-final")
+		}
 	case "after-final":
 		c.rawDelete = true
 	default:
 		return c, fmt.Errorf("RAW_DELETE %q: want off or after-final", env("RAW_DELETE"))
+	}
+	if c.putListen != "" {
+		if c.rawSource != "spool" {
+			return c, fmt.Errorf("PUT_LISTEN %s: only with RAW_SOURCE=spool, which the fold reads what it takes from", c.putListen)
+		}
+		for k, v := range map[string]string{"PUT_ACCESS_KEY_ID": c.putKeyID, "PUT_SECRET_ACCESS_KEY": c.putKey,
+			"S3_BUCKET": c.bucket} {
+			if v == "" {
+				return c, fmt.Errorf("PUT_LISTEN %s: %s is required", c.putListen, k)
+			}
+		}
+		c.putMaxBytes = defaultPutMaxBytes
+		if v := env("PUT_MAX_BYTES"); v != "" {
+			if c.putMaxBytes, err = strconv.ParseInt(v, 10, 64); err != nil || c.putMaxBytes < 1 {
+				return c, fmt.Errorf("PUT_MAX_BYTES %q: want bytes", v)
+			}
+		}
 	}
 	ints := []struct {
 		name string
@@ -161,15 +220,27 @@ func parseConfig(env func(string) string) (config, error) {
 }
 
 // stores returns the raw source and the tier store the config names: one
-// bucket for both, or one local directory.
-func (c config) stores() (RawSource, TierStore) {
+// bucket for both, or one local directory; with RAW_SOURCE=spool the raw
+// source is the spool instead.
+func (c config) stores() (RawSource, TierStore, error) {
+	var raw RawSource
+	var tiers TierStore
 	if c.dir != "" {
 		d := dirBucket{root: c.dir}
-		return d, d
+		raw, tiers = d, d
+	} else {
+		b := &s3Bucket{bucket: c.bucket, endpoint: c.endpoint, tls: c.tls, region: c.region,
+			keyID: c.keyID, secret: c.secret, http: &http.Client{Timeout: 5 * time.Minute}, now: time.Now}
+		raw, tiers = b, b
 	}
-	b := &s3Bucket{bucket: c.bucket, endpoint: c.endpoint, tls: c.tls, region: c.region,
-		keyID: c.keyID, secret: c.secret, http: &http.Client{Timeout: 5 * time.Minute}, now: time.Now}
-	return b, b
+	if c.rawSource == "spool" {
+		s, err := openSpool(c.spoolDir)
+		if err != nil {
+			return nil, nil, err
+		}
+		raw = s
+	}
+	return raw, tiers, nil
 }
 
 // engineInit is what every connection of the engine runs first: the

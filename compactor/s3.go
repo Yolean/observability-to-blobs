@@ -257,14 +257,22 @@ func signV4(req *http.Request, payloadHash, region, keyID, secret string, t time
 	canonical := strings.Join([]string{
 		req.Method, req.URL.EscapedPath(), req.URL.RawQuery, canonHeaders.String(), signed, payloadHash,
 	}, "\n")
+	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential="+keyID+"/"+day+"/"+region+"/s3/aws4_request"+
+		", SignedHeaders="+signed+", Signature="+sigV4(secret, region, amzDate, canonical))
+}
+
+// sigV4 is the hex signature of a canonical request made at amzDate
+// (20060102T150405Z), with the scope {day}/{region}/s3/aws4_request: what
+// signV4 signs with and what the put endpoint (put.go) checks against.
+func sigV4(secret, region, amzDate, canonical string) string {
+	day := amzDate[:8]
 	scope := day + "/" + region + "/s3/aws4_request"
 	toSign := "AWS4-HMAC-SHA256\n" + amzDate + "\n" + scope + "\n" + hashHex([]byte(canonical))
 	k := hmacSHA256([]byte("AWS4"+secret), day)
 	k = hmacSHA256(k, region)
 	k = hmacSHA256(k, "s3")
 	k = hmacSHA256(k, "aws4_request")
-	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential="+keyID+"/"+scope+
-		", SignedHeaders="+signed+", Signature="+hex.EncodeToString(hmacSHA256(k, toSign)))
+	return hex.EncodeToString(hmacSHA256(k, toSign))
 }
 
 // canonicalQuery is SigV4's query string: sorted, every name and value
