@@ -28,6 +28,8 @@ type metrics struct {
 	// those deleted since: a fold's listing of its hour, or the past
 	// pass's of every hour
 	rawHours map[time.Time]rawSummary
+	// parquet key ids the tiers' object names carry with no key file
+	keysMissed float64
 }
 
 // rawSummary is one hour's raw objects: how many, and the oldest upload.
@@ -119,6 +121,12 @@ func (m *metrics) rawRetain(hours map[time.Time]bool) {
 	}
 }
 
+func (m *metrics) keysMissing(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.keysMissed = float64(n)
+}
+
 func (m *metrics) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	m.write(w)
@@ -174,6 +182,8 @@ func (m *metrics) write(w io.Writer) {
 		age = m.now().Sub(oldest).Seconds()
 	}
 	fmt.Fprintf(&b, "blobs_compactor_raw_oldest_age_seconds %s\n", num(age))
+	family("blobs_compactor_parquet_keys_missing", "gauge", "Parquet key ids that tier object names (or PARQUET_KEY_ID) carry and PARQUET_KEYS_DIR lacks; folds and rollups refuse while it is above 0.")
+	fmt.Fprintf(&b, "blobs_compactor_parquet_keys_missing %s\n", num(m.keysMissed))
 	io.WriteString(w, b.String())
 }
 

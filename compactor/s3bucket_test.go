@@ -85,14 +85,14 @@ func TestS3Bucket(t *testing.T) {
 	// the multipart upload of the half-written file, at the temporary key,
 	// and the hour's object stays the previous one.
 	hourly := func() (n int64, err error) {
-		err = c.db.QueryRowContext(ctx, "SELECT count(*) FROM read_parquet("+sqlString(b.URL(c.l.hourly("logs", h10)))+")").Scan(&n)
+		err = c.db.QueryRowContext(ctx, "SELECT count(*) FROM read_parquet("+sqlString(b.URL(tierName(c.l.hourlyStem("logs", h10), "").key))+")").Scan(&n)
 		return
 	}
 	before, err := hourly()
 	if err != nil || before != h10Logs {
 		t.Fatalf("hourly logs before: %d %v", before, err)
 	}
-	interruptWrite(t, c, c.l.hourly("logs", h10), 3*time.Second)
+	interruptWrite(t, c, tierName(c.l.hourlyStem("logs", h10), "").key, 3*time.Second)
 	if n, err := hourly(); n != before || err != nil {
 		t.Fatalf("hourly logs after the interrupted write: %d %v, want %d", n, err, before)
 	}

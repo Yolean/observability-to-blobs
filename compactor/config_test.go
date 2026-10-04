@@ -51,6 +51,8 @@ func TestConfigRefuses(t *testing.T) {
 		{map[string]string{"S3_BUCKET": ""}, "S3_BUCKET is required"},
 		{map[string]string{"ROLLING_INTERVAL": "0s"}, "ROLLING_INTERVAL"},
 		{map[string]string{"S3_TLS": "maybe"}, "S3_TLS"},
+		{map[string]string{"PARQUET_KEY_ID": "k1"}, "PARQUET_KEYS_DIR is required"},
+		{map[string]string{"PARQUET_KEY_ID": "K/1", "PARQUET_KEYS_DIR": "/keys"}, "PARQUET_KEY_ID"},
 	} {
 		_, err := parseConfig(envOf(bucketEnv(tc.env)))
 		if err == nil || !strings.Contains(err.Error(), tc.want) {

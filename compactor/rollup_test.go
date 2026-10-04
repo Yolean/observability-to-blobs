@@ -56,16 +56,15 @@ func TestRollupEqualsFoldingTheWholeDay(t *testing.T) {
 		t.Fatalf("first rollup: %+v, want 2 hours and namespaces ns1, ns2, _node", r)
 	}
 	w.wholeDay(t, keys)
-	if !w.exists(w.c.l.dailyPartition("logs", day, "_node")) || !w.exists(w.c.l.dailyPartition("metrics", day, "ns2")) {
-		t.Fatal("missing a namespace partition")
-	}
+	w.obj(w.c.l.dailyPartitionStem("logs", day, "_node"))
+	w.obj(w.c.l.dailyPartitionStem("metrics", day, "ns2"))
 	if r := w.rollup(day); len(r.hours) != 0 {
 		t.Fatalf("a rollup with nothing new: %+v", r)
 	}
 
 	// a late key of hour 11: the rollup rewrites the namespaces of hour
 	// 11's objects (ns1, ns2) and keeps the others' (_node) as they are
-	node := filepath.Join(w.dir, w.c.l.dailyPartition("logs", day, "_node"))
+	node := filepath.Join(w.dir, w.obj(w.c.l.dailyPartitionStem("logs", day, "_node")).key)
 	old := time.Now().Add(-time.Hour)
 	if err := os.Chtimes(node, old, old); err != nil {
 		t.Fatal(err)
@@ -98,10 +97,10 @@ func TestPodsRecomputedPerTier(t *testing.T) {
 		}
 		return
 	}
-	if rows, lines, phase := pods("read_parquet(" + w.path(w.c.l.hourly("pods", h10)) + ")"); rows != 1 || lines != 10 || phase != "running" {
+	if rows, lines, phase := pods(w.from(w.c.l.hourlyStem("pods", h10))); rows != 1 || lines != 10 || phase != "running" {
 		t.Fatalf("hour 10 pods: %d rows, %d lines, %s; want 1, 10, running", rows, lines, phase)
 	}
-	if rows, lines, phase := pods("read_parquet(" + w.path(w.c.l.hourly("pods", h11)) + ")"); rows != 1 || lines != 5 || phase != "succeeded" {
+	if rows, lines, phase := pods(w.from(w.c.l.hourlyStem("pods", h11))); rows != 1 || lines != 5 || phase != "succeeded" {
 		t.Fatalf("hour 11 pods: %d rows, %d lines, %s; want 1, 5, succeeded", rows, lines, phase)
 	}
 	// the day's row is an aggregate over the day's rows, not a concatenation
@@ -151,7 +150,7 @@ func TestRollupOfAnHourWithoutObjects(t *testing.T) {
 	w.putA()
 	w.fold(h10, afterG)
 	for _, tbl := range []string{"logs", "metrics", "podindex", "pods"} {
-		w.remove(w.c.l.hourly(tbl, h10))
+		w.remove(w.obj(w.c.l.hourlyStem(tbl, h10)).key)
 	}
 	if r := w.rollup(day); len(r.hours) != 1 || r.rows["logs"] != 0 {
 		t.Fatalf("%+v", r)

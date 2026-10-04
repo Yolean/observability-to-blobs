@@ -38,6 +38,15 @@ type compactor struct {
 	// finalSeen is the latest previous hour seen final: a cache that spares
 	// the rolling pass a sidecar read, never state
 	finalSeen time.Time
+
+	// Parquet encryption (encryption.go): the keys directory, "" without
+	// one; the active key id, "" to write plain objects; the keys the
+	// engine has; and the refusal to fold that checkKeys sets while a key
+	// is missing.
+	keysDir string
+	keyID   string
+	keys    parquetKeys
+	refusal error
 }
 
 func newCompactor(c config, log *slog.Logger) (*compactor, error) {
@@ -52,7 +61,8 @@ func newCompactor(c config, log *slog.Logger) (*compactor, error) {
 		retries = c.httpRetries
 	}
 	cp := &compactor{l: layout{c.cluster}, raw: raw, tiers: tiers, db: db, grace: c.grace,
-		rawDelete: c.rawDelete, threads: c.threads, retries: retries, log: log, m: newMetrics()}
+		rawDelete: c.rawDelete, threads: c.threads, retries: retries, log: log, m: newMetrics(),
+		keysDir: c.parquetKeysDir, keyID: c.parquetKeyID}
 	scratch := c.tempDir
 	if scratch == "" {
 		scratch = os.TempDir()
@@ -66,15 +76,25 @@ func newCompactor(c config, log *slog.Logger) (*compactor, error) {
 
 // init makes the engine's connections single-use, so a job's temp tables
 // and variables go with its connection, and writes the empty raw object.
+// It gives the engine the parquet keys, and with an active key, writes and
+// reads an encrypted object in scratch.
 func (c *compactor) init(ctx context.Context, scratch string) error {
 	c.db.SetMaxIdleConns(0)
 	if err := os.MkdirAll(scratch, 0o755); err != nil {
 		return err
 	}
 	c.empty = filepath.Join(scratch, "blobs-compactor-empty.jsonl.zst")
-	_, err := c.db.ExecContext(ctx, `COPY (SELECT 'logs' AS "table" WHERE false) TO `+sqlString(c.empty)+
-		` (FORMAT json, COMPRESSION zstd)`)
-	return err
+	if _, err := c.db.ExecContext(ctx, `COPY (SELECT 'logs' AS "table" WHERE false) TO `+sqlString(c.empty)+
+		` (FORMAT json, COMPRESSION zstd)`); err != nil {
+		return err
+	}
+	if err := c.loadKeys(ctx); err != nil {
+		return err
+	}
+	if _, ok := c.keys[c.keyID]; c.keyID != "" && !ok {
+		return fmt.Errorf("PARQUET_KEY_ID %s: PARQUET_KEYS_DIR %s has no key file %s", c.keyID, c.keysDir, c.keyID)
+	}
+	return c.keyCheck(ctx, scratch)
 }
 
 func (c *compactor) Close() error { return c.db.Close() }
@@ -122,15 +142,23 @@ func firstLine(q string) string {
 	return q
 }
 
-// write COPYs query, sorted the table's way, to key.
+// write COPYs query, sorted the table's way, to key, encrypted with the
+// parquet key its name carries, if any.
 func (c *compactor) write(ctx context.Context, conn *sql.Conn, table, query, key string) error {
 	opts := "FORMAT parquet, COMPRESSION zstd"
 	if n := rowGroups[table]; n > 0 {
 		opts += fmt.Sprintf(", ROW_GROUP_SIZE %d", n)
 	}
+	read := readParquet
+	if id := tierKeyID(key); id != "" {
+		opts += ", ENCRYPTION_CONFIG " + encryptionConfig(id)
+		read = func(path string) string {
+			return "read_parquet(" + path + ", encryption_config = " + encryptionConfig(id) + ")"
+		}
+	}
 	return c.put(ctx, conn, key, func(to string) string {
 		return fmt.Sprintf("COPY (SELECT * FROM (%s) ORDER BY %s) TO %s (%s)", query, sortOrder[table], to, opts)
-	}, readParquet)
+	}, read)
 }
 
 func readParquet(path string) string { return "read_parquet(" + path + ")" }
@@ -354,7 +382,7 @@ func (c *compactor) fold(ctx context.Context, h time.Time, listed []Object, now 
 // hasHourly tells whether any of the hour's objects exists.
 func (c *compactor) hasHourly(ctx context.Context, h time.Time) (bool, error) {
 	for _, t := range append(foldTables, "pods") {
-		ok, err := c.tiers.Stat(ctx, c.l.hourly(t, h))
+		_, ok, err := c.locate(ctx, c.l.hourlyStem(t, h))
 		if ok || err != nil {
 			return ok, err
 		}
@@ -379,22 +407,25 @@ func (c *compactor) foldKeys(ctx context.Context, conn *sql.Conn, h time.Time, k
 	if err := c.exec(ctx, conn, "CREATE TEMP TABLE raw AS SELECT * FROM raw"); err != nil {
 		return nil, err
 	}
+	// The hour's objects, each under the key it was first written with.
+	objs := map[string]tierObject{}
+	exists := map[string]bool{}
+	for _, t := range append(foldTables, "pods") {
+		o, ok, err := c.locate(ctx, c.l.hourlyStem(t, h))
+		if err != nil {
+			return nil, err
+		}
+		objs[t], exists[t] = o, ok
+	}
 	// The tier's rows under the views' names, so pods counts deduplicated
 	// rows. Each statement reads the view of its name: the temp table
 	// exists only once it completes. The existing object is read into
 	// memory here, before anything overwrites it.
 	for _, t := range foldTables {
 		q := fmt.Sprintf("CREATE TEMP TABLE %s AS SELECT DISTINCT * EXCLUDE (filename) FROM %s", t, t)
-		if union {
-			key := c.l.hourly(t, h)
-			ok, err := c.tiers.Stat(ctx, key)
-			if err != nil {
-				return nil, err
-			}
-			if ok {
-				q = fmt.Sprintf("CREATE TEMP TABLE %s AS SELECT DISTINCT * FROM (SELECT * EXCLUDE (filename) FROM %s "+
-					"UNION ALL BY NAME SELECT * FROM read_parquet(%s))", t, t, sqlString(c.tiers.URL(key)))
-			}
+		if union && exists[t] {
+			q = fmt.Sprintf("CREATE TEMP TABLE %s AS SELECT DISTINCT * FROM (SELECT * EXCLUDE (filename) FROM %s "+
+				"UNION ALL BY NAME %s)", t, t, c.readTier([]tierObject{objs[t]}, ""))
 		}
 		if err := c.exec(ctx, conn, q); err != nil {
 			return nil, err
@@ -402,7 +433,7 @@ func (c *compactor) foldKeys(ctx context.Context, conn *sql.Conn, h time.Time, k
 	}
 	rows := map[string]int64{}
 	for _, t := range append(foldTables, "pods") {
-		if err := c.write(ctx, conn, t, "SELECT * FROM "+t, c.l.hourly(t, h)); err != nil {
+		if err := c.write(ctx, conn, t, "SELECT * FROM "+t, objs[t].key); err != nil {
 			return nil, err
 		}
 		n, err := c.count(ctx, conn, t)

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"os"
@@ -39,7 +41,40 @@ func selftest(ctx context.Context, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	log.Info("selftest", "httpfs", httpfsPath(), "rows", n)
+	if err := encryptedRoundtrip(ctx, db, dir); err != nil {
+		return err
+	}
+	log.Info("selftest", "httpfs", httpfsPath(), "rows", n, "encrypted", true)
+	return nil
+}
+
+// encryptedRoundtrip writes the roundtrip's parquet file again, encrypted
+// with a random key, and reads it back with the key. The engine writes
+// encrypted Parquet only with httpfs's crypto loaded, so this is the check
+// that the image's extension provides it.
+func encryptedRoundtrip(ctx context.Context, db *sql.DB, dir string) error {
+	key := make([]byte, parquetKeyBytes)
+	if _, err := rand.Read(key); err != nil {
+		return err
+	}
+	in := sqlString(filepath.Join(dir, "logs.parquet"))
+	out := sqlString(filepath.Join(dir, "logs.k-selftest.parquet"))
+	cfg := encryptionConfig("selftest")
+	if _, err := db.ExecContext(ctx, "PRAGMA add_parquet_key('selftest', "+sqlString(base64.StdEncoding.EncodeToString(key))+")"); err != nil {
+		return fmt.Errorf("PRAGMA add_parquet_key: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "COPY (FROM read_parquet("+in+")) TO "+out+" (FORMAT parquet, ENCRYPTION_CONFIG "+cfg+")"); err != nil {
+		return err
+	}
+	var same bool
+	err := db.QueryRowContext(ctx, "SELECT count(*) = 500 AND count(*) = (SELECT count(*) FROM (FROM read_parquet("+in+
+		") INTERSECT FROM read_parquet("+out+", encryption_config = "+cfg+"))) FROM read_parquet("+out+", encryption_config = "+cfg+")").Scan(&same)
+	if err != nil {
+		return err
+	}
+	if !same {
+		return fmt.Errorf("the encrypted copy's rows differ from the plain file's")
+	}
 	return nil
 }
 

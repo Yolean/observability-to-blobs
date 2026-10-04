@@ -4,7 +4,11 @@ kind: Kustomization
 
 # The compactor as it runs in the itest cluster: the image test.sh builds
 # and loads, versitygw as S3, a cadence short enough for the test to see
-# folds (and, when a run crosses an hour, a final fold) within minutes.
+# folds (and, when a run crosses an hour, a final fold) within minutes,
+# and Parquet encryption: test.sh creates the Secret
+# blobs-compactor-parquet-keys from target/itest/parquet-keys (keys
+# itest-1 and itest-2, generated once per checkout) and rotates
+# PARQUET_KEY_ID to itest-2 during the run.
 namespace: observability
 
 resources:
@@ -52,6 +56,14 @@ patches:
               value: 1m
             - name: PAST_INTERVAL
               value: 5m
+            - name: PARQUET_KEYS_DIR
+              value: /etc/blobs-compactor/parquet-keys
+            - name: PARQUET_KEY_ID
+              value: itest-1
+            volumeMounts:
+            - name: parquet-keys
+              mountPath: /etc/blobs-compactor/parquet-keys
+              readOnly: true
             resources:
               requests:
                 cpu: 100m
@@ -62,3 +74,7 @@ patches:
           - name: scratch
             emptyDir:
               sizeLimit: 1Gi
+          # the default mode: the files are root's, the compactor is not
+          - name: parquet-keys
+            secret:
+              secretName: blobs-compactor-parquet-keys

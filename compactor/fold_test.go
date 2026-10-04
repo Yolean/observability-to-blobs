@@ -92,9 +92,7 @@ func TestIncrementalFoldEqualsFullFold(t *testing.T) {
 	}
 
 	for _, tbl := range []string{"logs", "metrics", "podindex", "pods"} {
-		sameRows(t, inc.c.db, "hourly "+tbl,
-			"read_parquet("+inc.path(inc.c.l.hourly(tbl, h10))+")",
-			"read_parquet("+full.path(full.c.l.hourly(tbl, h10))+")")
+		sameRows(t, inc.c.db, "hourly "+tbl, inc.from(inc.c.l.hourlyStem(tbl, h10)), full.from(full.c.l.hourlyStem(tbl, h10)))
 	}
 	if n := inc.hourlyRows("logs", h10); n != h10Logs {
 		t.Fatalf("logs rows %d, want %d: DISTINCT folds the retried upload", n, h10Logs)
@@ -159,7 +157,7 @@ func TestFullReadMarksFinalAndRepairs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	logsKey := w.path(w.c.l.hourly("logs", h10))
+	logsKey := w.path(w.obj(w.c.l.hourlyStem("logs", h10)).key)
 	for _, q := range []string{
 		"CREATE TEMP TABLE l AS SELECT * FROM read_parquet(" + logsKey + ")",
 		"COPY (SELECT * FROM l UNION ALL (SELECT * REPLACE ('bogus' AS message) FROM l LIMIT 1)) TO " + logsKey + " (FORMAT parquet)",
@@ -176,7 +174,7 @@ func TestFullReadMarksFinalAndRepairs(t *testing.T) {
 	if !r.full || !r.final || !r.wrote || r.keys != 2 {
 		t.Fatalf("the first fold after the grace: %+v, want the full read of 2 keys", r)
 	}
-	if n := w.q("SELECT count(*) FROM read_parquet(" + w.path(w.c.l.hourly("logs", h10)) + ") WHERE message = 'bogus'"); n != 0 {
+	if n := w.q("SELECT count(*) FROM " + w.from(w.c.l.hourlyStem("logs", h10)) + " WHERE message = 'bogus'"); n != 0 {
 		t.Fatalf("the full read kept %d bogus rows", n)
 	}
 	if n := w.hourlyRows("logs", h10); n != 11 {
@@ -264,7 +262,7 @@ func TestExpiredSidecar(t *testing.T) {
 	// and the hourly objects too, then a late key arrives
 	w.remove(w.c.l.hourlySidecar(h10))
 	for _, tbl := range []string{"logs", "metrics", "podindex", "pods"} {
-		w.remove(w.c.l.hourly(tbl, h10))
+		w.remove(w.obj(w.c.l.hourlyStem(tbl, h10)).key)
 	}
 	w.putBRetry()
 	if err := w.c.past(w.ctx, day.Add(31*time.Hour), time.Minute); err != nil {
@@ -323,7 +321,7 @@ func TestInterruptedWriteKeepsThePreviousObject(t *testing.T) {
 	w.putA()
 	w.putB()
 	w.fold(h10, during)
-	interruptWrite(t, w.c, w.c.l.hourly("logs", h10), time.Second)
+	interruptWrite(t, w.c, tierName(w.c.l.hourlyStem("logs", h10), "").key, time.Second)
 	if n := w.hourlyRows("logs", h10); n != 11 {
 		t.Fatalf("after the interrupted write: %d logs rows, want the previous 11", n)
 	}
@@ -394,8 +392,8 @@ func TestPastPassSweepsTemporaryObjects(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	stale := []string{w.c.l.tmp(w.c.l.hourly("logs", h10)), w.c.l.tmp(w.c.l.daily("pods", day))}
-	fresh := w.c.l.tmp(w.c.l.hourly("logs", h11))
+	stale := []string{w.c.l.tmp(tierName(w.c.l.hourlyStem("logs", h10), "").key), w.c.l.tmp(tierName(w.c.l.dailyStem("pods", day), "").key)}
+	fresh := w.c.l.tmp(tierName(w.c.l.hourlyStem("logs", h11), "").key)
 	for _, k := range stale {
 		put(k, now.Add(-2*time.Minute))
 	}

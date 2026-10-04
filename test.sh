@@ -28,6 +28,9 @@ IMAGE=node-agent:itest
 BUCKET=node-agent
 CLUSTER=itest
 S3_PORT=${S3_PORT:-30070}
+# the compactor's parquet keys (itest/compactor), kept across runs so that
+# a bucket left by `up` stays readable: PARQUET_KEYS_DIR=$PARQUET_KEYS local/blobs.sh
+PARQUET_KEYS=target/itest/parquet-keys
 export KUBECONFIG=$PWD/itest/cluster/kubeconfig
 KUBECTL="kubectl --context=$CONTEXT"
 MODE=${1:-all}
@@ -201,8 +204,26 @@ $KUBECTL -n observability rollout status daemonset/node-agent --timeout=180s
 $KUBECTL rollout status deployment/log-generator --timeout=120s
 $KUBECTL wait pod/metrics-multi pod/metrics-numeric pod/metrics-optout --for=condition=Ready --timeout=120s
 
-# The compactor folds the bucket from here on. Its tag is fixed too, so a
-# restart moves it onto the image just loaded.
+# The compactor folds the bucket from here on, writing encrypted Parquet
+# with the keys of $PARQUET_KEYS (compactor/README.md, "Encryption"):
+# itest-1 at first, itest-2 after the rotation below. Its tag is fixed
+# too, so a restart moves it onto the image just loaded.
+# A key's content never changes under its id: a key missing here is taken
+# from the cluster's Secret when it has one, and only minted when neither
+# has it, so a cleaned target/ against a kept bucket keeps its keys.
+(umask 077; mkdir -p "$PARQUET_KEYS")
+for id in itest-1 itest-2; do
+  [ -s "$PARQUET_KEYS/$id" ] && continue
+  existing=$($KUBECTL -n observability get secret blobs-compactor-parquet-keys \
+    -o go-template="{{ with index .data \"$id\" }}{{ . }}{{ end }}" 2>/dev/null || true)
+  if [ -n "$existing" ]; then
+    (umask 077; base64 -d <<< "$existing" > "$PARQUET_KEYS/$id")
+  else
+    (umask 077; head -c 32 /dev/urandom | base64 > "$PARQUET_KEYS/$id")
+  fi
+done
+$KUBECTL -n observability create secret generic blobs-compactor-parquet-keys --from-file="$PARQUET_KEYS" \
+  --dry-run=client -o yaml | $KUBECTL apply -f - >/dev/null
 $KUBECTL apply -k itest/compactor
 $KUBECTL -n observability rollout restart deployment/blobs-compactor >/dev/null
 $KUBECTL -n observability rollout status deployment/blobs-compactor --timeout=120s
@@ -223,10 +244,12 @@ a view per table over it:
   S3_ENDPOINT=127.0.0.1:$S3_PORT local/blobs.sh -c "SELECT \"table\", count(*) FROM raw GROUP BY 1"
   local/blobs.sh $CLUSTER/\$(date -u +%Y-%m-%d/%H)            # one hour, interactive
 
-The compactor folds the raw objects into hourly/$CLUSTER/ every 20 s
-(local/blobs.sh adds views over that tier once it exists):
+The compactor folds the raw objects into hourly/$CLUSTER/ every 20 s,
+encrypted with the keys in $PARQUET_KEYS (local/blobs.sh adds views
+over that tier once it exists, given the keys):
 
   kubectl --context=$CONTEXT -n observability logs deploy/blobs-compactor -f
+  PARQUET_KEYS_DIR=$PARQUET_KEYS local/blobs.sh -c "SELECT count(*) FROM hourly_logs"
 
 Tear everything down with:
 
@@ -294,17 +317,22 @@ done
 # One DuckDB init for every assertion: the secret, and the views the
 # compactor and local/blobs.sh read from the same .sql files, so the
 # column contract lives in exactly one place (compactor/sql/raw.sql).
+umask 077  # the S3 secret and the parquet keys go into files below
 INIT=$(mktemp "${TMPDIR:-/tmp}/itest.XXXXXX")
-INIT_S3=$INIT.s3 SCOPED=$INIT.scoped SNAPSHOT=$INIT.raw.csv PODS_BEFORE=$INIT.pods.parquet
-trap 'rm -f "$INIT" "$INIT_S3" "$SCOPED" "$SNAPSHOT" "$PODS_BEFORE"' EXIT
+INIT_S3=$INIT.s3 SCOPED=$INIT.scoped SNAPSHOT=$INIT.raw.csv PODS_BEFORE=$INIT.pods.parquet ROTATED=$INIT.rotated.csv
+trap 'rm -f "$INIT" "$INIT_S3" "$SCOPED" "$SNAPSHOT" "$PODS_BEFORE" "$ROTATED"' EXIT
 cat >"$INIT_S3" <<SQL
 .output /dev/null
 INSTALL httpfs; LOAD httpfs; SET TimeZone='UTC';
 SET s3_region='us-east-1'; SET s3_endpoint='127.0.0.1:$S3_PORT';
 SET s3_access_key_id='demoaccess'; SET s3_secret_access_key='demosecret';
 SET s3_use_ssl=false; SET s3_url_style='path';
-.output
 SQL
+# the compactor's parquet keys; 0600 like the S3 one (umask above)
+for f in "$PARQUET_KEYS"/*; do
+  echo "PRAGMA add_parquet_key('${f##*/}', '$(tr -d '[:space:]' < "$f")');"
+done >>"$INIT_S3"
+echo ".output" >>"$INIT_S3"
 cat >"$INIT" <<SQL
 .read $INIT_S3
 .output /dev/null
@@ -325,6 +353,24 @@ NOW="date_trunc('minute', now() AT TIME ZONE 'UTC')"
 # (QINIT names another init, scoped() below)
 q() { duckdb -noheader -csv -c ".read ${QINIT:-$INIT}" -c "$1" 2>&1; }
 show() { duckdb -c ".read $INIT" -c "$1" 2>&1; }
+
+# tier <stem glob> [read_parquet options]: a FROM clause over the tier
+# objects <stem>.parquet and <stem>.k-<id>.parquet: one read of the plain
+# objects and one per key id, united by name, because one read takes one
+# key (compactor/README.md, "Encryption"). A read binds its glob, so only
+# the reads that match objects are in it. No '?' in a stem: in an s3 URL
+# it starts the query string.
+tier() {
+  local stem=$1 opts=${2:+, $2} id from=""
+  for id in $(q "SELECT DISTINCT coalesce(nullif(regexp_extract(file, '\\.k-([a-z0-9-]+)\\.parquet\$', 1), ''), '-') FROM glob('$stem*.parquet') ORDER BY 1"); do
+    if [ "$id" = - ]; then
+      from="${from:+$from UNION ALL BY NAME }SELECT * FROM read_parquet('$stem.parquet', union_by_name = true$opts)"
+    else
+      from="${from:+$from UNION ALL BY NAME }SELECT * FROM read_parquet('$stem.k-$id.parquet', encryption_config = {footer_key: '$id'}$opts)"
+    fi
+  done
+  echo "(${from:-SELECT NULL AS none WHERE false})"
+}
 
 ERRORS=0
 assert() {
@@ -525,6 +571,14 @@ assert "healthy targets are scraped about every 15s" \
 # -------------------------------------------------------------- compactor --
 
 phase "assert: compactor"
+# The key rotation: the hourly objects so far, then PARQUET_KEY_ID
+# itest-2. They keep their names, so their key; new hours and the day's
+# partitions get itest-2.
+HOURLY_OBJECTS="glob('s3://$BUCKET/hourly/$CLUSTER/*/*/*.parquet')"
+q "COPY (SELECT file FROM $HOURLY_OBJECTS) TO '$ROTATED' (FORMAT csv, HEADER true)" >/dev/null
+echo "  rotate PARQUET_KEY_ID to itest-2 after $(($(wc -l < "$ROTATED") - 1)) hourly objects"
+$KUBECTL -n observability set env deployment/blobs-compactor PARQUET_KEY_ID=itest-2 >/dev/null
+$KUBECTL -n observability rollout status deployment/blobs-compactor --timeout=360s >/dev/null
 # The raw keys now. The compactor then runs on until a rolling and a past
 # pass that both started after this snapshot have succeeded (read from its
 # /metrics through the API server), so between them they listed every key
@@ -592,11 +646,13 @@ same_rows() {
     AND (SELECT count(*) FROM (SELECT * FROM $2 EXCEPT SELECT * EXCLUDE (filename) FROM $1)) = 0
     AND (SELECT count(*) FROM (SELECT DISTINCT * EXCLUDE (filename) FROM $1)) = (SELECT count(*) FROM $2)"
 }
-hourly() { echo "read_parquet('s3://$BUCKET/hourly/$CLUSTER/$1/$2.parquet')"; }
+# hourly <table> <date/HH>, daily <table> <date>: a FROM clause over the
+# tier's object(s), each read with its key (tier above)
+hourly() { tier "s3://$BUCKET/hourly/$CLUSTER/$1/$2"; }
 daily() {
   case $1 in
-    (logs|metrics) echo "read_parquet('s3://$BUCKET/daily/$CLUSTER/$1/$2/*/*.parquet', hive_partitioning = false)" ;;
-    (*) echo "read_parquet('s3://$BUCKET/daily/$CLUSTER/$1/$2.parquet')" ;;
+    (logs|metrics) tier "s3://$BUCKET/daily/$CLUSTER/$1/$2/*/data_0" "hive_partitioning = false" ;;
+    (*) tier "s3://$BUCKET/daily/$CLUSTER/$1/$2" ;;
   esac
 }
 for hour in $(q "SELECT regexp_extract(file, '_folded/(.*)\\.csv\$', 1) FROM glob('s3://$BUCKET/hourly/$CLUSTER/_folded/*/*.csv') ORDER BY 1"); do
@@ -606,7 +662,7 @@ for hour in $(q "SELECT regexp_extract(file, '_folded/(.*)\\.csv\$', 1) FROM glo
         AND $(same_rows podindex "$(hourly podindex "$hour")") AND (SELECT count(*) FROM logs) > 0"
 done
 assert "hourly pods: the three incarnations of 'reused', each its own row" \
-  "SELECT count(DISTINCT pod_uid) = 3 FROM read_parquet('s3://$BUCKET/hourly/$CLUSTER/pods/*/*.parquet') WHERE pod = 'reused' AND container = 'reused'"
+  "SELECT count(DISTINCT pod_uid) = 3 FROM $(tier "s3://$BUCKET/hourly/$CLUSTER/pods/*/[0-9][0-9]") WHERE pod = 'reused' AND container = 'reused'"
 
 # compactor_job <args, a JSON array>: blobs-compactor with those args in a
 # pod of its own, as the only writer; its log is in JOB_LOG
@@ -618,7 +674,10 @@ compactor_job() {
       \"name\": \"compactor-job\", \"image\": \"$COMPACTOR_IMAGE\", \"imagePullPolicy\": \"Never\",
       \"args\": $1, \"envFrom\": [{\"secretRef\": {\"name\": \"blobs-compactor-s3\"}}],
       \"env\": [{\"name\": \"CLUSTER_NAME\", \"value\": \"$CLUSTER\"}, {\"name\": \"S3_BUCKET\", \"value\": \"$BUCKET\"},
-        {\"name\": \"S3_ENDPOINT\", \"value\": \"versitygw.default.svc.cluster.local:7070\"}, {\"name\": \"S3_TLS\", \"value\": \"off\"}]}]}}" >/dev/null
+        {\"name\": \"S3_ENDPOINT\", \"value\": \"versitygw.default.svc.cluster.local:7070\"}, {\"name\": \"S3_TLS\", \"value\": \"off\"},
+        {\"name\": \"PARQUET_KEYS_DIR\", \"value\": \"/etc/blobs-compactor/parquet-keys\"}, {\"name\": \"PARQUET_KEY_ID\", \"value\": \"itest-2\"}],
+      \"volumeMounts\": [{\"name\": \"parquet-keys\", \"mountPath\": \"/etc/blobs-compactor/parquet-keys\", \"readOnly\": true}]}],
+    \"volumes\": [{\"name\": \"parquet-keys\", \"secret\": {\"secretName\": \"blobs-compactor-parquet-keys\"}}]}}" >/dev/null
   deadline=$((SECONDS + 300))
   while :; do
     job=$($KUBECTL -n observability get pod compactor-job -o jsonpath='{.status.phase}')
@@ -659,12 +718,12 @@ for day in $DAYS; do
 done
 LAST=$(echo "$DAYS" | tail -n 1)
 assert "daily $LAST: a namespace's logs are one object, found by its hive key" \
-  "SELECT count(*) = 1 AND bool_and(namespace = 'default') FROM (SELECT DISTINCT namespace, filename FROM read_parquet('s3://$BUCKET/daily/$CLUSTER/logs/$LAST/*/*.parquet', hive_partitioning = true, filename = true) WHERE namespace = 'default')"
+  "SELECT count(*) = 1 AND bool_and(namespace = 'default') FROM (SELECT DISTINCT namespace, filename FROM $(tier "s3://$BUCKET/daily/$CLUSTER/logs/$LAST/*/data_0" "hive_partitioning = true, filename = true") WHERE namespace = 'default')"
 # per incarnation over the days: one that ran across midnight has a row in each
 assert "daily pods: the three incarnations of 'reused', each with its one line and exit 0" \
   "SELECT count(*) = 3 AND bool_and(lines = 1) AND bool_and(exited) AND count(*) FILTER (succeeded) >= 2
    FROM (SELECT pod_uid, sum(lines) AS lines, bool_or(exit_code = 0) AS exited, bool_or(phase = 'succeeded') AS succeeded
-         FROM read_parquet('s3://$BUCKET/daily/$CLUSTER/pods/*.parquet') WHERE pod = 'reused' AND container = 'reused' GROUP BY pod_uid)"
+         FROM $(tier "s3://$BUCKET/daily/$CLUSTER/pods/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]") WHERE pod = 'reused' AND container = 'reused' GROUP BY pod_uid)"
 
 # An incremental rollup: a raw object of a namespace of its own, in an hour
 # of the last day that has no keys yet and that the agent is not uploading
@@ -702,6 +761,22 @@ assert "daily $LAST: the incremental rollup kept the other namespaces' pods rows
       AND (SELECT count(*) FROM read_parquet('$PODS_BEFORE')) = (SELECT count(*) FROM $(daily pods "$LAST") WHERE namespace <> 'itest-late')"
 assert "daily $LAST: the late namespace's pods row has its three lines" \
   "SELECT count(*) = 1 AND bool_and(lines = 3) FROM $(daily pods "$LAST") WHERE namespace = 'itest-late' AND pod_uid = '$LATE_UID'"
+TIER_OBJECTS="(SELECT file FROM $HOURLY_OBJECTS UNION ALL SELECT file FROM glob('s3://$BUCKET/daily/$CLUSTER/*/*/*/*.parquet')
+  UNION ALL SELECT file FROM glob('s3://$BUCKET/daily/$CLUSTER/*/*.parquet'))"
+assert "encryption: every hourly and daily object is under key itest-1 or itest-2, one object per hour, table and namespace" \
+  "SELECT count(*) > 0 AND count(*) FILTER (NOT regexp_matches(file, '\\.k-itest-[12]\\.parquet\$')) = 0
+          AND count(*) = count(DISTINCT regexp_replace(file, '(\\.k-[a-z0-9-]+)?\\.parquet\$', ''))
+   FROM $TIER_OBJECTS"
+assert "encryption: the hourly objects from before the rotation keep their names, so their key itest-1" \
+  "SELECT count(*) > 0 AND bool_and(file LIKE '%.k-itest-1.parquet') AND bool_and(file IN (SELECT file FROM $HOURLY_OBJECTS))
+   FROM read_csv('$ROTATED', header = true)"
+assert "encryption: the daily objects of $LAST, first written after the rotation, are under itest-2" \
+  "SELECT count(*) > 0 AND bool_and(file LIKE '%.k-itest-2.parquet') FROM $TIER_OBJECTS WHERE file LIKE '%/daily/%/$LAST%'"
+plain=$(q "SELECT count(*) FROM read_parquet('$(q "SELECT min(file) FROM $HOURLY_OBJECTS" | tr -d '[:space:]')')" || true)
+case "$plain" in
+  (*"is encrypted, but 'encryption_config' was not set"*) echo "  PASS: encryption: a read without the key fails" ;;
+  (*) echo "  FAIL: encryption: a read without the key gave: $plain" >&2; ERRORS=$((ERRORS + 1)) ;;
+esac
 $KUBECTL -n observability scale deployment/blobs-compactor --replicas=1 >/dev/null
 
 echo

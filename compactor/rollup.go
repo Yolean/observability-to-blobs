@@ -94,20 +94,19 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 		return r, err
 	}
 	for _, t := range foldTables {
-		var files []string
+		var objs []tierObject
 		for _, h := range r.hours {
-			key := c.l.hourly(t, h)
-			ok, err := c.tiers.Stat(ctx, key)
+			o, ok, err := c.locate(ctx, c.l.hourlyStem(t, h))
 			if err != nil {
 				return r, err
 			}
 			if ok {
-				files = append(files, c.tiers.URL(key))
+				objs = append(objs, o)
 			}
 		}
 		q := fmt.Sprintf("CREATE TEMP TABLE hourly_%s AS SELECT * EXCLUDE (filename) FROM %s", t, t)
-		if len(files) > 0 {
-			q += " UNION ALL BY NAME SELECT * FROM read_parquet(" + listLiteral(files) + ", union_by_name = true)"
+		if len(objs) > 0 {
+			q += " UNION ALL BY NAME " + c.readTier(objs, "")
 		}
 		if err := c.exec(ctx, conn, q); err != nil {
 			return r, err
@@ -130,28 +129,30 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 	// The day's rows of the changed namespaces: the changed hours' rows and
 	// the existing partitions, DISTINCT. Rows of a re-folded hour that the
 	// day already has fold away; late rows are new.
+	partitions := map[string]map[string]tierObject{} // table, namespace
 	for _, t := range []string{"logs", "metrics"} {
-		objs, err := c.tiers.List(ctx, c.l.dailyPartitionPrefix(t, day))
-		if err != nil {
+		if partitions[t], err = c.partitions(ctx, t, day); err != nil {
 			return r, err
 		}
-		var files []string
-		for _, o := range objs {
-			if ns, ok := partitionNamespace(o.Key); ok && inChanged[ns] && o.Key == c.l.dailyPartition(t, day, ns) {
-				files = append(files, c.tiers.URL(o.Key))
+		var objs []tierObject
+		for ns, o := range partitions[t] {
+			if inChanged[ns] {
+				objs = append(objs, o)
 			}
 		}
-		if err := c.unionDistinct(ctx, conn, t, files, "hive_partitioning = false, "); err != nil {
+		if err := c.unionDistinct(ctx, conn, t, objs, "hive_partitioning = false, "); err != nil {
 			return r, err
 		}
 	}
-	var files []string
-	if ok, err := c.tiers.Stat(ctx, c.l.daily("podindex", day)); err != nil {
+	podindex, ok, err := c.locate(ctx, c.l.dailyStem("podindex", day))
+	if err != nil {
 		return r, err
-	} else if ok {
-		files = append(files, c.tiers.URL(c.l.daily("podindex", day)))
 	}
-	if err := c.unionDistinct(ctx, conn, "podindex", files, ""); err != nil {
+	var objs []tierObject
+	if ok {
+		objs = append(objs, podindex)
+	}
+	if err := c.unionDistinct(ctx, conn, "podindex", objs, ""); err != nil {
 		return r, err
 	}
 
@@ -162,7 +163,12 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 			return r, err
 		}
 		for _, ns := range namespaces {
-			if err := c.write(ctx, conn, t, "SELECT * FROM "+t+" WHERE namespace = "+sqlString(ns), c.l.dailyPartition(t, day, ns)); err != nil {
+			// a namespace's partition keeps the key it was first written with
+			o, ok := partitions[t][ns]
+			if !ok {
+				o = tierName(c.l.dailyPartitionStem(t, day, ns), c.keyID)
+			}
+			if err := c.write(ctx, conn, t, "SELECT * FROM "+t+" WHERE namespace = "+sqlString(ns), o.key); err != nil {
 				return r, err
 			}
 		}
@@ -170,7 +176,7 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 			return r, err
 		}
 	}
-	if err := c.write(ctx, conn, "podindex", "SELECT * FROM podindex", c.l.daily("podindex", day)); err != nil {
+	if err := c.write(ctx, conn, "podindex", "SELECT * FROM podindex", podindex.key); err != nil {
 		return r, err
 	}
 	if r.rows["podindex"], err = c.count(ctx, conn, "podindex"); err != nil {
@@ -186,18 +192,18 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 		return r, err
 	}
 	pods := "SELECT * FROM pods_changed"
-	podsKey := c.l.daily("pods", day)
-	if ok, err := c.tiers.Stat(ctx, podsKey); err != nil {
+	podsObj, ok, err := c.locate(ctx, c.l.dailyStem("pods", day))
+	if err != nil {
 		return r, err
 	} else if ok {
-		pods += " UNION ALL BY NAME SELECT * FROM read_parquet(" + sqlString(c.tiers.URL(podsKey)) + ") o " +
+		pods += " UNION ALL BY NAME SELECT * FROM (" + c.readTier([]tierObject{podsObj}, "") + ") o " +
 			"WHERE NOT EXISTS (SELECT 1 FROM changed_namespaces n WHERE n.namespace IS NOT DISTINCT FROM o.namespace) " +
 			"AND NOT EXISTS (SELECT 1 FROM pods_changed p WHERE p.pod_uid = o.pod_uid)"
 	}
 	if err := c.exec(ctx, conn, "CREATE TEMP TABLE pods_day AS "+pods); err != nil {
 		return r, err
 	}
-	if err := c.write(ctx, conn, "pods", "SELECT * FROM pods_day", podsKey); err != nil {
+	if err := c.write(ctx, conn, "pods", "SELECT * FROM pods_day", podsObj.key); err != nil {
 		return r, err
 	}
 	if r.rows["pods"], err = c.count(ctx, conn, "pods_day"); err != nil {
@@ -218,13 +224,39 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 	})
 }
 
-// unionDistinct creates the temp table t from hourly_t and the files.
-func (c *compactor) unionDistinct(ctx context.Context, conn *sql.Conn, t string, files []string, opts string) error {
+// unionDistinct creates the temp table t from hourly_t and the objects.
+func (c *compactor) unionDistinct(ctx context.Context, conn *sql.Conn, t string, objs []tierObject, opts string) error {
 	q := fmt.Sprintf("CREATE TEMP TABLE %s AS SELECT DISTINCT * FROM (SELECT * FROM hourly_%s", t, t)
-	if len(files) > 0 {
-		q += " UNION ALL BY NAME SELECT * FROM read_parquet(" + listLiteral(files) + ", " + opts + "union_by_name = true)"
+	if len(objs) > 0 {
+		q += " UNION ALL BY NAME " + c.readTier(objs, opts)
 	}
 	return c.exec(ctx, conn, q+")")
+}
+
+// partitions returns a table's namespace partitions of a day by namespace,
+// each under the key it was first written with.
+func (c *compactor) partitions(ctx context.Context, table string, day time.Time) (map[string]tierObject, error) {
+	objs, err := c.tiers.List(ctx, c.l.dailyPartitionPrefix(table, day))
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]tierObject{}
+	for _, o := range objs {
+		ns, ok := partitionNamespace(o.Key)
+		if !ok {
+			continue
+		}
+		t, ok := stemObject(c.l.dailyPartitionStem(table, day, ns), o.Key)
+		if !ok {
+			continue
+		}
+		if prev, dup := out[ns]; dup {
+			return nil, fmt.Errorf("namespace %q of %s has two objects, %s and %s: the compactor keeps one, under its first key",
+				ns, c.l.dailyPartitionPrefix(table, day), prev.key, t.key)
+		}
+		out[ns] = t
+	}
+	return out, nil
 }
 
 func queryStrings(ctx context.Context, conn *sql.Conn, q string) ([]string, error) {

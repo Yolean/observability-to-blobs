@@ -19,7 +19,10 @@ import (
 //   - a rollup of a past day runs after the rolling pass committed the
 //     final fold of that day's last hour, and after every past pass for
 //     every past day with hourly sidecars, where it does nothing unless an
-//     hour has keys the daily sidecar lacks.
+//     hour has keys the daily sidecar lacks;
+//   - at start and on every past pass, checkKeys: while a parquet key that
+//     a tier object's name carries has no key file, both passes refuse to
+//     fold, and the rolling pass checks again on every tick.
 //
 // Nothing is remembered between ticks that the bucket does not say, so a
 // start is an ordinary tick. One writer: replicas 1, strategy Recreate.
@@ -29,7 +32,9 @@ func (c *compactor) run(ctx context.Context, cfg config) error {
 	go func() { srvErr <- srv.ListenAndServe() }()
 	defer srv.Close()
 	c.log.Info("run", "cluster", c.l.cluster, "rolling", cfg.rolling.String(), "grace", cfg.grace.String(),
-		"past", cfg.past.String(), "raw_delete", cfg.rawDelete, "metrics", cfg.metricsAddr)
+		"past", cfg.past.String(), "raw_delete", cfg.rawDelete, "metrics", cfg.metricsAddr,
+		"parquet_key", c.keyID, "parquet_keys", sortedIDs(c.keys))
+	c.keysJob(jobContext(ctx), cfg.jobTimeout)
 	tick := time.NewTicker(cfg.rolling)
 	defer tick.Stop()
 	var lastPast time.Time
@@ -110,7 +115,15 @@ func (c *compactor) rollupJob(ctx context.Context, day time.Time, timeout time.D
 	return r, nil
 }
 
+// keysJob is checkKeys with a deadline; it logs and sets the refusal.
+func (c *compactor) keysJob(ctx context.Context, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return c.checkKeys(ctx)
+}
+
 // rollingPass folds the current hour and, until it is final, the previous.
+// While a parquet key is missing it checks the keys again instead.
 func (c *compactor) rollingPass(ctx context.Context, now time.Time, timeout time.Duration) error {
 	start := time.Now()
 	err := c.rolling(ctx, now, timeout)
@@ -124,6 +137,11 @@ func (c *compactor) rolling(ctx context.Context, now time.Time, timeout time.Dur
 	prev := cur.Add(-time.Hour)
 	if err := stopped(ctx); err != nil {
 		return err
+	}
+	if c.refusal != nil {
+		if err := c.keysJob(jobs, timeout); err != nil {
+			return err
+		}
 	}
 	_, err := c.foldJob(jobs, cur, nil, now, timeout)
 	errs := []error{err}
@@ -174,6 +192,9 @@ func (c *compactor) past(ctx context.Context, now time.Time, timeout time.Durati
 		lctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 		return f(lctx)
+	}
+	if err := c.keysJob(jobs, timeout); err != nil {
+		return err
 	}
 	if err := list(func(ctx context.Context) error { return c.sweep(ctx, now, timeout) }); err != nil {
 		fail("sweep", err)
