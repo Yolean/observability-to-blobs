@@ -36,6 +36,17 @@ func TestConfigDefaults(t *testing.T) {
 	if c.threads != 4 || c.httpRetries != 5 {
 		t.Fatalf("threads %d retries %d", c.threads, c.httpRetries)
 	}
+	if c.logsListen != "" || c.logsLookback != 48*time.Hour || c.logsTimeout != 30*time.Second || c.logsConcurrency != 4 ||
+		c.logsMemoryLimit != 0 {
+		t.Fatalf("logs API %q lookback %s timeout %s concurrency %d memory %d", c.logsListen, c.logsLookback,
+			c.logsTimeout, c.logsConcurrency, c.logsMemoryLimit)
+	}
+	// with the logs API on, its engine takes a quarter of the container's
+	// memory from the fold's three quarters
+	c, err = parseConfig(envOf(bucketEnv(map[string]string{"DUCKDB_MEMORY_LIMIT": "4294967296", "LOGS_LISTEN": ":8080"})))
+	if err != nil || c.memoryLimit != 2<<30 || c.logsMemoryLimit != 1<<30 {
+		t.Fatalf("with LOGS_LISTEN: fold %d, logs %d, %v", c.memoryLimit, c.logsMemoryLimit, err)
+	}
 }
 
 func TestConfigRefuses(t *testing.T) {
@@ -53,6 +64,9 @@ func TestConfigRefuses(t *testing.T) {
 		{map[string]string{"S3_TLS": "maybe"}, "S3_TLS"},
 		{map[string]string{"PARQUET_KEY_ID": "k1"}, "PARQUET_KEYS_DIR is required"},
 		{map[string]string{"PARQUET_KEY_ID": "K/1", "PARQUET_KEYS_DIR": "/keys"}, "PARQUET_KEY_ID"},
+		{map[string]string{"LOGS_LOOKBACK": "0s"}, "LOGS_LOOKBACK"},
+		{map[string]string{"LOGS_TIMEOUT": "soon"}, "LOGS_TIMEOUT"},
+		{map[string]string{"LOGS_CONCURRENCY": "0"}, "LOGS_CONCURRENCY"},
 	} {
 		_, err := parseConfig(envOf(bucketEnv(tc.env)))
 		if err == nil || !strings.Contains(err.Error(), tc.want) {

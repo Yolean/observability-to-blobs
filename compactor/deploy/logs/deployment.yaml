@@ -1,0 +1,15 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blobs-compactor
+spec:
+  template:
+    spec:
+      containers:
+      - name: compactor
+        env:
+        - name: LOGS_LISTEN
+          value: :8080
+        ports:
+        - name: logs
+          containerPort: 8080

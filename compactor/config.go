@@ -59,6 +59,17 @@ type config struct {
 	putListen        string
 	putKeyID, putKey string
 	putMaxBytes      int64
+
+	// the logs API (logs.go): its address, "" for none in run; how far
+	// back a request looks for a pod, the deadline of a request, how many
+	// run at once, and the bytes its own engine may use
+	logsListen      string
+	logsLookback    time.Duration
+	logsTimeout     time.Duration
+	logsConcurrency int
+	logsMemoryLimit int64
+	// DUCKDB_MEMORY_LIMIT, the container's limit, 0 when unset
+	containerMemory int64
 }
 
 // defaultPutMaxBytes bounds a PutObject's body (PUT_MAX_BYTES). out_s3
@@ -94,6 +105,7 @@ func parseConfig(env func(string) string) (config, error) {
 		putListen:      env("PUT_LISTEN"),
 		putKeyID:       env("PUT_ACCESS_KEY_ID"),
 		putKey:         env("PUT_SECRET_ACCESS_KEY"),
+		logsListen:     env("LOGS_LISTEN"),
 	}
 	if !clusterRE.MatchString(c.cluster) {
 		return c, fmt.Errorf("CLUSTER_NAME %q: want a lowercase name of letters, digits, '-', '_' and '.'", c.cluster)
@@ -127,6 +139,8 @@ func parseConfig(env func(string) string) (config, error) {
 		{"GRACE", "10m", &c.grace},
 		{"PAST_INTERVAL", "1h", &c.past},
 		{"JOB_TIMEOUT", "30m", &c.jobTimeout},
+		{"LOGS_LOOKBACK", "48h", &c.logsLookback},
+		{"LOGS_TIMEOUT", "30s", &c.logsTimeout},
 	}
 	for _, d := range durations {
 		if *d.dst, err = time.ParseDuration(get(d.name, d.def)); err != nil {
@@ -195,6 +209,7 @@ func parseConfig(env func(string) string) (config, error) {
 	}{
 		{"DUCKDB_THREADS", "4", &c.threads},
 		{"DUCKDB_HTTP_RETRIES", "5", &c.httpRetries},
+		{"LOGS_CONCURRENCY", "4", &c.logsConcurrency},
 	}
 	for _, i := range ints {
 		if *i.dst, err = strconv.Atoi(get(i.name, i.def)); err != nil || *i.dst < 1 {
@@ -210,13 +225,21 @@ func parseConfig(env func(string) string) (config, error) {
 		}
 	}
 	// the container's memory limit in bytes, from resourceFieldRef; the rest
-	// is the Go heap, the HTTP client and DuckDB's own overhead
+	// is the Go heap, the HTTP client and DuckDB's own overhead. With the
+	// logs API on, its engine is a second database with a limit of its own
+	// (logs.go): the fold's 75% is then split, 50% for the fold, 25% for
+	// the API.
 	if v := env("DUCKDB_MEMORY_LIMIT"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || n <= 0 {
 			return c, fmt.Errorf("DUCKDB_MEMORY_LIMIT %q: want bytes", v)
 		}
+		c.containerMemory = n
 		c.memoryLimit = n / 4 * 3
+		if c.logsListen != "" {
+			c.memoryLimit = n / 2
+			c.logsMemoryLimit = n / 4
+		}
 	}
 	return c, nil
 }
@@ -225,16 +248,7 @@ func parseConfig(env func(string) string) (config, error) {
 // bucket for both, or one local directory; with RAW_SOURCE=spool the raw
 // source is the spool instead.
 func (c config) stores() (RawSource, TierStore, error) {
-	var raw RawSource
-	var tiers TierStore
-	if c.dir != "" {
-		d := dirBucket{root: c.dir}
-		raw, tiers = d, d
-	} else {
-		b := &s3Bucket{bucket: c.bucket, endpoint: c.endpoint, tls: c.tls, region: c.region,
-			keyID: c.keyID, secret: c.secret, http: &http.Client{Timeout: 5 * time.Minute}, now: time.Now}
-		raw, tiers = b, b
-	}
+	raw, tiers := c.bucketStores()
 	if c.rawSource == "spool" {
 		s, err := openSpool(c.spoolDir)
 		if err != nil {
@@ -243,6 +257,18 @@ func (c config) stores() (RawSource, TierStore, error) {
 		raw = s
 	}
 	return raw, tiers, nil
+}
+
+// bucketStores is the bucket, or the local directory, as the raw source
+// and as the tier store.
+func (c config) bucketStores() (RawSource, TierStore) {
+	if c.dir != "" {
+		d := dirBucket{root: c.dir}
+		return d, d
+	}
+	b := &s3Bucket{bucket: c.bucket, endpoint: c.endpoint, tls: c.tls, region: c.region,
+		keyID: c.keyID, secret: c.secret, http: &http.Client{Timeout: 5 * time.Minute}, now: time.Now}
+	return b, b
 }
 
 // engineInit is what every connection of the engine runs first: the

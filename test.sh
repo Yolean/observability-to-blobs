@@ -113,6 +113,7 @@ fi
 need y-cluster "https://github.com/Yolean/y-cluster/releases"
 if [ "$MODE" != up ]; then
   need duckdb "https://duckdb.org/docs/installation/"
+  need curl "https://curl.se/download.html"
   # the assertions run compactor/sql/, which the compactor runs embedded at
   # this version; another CLI version tests the contract on another engine
   want=$(sed -n 's/^DUCKDB_VERSION=//p' compactor/build.env)
@@ -330,6 +331,8 @@ $KUBECTL run kmsg-writer --rm -i --restart=Never --image=busybox:1.37 \
 sleep 8
 $KUBECTL -n observability rollout restart daemonset/node-agent
 $KUBECTL -n observability rollout status daemonset/node-agent --timeout=180s
+# the logs API reads the days before this one from the daily tier
+RUN_DATE=$(date -u +%F)
 # objects after this minute come from one agent process
 SINCE_EPOCH=$(( $(date -u +%s) / 60 * 60 ))
 SINCE="TIMESTAMP '$(date -u +'%Y-%m-%d %H:%M:00')'"
@@ -420,7 +423,11 @@ echo "  the put compactor is back"
 umask 077  # the S3 secret and the parquet keys go into files below
 INIT=$(mktemp "${TMPDIR:-/tmp}/itest.XXXXXX")
 INIT_S3=$INIT.s3 SCOPED=$INIT.scoped SNAPSHOT=$INIT.raw.csv PODS_BEFORE=$INIT.pods.parquet ROTATED=$INIT.rotated.csv
-trap 'rm -f "$INIT" "$INIT_S3" "$SCOPED" "$SNAPSHOT" "$PODS_BEFORE" "$ROTATED"' EXIT
+LOGS_HDR=$INIT.logs.headers LOGS_OUT=$INIT.logs.body
+# the port-forwards to the logs API (logs_forward below)
+LOGS_PF_PIDS=()
+trap 'rm -f "$INIT" "$INIT_S3" "$SCOPED" "$SNAPSHOT" "$PODS_BEFORE" "$ROTATED" "$LOGS_HDR" "$LOGS_OUT"
+  [ ${#LOGS_PF_PIDS[@]} -eq 0 ] || kill "${LOGS_PF_PIDS[@]}" 2>/dev/null || true' EXIT
 cat >"$INIT_S3" <<SQL
 .output /dev/null
 INSTALL httpfs; LOAD httpfs; SET TimeZone='UTC';
@@ -483,6 +490,77 @@ assert() {
     echo "  FAIL: $1 (got: $out)" >&2
     ERRORS=$((ERRORS + 1))
   fi
+}
+
+# expect <description> <command...>: PASS when the command succeeds, as
+# assert does for SQL
+expect() {
+  local what=$1
+  shift
+  if "$@"; then
+    echo "  PASS: $what"
+  else
+    echo "  FAIL: $what" >&2
+    ERRORS=$((ERRORS + 1))
+  fi
+}
+
+# logs_expect <description> <command...>: expect, showing the logs API's
+# last answer on a failure
+logs_expect() {
+  local what=$1
+  shift
+  if "$@"; then
+    echo "  PASS: $what"
+  else
+    echo "  FAIL: $what, the answer:" >&2
+    logs_show
+    ERRORS=$((ERRORS + 1))
+  fi
+}
+
+# The logs API (compactor/README.md, "The logs API"), through a
+# port-forward from this host.
+# logs_forward <namespace> <resource> <local port>: forward to port 8080
+# of svc/... or pod/..., until the script exits, and wait for the API
+logs_forward() {
+  local deadline=$((SECONDS + 60))
+  $KUBECTL -n "$1" port-forward "$2" "$3:8080" >/dev/null 2>&1 &
+  LOGS_PF_PIDS+=($!)
+  until curl -sf -o /dev/null "http://127.0.0.1:$3/openapi.json"; do
+    [ $SECONDS -lt $deadline ] || return 1
+    sleep 1
+  done
+}
+# logs_get <local port> <path>: the answer's status in LOGS_CODE, its
+# headers in LOGS_HEADERS, its body in LOGS_BODY (trailing newlines cut)
+logs_get() {
+  LOGS_CODE=$(curl -sS -o "$LOGS_OUT" -D "$LOGS_HDR" -w '%{http_code}' "http://127.0.0.1:$1$2" 2>&1) || LOGS_CODE="curl failed: $LOGS_CODE"
+  LOGS_HEADERS=$(tr -d '\r' < "$LOGS_HDR")
+  LOGS_BODY=$(cat "$LOGS_OUT")
+}
+# logs_header <name>: that header of the last answer
+logs_header() {
+  awk -v k="$(tr '[:upper:]' '[:lower:]' <<<"$1")" -F': ' 'tolower($1) == k { v = $2 } END { print v }' <<<"$LOGS_HEADERS"
+}
+# logs_is <status> <content type> [header=value...]: the last answer has them
+logs_is() {
+  local kv
+  [ "$LOGS_CODE" = "$1" ] && [ "$(logs_header Content-Type)" = "$2" ] || return 1
+  shift 2
+  for kv in "$@"; do
+    [ "$(logs_header "${kv%%=*}")" = "${kv#*=}" ] || return 1
+  done
+}
+# logs_show: the last answer, for a failure's context
+logs_show() { printf '    %s\n' "status $LOGS_CODE" "$LOGS_HEADERS" "${LOGS_BODY:0:600}" >&2; }
+# logs_tail_lines <n>: the body is n lines, each a CRI timestamp, a space
+# and a message, and X-Logs-Timestamp-End is the last line's timestamp
+logs_tail_lines() {
+  local n
+  n=$(grep -c . <<<"$LOGS_BODY")
+  [ "$n" = "$1" ] && ! grep -qvE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{9}Z ' <<<"$LOGS_BODY" \
+    && [ "$(tail -n 1 <<<"$LOGS_BODY" | cut -d' ' -f1)" = "$(logs_header X-Logs-Timestamp-End)" ]
 }
 
 phase "assert: waiting for the outage backlog and the incarnations to land"
@@ -724,6 +802,42 @@ while [ -n "$($KUBECTL -n observability get pods -l app=blobs-compactor -o name)
   [ $SECONDS -lt $deadline ] || fail "the compactor's pod is still there 330s after scaling to 0"
   sleep 2
 done
+
+# The read-only logs API, blobs-compactor serve, in a pod of its own while
+# no compactor folds $CLUSTER: a line the agent uploads now is in raw1/
+# only, so the API can only answer it from there.
+$KUBECTL -n observability delete pod logs-serve --ignore-not-found >/dev/null 2>&1
+$KUBECTL -n observability run logs-serve --restart=Never --image="$COMPACTOR_IMAGE" --overrides="{
+  \"apiVersion\": \"v1\", \"spec\": {\"automountServiceAccountToken\": false, \"containers\": [{
+    \"name\": \"logs-serve\", \"image\": \"$COMPACTOR_IMAGE\", \"imagePullPolicy\": \"Never\",
+    \"args\": [\"serve\"], \"envFrom\": [{\"secretRef\": {\"name\": \"blobs-compactor-s3\"}}],
+    \"env\": [{\"name\": \"CLUSTER_NAME\", \"value\": \"$CLUSTER\"}, {\"name\": \"S3_BUCKET\", \"value\": \"$BUCKET\"},
+      {\"name\": \"S3_ENDPOINT\", \"value\": \"versitygw.default.svc.cluster.local:7070\"}, {\"name\": \"S3_TLS\", \"value\": \"off\"},
+      {\"name\": \"LOGS_LISTEN\", \"value\": \":8080\"},
+      {\"name\": \"PARQUET_KEYS_DIR\", \"value\": \"/etc/blobs-compactor/parquet-keys\"}],
+    \"volumeMounts\": [{\"name\": \"parquet-keys\", \"mountPath\": \"/etc/blobs-compactor/parquet-keys\", \"readOnly\": true}]}],
+  \"volumes\": [{\"name\": \"parquet-keys\", \"secret\": {\"secretName\": \"blobs-compactor-parquet-keys\"}}]}}" >/dev/null
+$KUBECTL -n observability wait --for=condition=Ready pod/logs-serve --timeout=120s >/dev/null \
+  || { $KUBECTL -n observability logs pod/logs-serve || true; fail "blobs-compactor serve is not ready"; }
+logs_forward observability pod/logs-serve 18082 \
+  || { $KUBECTL -n observability logs pod/logs-serve || true; fail "no logs API on the serve pod's port 8080"; }
+GEN_POD=$($KUBECTL get pods -l app=log-generator -o jsonpath='{.items[0].metadata.name}')
+SERVE_MARKER="serve-marker-$(date +%s)"
+$KUBECTL exec deploy/log-generator -- sh -c "echo '$SERVE_MARKER' > /proc/1/fd/1"
+deadline=$((SECONDS + 150))
+while logs_get 18082 "/api/v1/logs/n/default/$GEN_POD/app?grep=$SERVE_MARKER&tail=0"; [ "$LOGS_BODY" != "$SERVE_MARKER" ]; do
+  [ $SECONDS -lt $deadline ] || break
+  sleep 5
+done
+serve_marker() {
+  [ "$LOGS_BODY" = "$SERVE_MARKER" ] && logs_is 200 "text/plain; charset=utf-8" X-Logs-Source=blob X-Logs-Pod-Phase=Running \
+    X-Logs-Tail-Effect=all
+}
+logs_expect "serve: a line the agent uploaded while no compactor runs is served, once, from raw1/" serve_marker
+assert "serve: that line is in raw1/ and in no hourly object" \
+  "SELECT (SELECT count(*) FROM logs WHERE message = '$SERVE_MARKER') = 1
+      AND (SELECT count(*) FROM $(tier "s3://$BUCKET/hourly/$CLUSTER/logs/*/[0-9][0-9]") WHERE message = '$SERVE_MARKER') = 0"
+$KUBECTL -n observability delete pod logs-serve --wait=false >/dev/null
 
 assert "the compactor's own metrics reach the blobs through the agent's scrape" \
   "SELECT count(*) > 0 FROM metrics WHERE pod LIKE 'blobs-compactor-%' AND name = 'blobs_compactor_last_success_timestamp_seconds'"
@@ -970,6 +1084,54 @@ elif spool_sh "find /spool -type f -exec stat -c '%Y %n' {} +"; then
 else
   echo "  FAIL: could not list the spool: $POD_LOG" >&2; ERRORS=$((ERRORS + 1))
 fi
+
+# ------------------------------------------------------------- logs API --
+
+# logs_api <local port> <the generator's phase> <reused's phase>: the logs
+# API's answers for the generator, its markers, the terminated pod
+# 'reused' (its latest incarnation), and the errors
+gen_tail() {
+  logs_is 200 "text/plain; charset=utf-8" X-Logs-Source=blob "X-Logs-Pod-Phase=$1" X-Logs-Tail-Effect=cap && logs_tail_lines 5
+}
+once() { [ "$LOGS_BODY" = "$1" ] && logs_is 200 "text/plain; charset=utf-8" X-Logs-Tail-Effect=all; }
+reused() {
+  local phase=$1
+  # a run that crossed midnight UTC reads the day before from the daily tier
+  [ "$LOGS_BODY" = "[pod/reused/reused] reused incarnation 3" ] || return 1
+  logs_is 200 "text/plain; charset=utf-8" X-Logs-Source=blob X-Logs-Tail-Effect=all "X-Logs-Pod-Phase=$phase" \
+    || { [ "$(date -u +%F)" != "$RUN_DATE" ] && logs_is 200 "text/plain; charset=utf-8" X-Logs-Pod-Phase=Archived; }
+}
+problem() { logs_is "$1" application/problem+json && grep -qF "\"status\":$1,\"detail\":\"$2\"" <<<"$LOGS_BODY"; }
+openapi() { logs_is 200 application/openapi+json && grep -q '"operationId": *"get-pod-logs-container"' <<<"$LOGS_BODY"; }
+logs_api() {
+  local port=$1 m
+  logs_get "$port" "/api/v1/logs/n/default/$GEN_POD/app?tail=5&timestamps=true"
+  logs_expect "logs API: the generator's last 5 lines, timestamped, as text/plain, X-Logs-* headers" gen_tail "$2"
+  for m in "$MARKER" "$OUTAGE_MARKER" "$PUT_MARKER"; do
+    logs_get "$port" "/api/v1/logs/n/default/$GEN_POD?grep=$m&tail=0"
+    logs_expect "logs API: $m once" once "$m"
+  done
+  logs_get "$port" "/api/v1/logs/n/default/reused?prefix=true"
+  logs_expect "logs API: the terminated pod 'reused' is its latest incarnation, phase $3" reused "$3"
+  logs_get "$port" "/api/v1/logs/n/default/no-such-pod"
+  logs_expect "logs API: an unknown pod is a 404 problem" problem 404 "no archived logs for default/no-such-pod"
+  logs_get "$port" "/api/v1/logs/n/default/reused/nope"
+  logs_expect "logs API: an unknown container is a 404 problem that names the known ones" \
+    problem 404 'container \"nope\" not found in pod default/reused, known containers: [reused]'
+  logs_get "$port" "/api/v1/logs/n/default/reused?source=k8s"
+  logs_expect "logs API: source=k8s is a 400 problem" \
+    problem 400 "invalid source value: this server has no k8s source, use 'blob' or omit it"
+  logs_get "$port" "/openapi.json"
+  logs_expect "logs API: /openapi.json is the spec" openapi
+}
+phase "assert: the logs API ($CLUSTER: encrypted tiers, raw1/ in the bucket)"
+$KUBECTL -n observability rollout status deployment/blobs-compactor --timeout=180s >/dev/null
+logs_forward observability svc/blobs-compactor-logs 18080 || fail "no logs API on svc/blobs-compactor-logs in observability"
+logs_api 18080 Running Succeeded
+# stock Fluent Bit ships no podindex: the phase is unknown
+phase "assert: the logs API ($PUT_CLUSTER: plain tiers, the spool)"
+logs_forward "$PUT_NS" svc/blobs-compactor-logs 18081 || fail "no logs API on svc/blobs-compactor-logs in $PUT_NS"
+logs_api 18081 Unknown Unknown
 
 echo
 if [ "$ERRORS" -gt 0 ]; then

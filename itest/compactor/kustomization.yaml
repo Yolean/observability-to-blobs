@@ -14,6 +14,10 @@ namespace: observability
 resources:
 - ../../compactor/deploy/base
 
+# the logs API, which test.sh asserts through a port-forward
+components:
+- ../../compactor/deploy/logs
+
 # test.sh runs the rollup in a pod of its own, which names the secret
 generatorOptions:
   disableNameSuffixHash: true

@@ -29,7 +29,7 @@ import (
 // Nothing is remembered between ticks that the bucket does not say, so a
 // start is an ordinary tick. One writer: replicas 1, strategy Recreate.
 //
-// The metrics and put listeners are bound before the first pass, so that
+// The metrics, put and logs listeners are bound before the first pass, so that
 // an address that cannot be bound ends the run at once, as does a
 // listener that fails later.
 func (c *compactor) run(ctx context.Context, cfg config) error {
@@ -38,7 +38,7 @@ func (c *compactor) run(ctx context.Context, cfg config) error {
 	if err != nil {
 		return fmt.Errorf("METRICS_ADDR: %w", err)
 	}
-	srvErr := make(chan error, 2)
+	srvErr := make(chan error, 3)
 	go func() { srvErr <- fmt.Errorf("METRICS_ADDR: %w", srv.Serve(ml)) }()
 	defer srv.Close()
 	if cfg.putListen != "" {
@@ -59,9 +59,27 @@ func (c *compactor) run(ctx context.Context, cfg config) error {
 			put.Shutdown(sctx)
 		}()
 	}
+	if cfg.logsListen != "" {
+		r, err := newLogsReader(cfg, c.raw, c.tiers, c.log)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		ll, err := net.Listen("tcp", cfg.logsListen)
+		if err != nil {
+			return fmt.Errorf("LOGS_LISTEN: %w", err)
+		}
+		logs := logsServer(cfg.logsListen, newLogsHandler(r, cfg.logsTimeout, cfg.logsConcurrency, c.log))
+		go func() { srvErr <- fmt.Errorf("LOGS_LISTEN: %w", logs.Serve(ll)) }()
+		defer func() {
+			sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			logs.Shutdown(sctx)
+		}()
+	}
 	c.log.Info("run", "cluster", c.l.cluster, "rolling", cfg.rolling.String(), "grace", cfg.grace.String(),
 		"past", cfg.past.String(), "raw_delete", cfg.rawDelete, "metrics", cfg.metricsAddr,
-		"raw_source", cfg.rawSource, "put", cfg.putListen,
+		"raw_source", cfg.rawSource, "put", cfg.putListen, "logs", cfg.logsListen,
 		"parquet_key", c.keyID, "parquet_keys", sortedIDs(c.keys))
 	c.keysJob(jobContext(ctx), cfg.jobTimeout)
 	tick := time.NewTicker(cfg.rolling)

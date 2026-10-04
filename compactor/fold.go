@@ -462,12 +462,16 @@ func (c *compactor) foldKeys(ctx context.Context, conn *sql.Conn, h time.Time, k
 // into the hour: key, and final, true for the keys the hour's final fold
 // read. An hour is final when any row is. A missing sidecar is no keys.
 func (c *compactor) readFolded(ctx context.Context, conn *sql.Conn, key string) (map[string]bool, error) {
+	return readFolded(ctx, conn, c.tiers, key)
+}
+
+func readFolded(ctx context.Context, conn *sql.Conn, tiers TierStore, key string) (map[string]bool, error) {
 	folded := map[string]bool{}
-	ok, err := c.tiers.Stat(ctx, key)
+	ok, err := tiers.Stat(ctx, key)
 	if err != nil || !ok {
 		return folded, err
 	}
-	rows, err := conn.QueryContext(ctx, "SELECT key, final FROM read_csv("+sqlString(c.tiers.URL(key))+
+	rows, err := conn.QueryContext(ctx, "SELECT key, final FROM read_csv("+sqlString(tiers.URL(key))+
 		", header = true, columns = {'key': 'VARCHAR', 'final': 'BOOLEAN'})")
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", key, err)

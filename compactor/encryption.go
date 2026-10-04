@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -65,29 +67,40 @@ func (c *compactor) loadKeys(ctx context.Context) error {
 	if c.keysDir == "" {
 		return nil
 	}
-	keys, err := loadParquetKeys(c.keysDir)
+	keys, err := addParquetKeys(ctx, c.db, c.keysDir, c.keys, c.log)
 	if err != nil {
 		return err
 	}
-	conn, err := c.db.Conn(ctx)
+	c.keys = keys
+	return nil
+}
+
+// addParquetKeys reads the keys directory dir and adds to db every key
+// that have lacks or holds with other content; it returns the directory's
+// keys, which the caller keeps as the next call's have.
+func addParquetKeys(ctx context.Context, db *sql.DB, dir string, have parquetKeys, log *slog.Logger) (parquetKeys, error) {
+	keys, err := loadParquetKeys(dir)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, err
 	}
 	defer conn.Close()
 	for _, id := range sortedIDs(keys) {
 		k := keys[id]
-		if c.keys[id] == k {
+		if have[id] == k {
 			continue
 		}
 		if _, err := conn.ExecContext(ctx, "PRAGMA add_parquet_key("+sqlString(id)+", "+sqlString(k)+")"); err != nil {
-			return fmt.Errorf("PRAGMA add_parquet_key(%s): %s", id, strings.ReplaceAll(err.Error(), k, "<redacted>"))
+			return nil, fmt.Errorf("PRAGMA add_parquet_key(%s): %s", id, strings.ReplaceAll(err.Error(), k, "<redacted>"))
 		}
-		if _, ok := c.keys[id]; ok {
-			c.log.Warn("parquet key changed: objects written with its previous content no longer read", "key", id)
+		if _, ok := have[id]; ok {
+			log.Warn("parquet key changed: objects written with its previous content no longer read", "key", id)
 		}
 	}
-	c.keys = keys
-	return nil
+	return keys, nil
 }
 
 func sortedIDs[V any](m map[string]V) []string {
@@ -252,13 +265,17 @@ func (c *compactor) locate(ctx context.Context, stem string) (tierObject, bool, 
 // which also aligns the columns of objects written before a raw1 column
 // was added.
 func (c *compactor) readTier(objs []tierObject, opts string) string {
+	return readTier(c.tiers, objs, opts)
+}
+
+func readTier(tiers TierStore, objs []tierObject, opts string) string {
 	var plain, parts []string
 	for _, o := range objs {
 		if o.keyID == "" {
-			plain = append(plain, c.tiers.URL(o.key))
+			plain = append(plain, tiers.URL(o.key))
 			continue
 		}
-		parts = append(parts, "SELECT * FROM read_parquet("+sqlString(c.tiers.URL(o.key))+", "+opts+
+		parts = append(parts, "SELECT * FROM read_parquet("+sqlString(tiers.URL(o.key))+", "+opts+
 			"encryption_config = "+encryptionConfig(o.keyID)+")")
 	}
 	if len(plain) > 0 {

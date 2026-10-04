@@ -24,20 +24,23 @@ const defaultHTTPFS = "/usr/local/lib/duckdb/httpfs.duckdb_extension"
 
 const usage = `usage: blobs-compactor <command>
 
-  run               fold and roll up on the loop's cadence (ROLLING_INTERVAL, GRACE, PAST_INTERVAL)
+  run               fold and roll up on the loop's cadence (ROLLING_INTERVAL, GRACE, PAST_INTERVAL),
+                    and serve the logs API on LOGS_LISTEN when it is set
+  serve             serve the logs API only, read-only, on LOGS_LISTEN (default :8080)
   fold <date> <HH>  fold one hour of raw1 into the hourly tier, as the loop would now
   rollup <date>     roll one day's changed hours up into the daily tier
   selftest          load httpfs, round-trip JSON lines, zstd and parquet through the engine
   version           print the engine and module versions
+  openapi           print the logs API's OpenAPI 3.1 spec
 
-fold, rollup and run take the cluster and the bucket from the environment
+fold, rollup, run and serve take the cluster and the bucket from the environment
 (compactor/README.md); date is YYYY-MM-DD, hours are UTC. Run fold and
 rollup by hand only while no loop runs: the tiers want a single writer.`
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	args := os.Args[1:]
-	nargs := map[string]int{"run": 0, "fold": 2, "rollup": 1, "selftest": 0, "version": 0}
+	nargs := map[string]int{"run": 0, "serve": 0, "fold": 2, "rollup": 1, "selftest": 0, "version": 0, "openapi": 0}
 	if n, ok := nargs[first(args)]; !ok || len(args) != n+1 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
@@ -50,6 +53,13 @@ func main() {
 		err = selftest(ctx, log)
 	case "version":
 		err = version(ctx, log)
+	case "openapi":
+		var b []byte
+		if b, err = openAPISpec(); err == nil {
+			_, err = os.Stdout.Write(b)
+		}
+	case "serve":
+		err = serve(ctx, log)
 	default:
 		err = command(ctx, log, args)
 	}
@@ -108,6 +118,47 @@ func command(ctx context.Context, log *slog.Logger, args []string) error {
 			log.Info("rollup", "day", args[1], "hours", 0)
 		}
 		return err
+	}
+}
+
+// serve runs the logs API without the loop: it reads the tiers, and in
+// bucket mode raw1/ in the bucket, and never writes. With RAW_SOURCE=spool
+// it reads the tiers only: the spool is the run process's.
+func serve(ctx context.Context, log *slog.Logger) error {
+	cfg, err := configFromEnv()
+	if err != nil {
+		return err
+	}
+	if cfg.logsListen == "" {
+		cfg.logsListen = ":8080"
+	}
+	if cfg.containerMemory > 0 {
+		cfg.logsMemoryLimit = cfg.containerMemory / 4 * 3
+	}
+	if err := version(ctx, log); err != nil {
+		return err
+	}
+	raw, tiers := cfg.bucketStores()
+	if cfg.rawSource != "bucket" {
+		raw = nil
+	}
+	r, err := newLogsReader(cfg, raw, tiers, log)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	srv := logsServer(cfg.logsListen, newLogsHandler(r, cfg.logsTimeout, cfg.logsConcurrency, log))
+	log.Info("serve", "cluster", cfg.cluster, "logs", cfg.logsListen, "lookback", cfg.logsLookback.String(),
+		"raw", raw != nil, "parquet_keys", sortedIDs(r.keys))
+	errc := make(chan error, 1)
+	go func() { errc <- srv.ListenAndServe() }()
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+		sctx, cancel := context.WithTimeout(context.Background(), cfg.logsTimeout+5*time.Second)
+		defer cancel()
+		return srv.Shutdown(sctx)
 	}
 }
 
