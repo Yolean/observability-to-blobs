@@ -400,11 +400,15 @@ while [ -n "$($KUBECTL -n "$PUT_NS" get pods -l app=blobs-compactor -o name)" ];
   [ $SECONDS -lt $deadline ] || fail "the put compactor's pod is still there 330s after scaling to 0"
   sleep 2
 done
+# the outage window, for the shipper's failed uploads (kubelet log
+# timestamps are UTC RFC 3339)
+PUT_DOWN_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 PUT_MARKER="put-marker-$(date +%s)"
 $KUBECTL exec deploy/log-generator -- sh -c "echo '$PUT_MARKER' > /proc/1/fd/1"
 sleep 60
 $KUBECTL -n "$PUT_NS" scale deployment/blobs-compactor --replicas=1 >/dev/null
 $KUBECTL -n "$PUT_NS" rollout status deployment/blobs-compactor --timeout=180s >/dev/null
+PUT_UP_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 echo "  the put compactor is back"
 
 # ---------------------------------------------------------------- assert --
@@ -899,13 +903,16 @@ assert "put: the generator's counter is contiguous in $PUT_CLUSTER's hourly logs
    SELECT count(*) > 0 AND bool_and(seen = (SELECT count(*) FROM range(lo, hi + 1) r WHERE r.range % 10 <> 0)) FROM per_pod"
 assert "put: no raw1/$PUT_CLUSTER/ object is in the bucket (the agent's raw1/$CLUSTER/ ones are)" \
   "SELECT (SELECT count(*) FROM glob('s3://$BUCKET/raw1/$PUT_CLUSTER/*/*/*/*')) = 0 AND (SELECT count(*) FROM $RAW_KEYS) > 0"
-if ! shipper_logs=$($KUBECTL -n "$PUT_NS" logs ds/stock-shipper 2>&1); then
-  echo "  FAIL: could not read the stock shipper's logs: $shipper_logs" >&2; ERRORS=$((ERRORS + 1))
+if ! shipper_logs=$($KUBECTL -n "$PUT_NS" logs ds/stock-shipper 2>&1) \
+  || ! outage_logs=$($KUBECTL -n "$PUT_NS" logs ds/stock-shipper --timestamps --since-time="$PUT_DOWN_AT" 2>&1); then
+  echo "  FAIL: could not read the stock shipper's logs: $shipper_logs $outage_logs" >&2; ERRORS=$((ERRORS + 1))
 else
-  if grep -q 'PutObject request failed' <<<"$shipper_logs"; then
-    echo "  PASS: the shipper's uploads failed while the put compactor was down"
+  # only the lines of the outage: the shipper's start, before the put
+  # compactor's, fails uploads too
+  if awk -v up="$PUT_UP_AT" '$1 < up' <<<"$outage_logs" | grep -q 'PutObject request failed'; then
+    echo "  PASS: the shipper's uploads failed while the put compactor was down ($PUT_DOWN_AT to $PUT_UP_AT)"
   else
-    echo "  FAIL: no upload of the shipper failed while the put compactor was down" >&2; ERRORS=$((ERRORS + 1))
+    echo "  FAIL: no upload of the shipper failed while the put compactor was down ($PUT_DOWN_AT to $PUT_UP_AT)" >&2; ERRORS=$((ERRORS + 1))
   fi
   if grep -iE 'will not retry|retry-exhausted|quarantine|cannot be retried' <<<"$shipper_logs" >&2; then
     echo "  FAIL: the shipper gave up on a chunk (lines above)" >&2; ERRORS=$((ERRORS + 1))
