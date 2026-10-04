@@ -1,0 +1,13 @@
+# The logs API, for clients of the URL contract (compactor/README.md,
+# "The logs API"); unauthenticated, so not for exposure as it is
+apiVersion: v1
+kind: Service
+metadata:
+  name: blobs-compactor-logs
+spec:
+  selector:
+    app: blobs-compactor
+  ports:
+  - name: logs
+    port: 8080
+    targetPort: logs

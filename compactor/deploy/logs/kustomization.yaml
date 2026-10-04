@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# The logs API (compactor/README.md, "The logs API"): the run process
+# serves container logs by URL on LOGS_LISTEN, from the tiers and the raw
+# objects it has not folded yet (in spool mode, the spool), and the Service
+# blobs-compactor-logs exposes it. The API has no authentication of its
+# own: put an authenticating proxy in front of it, and restrict who can
+# reach the Service. An overlay adds this component to ../base or
+# ../release, with or without ../spool; itest/compactor and
+# itest/compactor-put show both.
+resources:
+- service.yaml
+
+patches:
+- path: deployment.yaml
