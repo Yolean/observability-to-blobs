@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Optional, with ../spool: a NetworkPolicy that admits connections to the
+# put endpoint (port 9000) only from pods in the agents' namespace,
+# observability here; an overlay patches the namespaceSelector for its own,
+# or adds a peer per namespace. The metrics port (9090) stays open to every
+# source, as without the policy. It takes effect only where the cluster's
+# network plugin enforces NetworkPolicy, and the agents' upload path must
+# then come from pods, not from the host network. The put endpoint
+# authenticates every request either way (compactor/README.md, "The put
+# endpoint and spool mode"); this narrows who can reach it at all.
+resources:
+- networkpolicy.yaml

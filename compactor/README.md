@@ -144,6 +144,7 @@ compactor/
                      DeleteObjects, SigV4
   put.go             the put endpoint: PutObject, SigV4 verification, S3 errors
   spool.go           the spool: a RawSource on a local directory, durable writes
+  folded.go          the put endpoint's cache of the hours' folded keys
   fold.go            fold of one hour, the sidecar
   rollup.go          rollup of one day
   loop.go            run: the rolling and past passes
@@ -159,6 +160,8 @@ compactor/
   deploy/base/       the Deployment
   deploy/release/    resources: [../base] and the images: pin
   deploy/spool/      a component: spool mode, its volume and the put Service
+  deploy/spool-networkpolicy/
+                     an optional component: the put port open to the agents' namespace only
 ```
 
 The shell prototype `compact.sh` is gone: `blobs-compactor fold` writes
@@ -650,9 +653,16 @@ a slow disk slows scrapes, not acknowledgements.
 (ReadWriteOnce, 10Gi), mounted at `/spool`; a Service
 `blobs-compactor-put` on port 9000; the env above; `envFrom` the Secret
 `blobs-compactor-put` (`PUT_ACCESS_KEY_ID`, `PUT_SECRET_ACCESS_KEY`), which
-the overlay provides; `fsGroup` 65534; a readiness probe on the put port;
-and `replicas: 1` with `strategy: Recreate`, which the volume needs as
-much as the fold does. **Data the endpoint has acknowledged lives only on
+the overlay provides; `fsGroup` 65534 with `fsGroupChangePolicy:
+OnRootMismatch`, so a start does not walk a full spool to change its
+files' group; a readiness probe on the put port; and `replicas: 1` with
+`strategy: Recreate`, which the volume needs as much as the fold does.
+The optional component `deploy/spool-networkpolicy`, added after
+`deploy/spool`, is a NetworkPolicy that admits connections to port 9000
+only from the agents' namespace (`observability`; an overlay patches the
+`namespaceSelector` for its own) and leaves port 9090 open as before. It
+needs a network plugin that enforces NetworkPolicy and agents that upload
+from pod networking; the endpoint authenticates every request either way. **Data the endpoint has acknowledged lives only on
 that volume until its hour is folded**, about two hours of every agent's
 uploads, more while folds fail: losing the volume loses them. Give it the
 durability the raw tier would have had: a replicated storage class, or a

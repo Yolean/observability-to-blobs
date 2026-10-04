@@ -105,6 +105,7 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
   kubectl kustomize compactor/deploy/release >/dev/null
   kubectl kustomize itest/compactor >/dev/null
   kubectl kustomize itest/compactor-put >/dev/null
+  kubectl kustomize compactor/deploy/spool-networkpolicy >/dev/null
 fi
 
 [ "$MODE" != checks ] || exit 0
