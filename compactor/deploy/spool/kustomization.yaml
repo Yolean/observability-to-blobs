@@ -1,0 +1,34 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Spool mode (compactor/README.md, "The put endpoint and spool mode"): the
+# agents upload their raw objects to the compactor's put endpoint instead
+# of to the bucket, and the compactor keeps them on a persistent volume
+# until their hour's final fold has committed. Data the endpoint has
+# acknowledged lives only on that volume until then: size and back it up
+# accordingly, and keep replicas 1 with strategy Recreate (one writer, and
+# the ReadWriteOnce volume).
+#
+# An overlay adds this component to ../base or ../release and provides the
+# Secret blobs-compactor-put (PUT_ACCESS_KEY_ID, PUT_SECRET_ACCESS_KEY: the
+# key pair the agents sign with). The agents' out_s3 then points at the
+# Service: endpoint http://blobs-compactor-put.<namespace>.svc:9000, the
+# same bucket name as S3_BUCKET, use_put_object on. itest/compactor-put
+# shows an overlay.
+resources:
+- pvc.yaml
+- service.yaml
+
+patches:
+- path: deployment.yaml
+# envFrom has no merge key: a strategic merge would replace the base's list
+- target:
+    kind: Deployment
+    name: blobs-compactor
+  patch: |
+    - op: add
+      path: /spec/template/spec/containers/0/envFrom/-
+      value:
+        secretRef:
+          name: blobs-compactor-put

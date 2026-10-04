@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blobs-compactor
+spec:
+  # one writer, and the ReadWriteOnce spool: the old pod is gone before
+  # the new one mounts it
+  replicas: 1
+  strategy:
+    type: Recreate
+  template:
+    spec:
+      securityContext:
+        # the volume's files are the compactor's group's, where the
+        # volume plugin supports it
+        fsGroup: 65534
+      containers:
+      - name: compactor
+        env:
+        - name: RAW_SOURCE
+          value: spool
+        - name: SPOOL_DIR
+          value: /spool
+        - name: PUT_LISTEN
+          value: :9000
+        # the spool is a buffer: its files go after their hour's final fold
+        - name: RAW_DELETE
+          value: after-final
+        ports:
+        - name: put
+          containerPort: 9000
+        # the Service sends uploads only once the endpoint listens; while
+        # there is none, out_s3 buffers and retries
+        readinessProbe:
+          tcpSocket:
+            port: put
+          periodSeconds: 5
+        volumeMounts:
+        - name: spool
+          mountPath: /spool
+      volumes:
+      - name: spool
+        persistentVolumeClaim:
+          claimName: blobs-compactor-spool
