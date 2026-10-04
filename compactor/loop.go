@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -26,13 +28,40 @@ import (
 //
 // Nothing is remembered between ticks that the bucket does not say, so a
 // start is an ordinary tick. One writer: replicas 1, strategy Recreate.
+//
+// The metrics and put listeners are bound before the first pass, so that
+// an address that cannot be bound ends the run at once, as does a
+// listener that fails later.
 func (c *compactor) run(ctx context.Context, cfg config) error {
 	srv := &http.Server{Addr: cfg.metricsAddr, Handler: c.m, ReadHeaderTimeout: 10 * time.Second}
-	srvErr := make(chan error, 1)
-	go func() { srvErr <- srv.ListenAndServe() }()
+	ml, err := net.Listen("tcp", cfg.metricsAddr)
+	if err != nil {
+		return fmt.Errorf("METRICS_ADDR: %w", err)
+	}
+	srvErr := make(chan error, 2)
+	go func() { srvErr <- fmt.Errorf("METRICS_ADDR: %w", srv.Serve(ml)) }()
 	defer srv.Close()
+	if cfg.putListen != "" {
+		put, err := c.putServer(cfg)
+		if err != nil {
+			return err
+		}
+		pl, err := net.Listen("tcp", cfg.putListen)
+		if err != nil {
+			return fmt.Errorf("PUT_LISTEN: %w", err)
+		}
+		go func() { srvErr <- fmt.Errorf("PUT_LISTEN: %w", put.Serve(pl)) }()
+		// a stop lets the uploads in flight finish: each is answered
+		// only once it is synced
+		defer func() {
+			sctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			put.Shutdown(sctx)
+		}()
+	}
 	c.log.Info("run", "cluster", c.l.cluster, "rolling", cfg.rolling.String(), "grace", cfg.grace.String(),
 		"past", cfg.past.String(), "raw_delete", cfg.rawDelete, "metrics", cfg.metricsAddr,
+		"raw_source", cfg.rawSource, "put", cfg.putListen,
 		"parquet_key", c.keyID, "parquet_keys", sortedIDs(c.keys))
 	c.keysJob(jobContext(ctx), cfg.jobTimeout)
 	tick := time.NewTicker(cfg.rolling)
@@ -54,6 +83,20 @@ func (c *compactor) run(ctx context.Context, cfg config) error {
 		case <-tick.C:
 		}
 	}
+}
+
+// putServer is the put endpoint's server, which stores into the spool
+// the fold reads.
+func (c *compactor) putServer(cfg config) (*http.Server, error) {
+	sp, ok := c.raw.(*spool)
+	if !ok {
+		return nil, errors.New("PUT_LISTEN: the raw source is not a spool")
+	}
+	c.foldedKeys = newFoldedKeys(c.readHourFolded)
+	h := &putServer{l: c.l, bucket: cfg.bucket, region: cfg.region, keyID: cfg.putKeyID, secret: cfg.putKey,
+		maxBytes: cfg.putMaxBytes, spool: sp, folded: c.foldedKeys, m: c.m, log: c.log, now: time.Now}
+	return &http.Server{Addr: cfg.putListen, Handler: h, ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout: 5 * time.Minute, IdleTimeout: 2 * time.Minute}, nil
 }
 
 func dayOf(t time.Time) time.Time { return t.UTC().Truncate(24 * time.Hour) }

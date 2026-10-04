@@ -27,6 +27,10 @@ CONTEXT=${CONTEXT:-node-agent}
 IMAGE=node-agent:itest
 BUCKET=node-agent
 CLUSTER=itest
+# the second compactor, in spool mode, and the stock Fluent Bit that
+# uploads to its put endpoint (itest/compactor-put)
+PUT_NS=observability-put
+PUT_CLUSTER=itest-put
 S3_PORT=${S3_PORT:-30070}
 # the compactor's parquet keys (itest/compactor), kept across runs so that
 # a bucket left by `up` stays readable: PARQUET_KEYS_DIR=$PARQUET_KEYS local/blobs.sh
@@ -40,6 +44,36 @@ phase() { printf '\n==> %s\n' "$*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 need() {
   command -v "$1" >/dev/null 2>&1 || fail "missing tool: $1 ($2)"
+}
+# run_pod <namespace> <name> <image> <overrides JSON, or ""> <command...>:
+# a pod that runs to completion; its log is in POD_LOG, and it returns
+# non-zero unless the pod succeeded
+run_pod() {
+  local ns=$1 name=$2 image=$3 overrides=$4 phase deadline
+  shift 4
+  local args=(--restart=Never --image="$image")
+  [ -z "$overrides" ] || args+=(--overrides="$overrides")
+  $KUBECTL -n "$ns" delete pod "$name" --ignore-not-found >/dev/null 2>&1
+  $KUBECTL -n "$ns" run "$name" "${args[@]}" --command -- "$@" >/dev/null
+  deadline=$((SECONDS + 300))
+  while :; do
+    phase=$($KUBECTL -n "$ns" get pod "$name" -o jsonpath='{.status.phase}')
+    case "$phase" in (Succeeded|Failed) break;; esac
+    [ $SECONDS -lt $deadline ] || fail "pod $ns/$name still $phase after 300s"
+    sleep 2
+  done
+  POD_LOG=$($KUBECTL -n "$ns" logs "pod/$name")
+  $KUBECTL -n "$ns" delete pod "$name" >/dev/null
+  [ "$phase" = Succeeded ]
+}
+# spool_sh <command>: a shell command, without double quotes, in a pod
+# that mounts the put compactor's spool at /spool (ReadWriteOnce: pods on
+# its node share it)
+spool_sh() {
+  run_pod "$PUT_NS" spool-sh busybox:1.37 "{\"apiVersion\": \"v1\", \"spec\": {\"containers\": [{
+    \"name\": \"spool-sh\", \"image\": \"busybox:1.37\", \"command\": [\"sh\", \"-c\", \"$1\"],
+    \"volumeMounts\": [{\"name\": \"spool\", \"mountPath\": \"/spool\"}]}],
+    \"volumes\": [{\"name\": \"spool\", \"persistentVolumeClaim\": {\"claimName\": \"blobs-compactor-spool\"}}]}}" sh -c "$1"
 }
 
 need docker "https://docs.docker.com/engine/install/"
@@ -70,6 +104,8 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
   kubectl kustomize itest/k8s-docker >/dev/null
   kubectl kustomize compactor/deploy/release >/dev/null
   kubectl kustomize itest/compactor >/dev/null
+  kubectl kustomize itest/compactor-put >/dev/null
+  kubectl kustomize compactor/deploy/spool-networkpolicy >/dev/null
 fi
 
 [ "$MODE" != checks ] || exit 0
@@ -171,13 +207,15 @@ $KUBECTL -n observability rollout status daemonset/node-agent --timeout=180s >/d
 # the user's data: leave it alone.
 if [ "$MODE" != up ]; then
 phase "cluster: purge bucket prefix from earlier runs"
-# the compactor writes hourly/ and daily/: stop it first, its pod gone
+# the compactors write hourly/ and daily/: stop them first, their pods gone
 $KUBECTL -n observability delete deployment blobs-compactor --ignore-not-found --cascade=foreground >/dev/null
+$KUBECTL -n "$PUT_NS" delete deployment blobs-compactor --ignore-not-found --cascade=foreground >/dev/null
 $KUBECTL delete pod purge-bucket --ignore-not-found >/dev/null 2>&1
+# (the trailing slash: raw1/itest is a prefix of raw1/itest-put too)
 $KUBECTL run purge-bucket --restart=Never --image=amazon/aws-cli:2.22.35 \
   --env=AWS_ACCESS_KEY_ID=demoaccess --env=AWS_SECRET_ACCESS_KEY=demosecret \
   --env=AWS_DEFAULT_REGION=us-east-1 \
-  --command -- sh -ec "for p in raw1 hourly daily; do aws --endpoint-url http://versitygw:7070 s3 rm --recursive --quiet s3://$BUCKET/\$p/$CLUSTER; done" >/dev/null
+  --command -- sh -ec "for c in $CLUSTER $PUT_CLUSTER; do for p in raw1 hourly daily; do aws --endpoint-url http://versitygw:7070 s3 rm --recursive --quiet s3://$BUCKET/\$p/\$c/; done; done" >/dev/null
 # a failed purge leaves the old corpus under every assertion: stop on it
 deadline=$((SECONDS + 600))
 while :; do
@@ -188,9 +226,13 @@ while :; do
 done
 if [ "$purge" != Succeeded ]; then
   $KUBECTL logs pod/purge-bucket >&2 || true
-  fail "could not purge s3://$BUCKET/{raw1,hourly,daily}/$CLUSTER (pod/purge-bucket $purge, logs above)"
+  fail "could not purge s3://$BUCKET/{raw1,hourly,daily}/{$CLUSTER,$PUT_CLUSTER}/ (pod/purge-bucket $purge, logs above)"
 fi
 $KUBECTL delete pod purge-bucket >/dev/null
+# the put compactor's spool outlives its pods: it starts empty too
+if $KUBECTL -n "$PUT_NS" get pvc blobs-compactor-spool >/dev/null 2>&1; then
+  spool_sh "rm -rf /spool/raw1 /spool/_tmp" || fail "could not empty the spool: $POD_LOG"
+fi
 
 # Startup output (the burst, the >16 KiB line, restart counting) must land
 # after the purge, so the pods that produce it start over. On a reused
@@ -227,6 +269,12 @@ $KUBECTL -n observability create secret generic blobs-compactor-parquet-keys --f
 $KUBECTL apply -k itest/compactor
 $KUBECTL -n observability rollout restart deployment/blobs-compactor >/dev/null
 $KUBECTL -n observability rollout status deployment/blobs-compactor --timeout=120s
+# The second compactor, in spool mode, and stock Fluent Bit shipping to
+# its put endpoint. A new shipper pod reads every pod log from its start.
+$KUBECTL apply -k itest/compactor-put
+$KUBECTL -n "$PUT_NS" rollout restart deployment/blobs-compactor daemonset/stock-shipper >/dev/null
+$KUBECTL -n "$PUT_NS" rollout status deployment/blobs-compactor --timeout=180s
+$KUBECTL -n "$PUT_NS" rollout status daemonset/stock-shipper --timeout=180s
 
 if [ "$MODE" = up ]; then
   cat <<INFO
@@ -243,6 +291,12 @@ a view per table over it:
 
   S3_ENDPOINT=127.0.0.1:$S3_PORT local/blobs.sh -c "SELECT \"table\", count(*) FROM raw GROUP BY 1"
   local/blobs.sh $CLUSTER/\$(date -u +%Y-%m-%d/%H)            # one hour, interactive
+
+In namespace $PUT_NS, stock Fluent Bit uploads the same container logs
+as cluster $PUT_CLUSTER to a second compactor's put endpoint, which spools
+them on its volume and folds them into hourly/$PUT_CLUSTER/ (plain):
+
+  kubectl --context=$CONTEXT -n $PUT_NS logs deploy/blobs-compactor -f
 
 The compactor folds the raw objects into hourly/$CLUSTER/ every 20 s,
 encrypted with the keys in $PARQUET_KEYS (local/blobs.sh adds views
@@ -311,6 +365,52 @@ for i in 1 2 3; do
   # agent sees it (README.md, "Known gaps")
   sleep 12
 done
+
+# The put endpoint with a client other than out_s3, aws-cli: a raw object
+# for an hour three hours ago, which the past pass folds in full, so the
+# hour is final and the object goes from the spool; the same PUT with a
+# wrong secret, and without a signature, both refused.
+phase "scenario: PUTs to the put endpoint: a late object, a wrong signature, none"
+LATE_PUT_HOUR=$(duckdb -noheader -csv -c "SELECT strftime(date_trunc('hour', now() AT TIME ZONE 'UTC') - INTERVAL 3 HOUR, '%Y-%m-%d/%H')")
+LATE_PUT_UID=$(duckdb -noheader -csv -c "SELECT uuid()")
+LATE_PUT_KEY=raw1/$PUT_CLUSTER/$LATE_PUT_HOUR/itest-late/0000-$LATE_PUT_UID.jsonl.zst
+late=$(mktemp "${TMPDIR:-/tmp}/itest-late.XXXXXX")
+duckdb -c "COPY (
+  SELECT 'logs' AS \"table\", t AS time, t AS ts, '$PUT_CLUSTER' AS cluster, 'itest-late' AS node, 'itest-late' AS namespace,
+         'late' AS pod, '$LATE_PUT_UID' AS pod_uid, 'late' AS container, 0 AS restart, 'stdout' AS stream, 'late put line ' || i AS message
+  FROM (SELECT i, strptime('$LATE_PUT_HOUR', '%Y-%m-%d/%H')::TIMESTAMP_NS + to_seconds(i) AS t FROM range(3) r(i))
+) TO '$late' (FORMAT json, COMPRESSION zstd)" >/dev/null || fail "the late object"
+late_b64=$(base64 < "$late" | tr -d '\n')
+rm -f "$late"
+put="aws --endpoint-url http://blobs-compactor-put:9000 s3api put-object --bucket $BUCKET --body /tmp/late.jsonl.zst --key"
+run_pod "$PUT_NS" put-probe amazon/aws-cli:2.22.35 "" sh -c "
+  export AWS_ACCESS_KEY_ID=itestput AWS_SECRET_ACCESS_KEY=itest-put-secret AWS_DEFAULT_REGION=us-east-1
+  echo $late_b64 | base64 -d > /tmp/late.jsonl.zst
+  $put $LATE_PUT_KEY >/dev/null && echo late-stored
+  AWS_SECRET_ACCESS_KEY=wrong $put raw1/$PUT_CLUSTER/$LATE_PUT_HOUR/itest-late/0001-wrong.jsonl.zst 2>&1; echo wrong-exit \$?
+  $put raw1/$PUT_CLUSTER/$LATE_PUT_HOUR/itest-late/0002-unsigned.jsonl.zst --no-sign-request 2>&1; echo unsigned-exit \$?" || true
+PUT_PROBE=$POD_LOG
+while IFS= read -r l; do echo "  $l"; done <<<"$PUT_PROBE"
+
+# Fluent Bit buffers while the put endpoint is gone and uploads once it is
+# back, so a line written while the compactor is down arrives, once.
+phase "scenario: the put compactor down for 60 s, a marker in flight"
+$KUBECTL -n "$PUT_NS" scale deployment/blobs-compactor --replicas=0 >/dev/null
+deadline=$((SECONDS + 330))
+while [ -n "$($KUBECTL -n "$PUT_NS" get pods -l app=blobs-compactor -o name)" ]; do
+  [ $SECONDS -lt $deadline ] || fail "the put compactor's pod is still there 330s after scaling to 0"
+  sleep 2
+done
+# the outage window, for the shipper's failed uploads (kubelet log
+# timestamps are UTC RFC 3339)
+PUT_DOWN_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+PUT_MARKER="put-marker-$(date +%s)"
+$KUBECTL exec deploy/log-generator -- sh -c "echo '$PUT_MARKER' > /proc/1/fd/1"
+sleep 60
+$KUBECTL -n "$PUT_NS" scale deployment/blobs-compactor --replicas=1 >/dev/null
+$KUBECTL -n "$PUT_NS" rollout status deployment/blobs-compactor --timeout=180s >/dev/null
+PUT_UP_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+echo "  the put compactor is back"
 
 # ---------------------------------------------------------------- assert --
 
@@ -588,29 +688,34 @@ FOLDED="read_csv('s3://$BUCKET/hourly/$CLUSTER/_folded/*/*.csv', header = true, 
 RAW_KEYS="glob('s3://$BUCKET/raw1/$CLUSTER/*/*/*/*.jsonl.zst')"
 q "COPY (SELECT file FROM $RAW_KEYS) TO '$SNAPSHOT' (FORMAT csv, HEADER true)" >/dev/null
 SNAPSHOT_AT=$(($(date +%s) + 1))
-# compactor_metric <name> <job>: that sample of the running compactor's /metrics
+# compactor_metric <name> <job> [namespace]: that sample of the running
+# compactor's /metrics
 compactor_metric() {
-  local pod
-  pod=$($KUBECTL -n observability get pods -l app=blobs-compactor -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || return 0
+  local pod ns=${3:-observability}
+  pod=$($KUBECTL -n "$ns" get pods -l app=blobs-compactor -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || return 0
   [ -n "$pod" ] || return 0
-  $KUBECTL get --raw "/api/v1/namespaces/observability/pods/$pod:9090/proxy/metrics" 2>/dev/null \
+  $KUBECTL get --raw "/api/v1/namespaces/$ns/pods/$pod:9090/proxy/metrics" 2>/dev/null \
     | awk -v k="$1{job=\"$2\"}" '$1 == k { print $2 }'
 }
-# started_since <job> <epoch seconds>: the job's last run succeeded and
-# started after then (its end less its duration)
+# started_since <job> <epoch seconds> [namespace]: the job's last run
+# succeeded and started after then (its end less its duration)
 started_since() {
   local end took
-  end=$(compactor_metric blobs_compactor_last_success_timestamp_seconds "$1")
-  took=$(compactor_metric blobs_compactor_last_duration_seconds "$1")
+  end=$(compactor_metric blobs_compactor_last_success_timestamp_seconds "$1" "${3:-}")
+  took=$(compactor_metric blobs_compactor_last_duration_seconds "$1" "${3:-}")
   [ -n "$end" ] && [ -n "$took" ] && awk -v e="$end" -v d="$took" -v t="$2" 'BEGIN { exit !(e - d > t) }'
 }
+# the put compactor too: by then its spool had every upload the shipper
+# made before the snapshot, so between them its passes folded them all
 deadline=$((SECONDS + 600))
-until started_since rolling "$SNAPSHOT_AT" && started_since past "$SNAPSHOT_AT"; do
+until started_since rolling "$SNAPSHOT_AT" && started_since past "$SNAPSHOT_AT" \
+  && started_since rolling "$SNAPSHOT_AT" "$PUT_NS" && started_since past "$SNAPSHOT_AT" "$PUT_NS"; do
   if [ $SECONDS -ge $deadline ]; then
     $KUBECTL -n observability logs deploy/blobs-compactor --tail=40 || true
-    fail "the compactor has not completed a rolling and a past pass in the 600s after the snapshot"
+    $KUBECTL -n "$PUT_NS" logs deploy/blobs-compactor --tail=40 || true
+    fail "the compactors have not each completed a rolling and a past pass in the 600s after the snapshot"
   fi
-  echo "  waiting for a rolling and a past pass that start after the snapshot"
+  echo "  waiting for a rolling and a past pass of each compactor that start after the snapshot"
   sleep 10
 done
 $KUBECTL -n observability scale deployment/blobs-compactor --replicas=0 >/dev/null
@@ -778,6 +883,93 @@ case "$plain" in
   (*) echo "  FAIL: encryption: a read without the key gave: $plain" >&2; ERRORS=$((ERRORS + 1)) ;;
 esac
 $KUBECTL -n observability scale deployment/blobs-compactor --replicas=1 >/dev/null
+
+# ------------------------------------------------------- put and spool --
+
+phase "assert: the put endpoint and spool mode ($PUT_CLUSTER)"
+# put_logs: a FROM clause over $PUT_CLUSTER's hourly logs (plain objects)
+put_logs() { tier "s3://$BUCKET/hourly/$PUT_CLUSTER/logs/*/[0-9][0-9]"; }
+PUT_FOLDED="read_csv('s3://$BUCKET/hourly/$PUT_CLUSTER/_folded/*/*.csv', header = true, columns = {'key': 'VARCHAR', 'final': 'BOOLEAN'}, filename = true)"
+assert "put: stock Fluent Bit's lines reach $PUT_CLUSTER's hourly tier with the identity from the CRI path" \
+  "SELECT count(*) > 0 AND bool_and(cluster = '$PUT_CLUSTER' AND node <> '' AND namespace = 'default' AND length(pod_uid) = 36
+     AND container = 'app' AND restart IS NOT NULL AND stream IN ('stdout', 'stderr')) FROM $(put_logs) WHERE pod LIKE 'log-generator-%'"
+for m in "$MARKER" "$OUTAGE_MARKER" "$PUT_MARKER"; do
+  assert "put: $m is in $PUT_CLUSTER's hourly logs exactly once" \
+    "SELECT count(*) = 1 FROM $(put_logs) WHERE message = '$m'"
+done
+assert "put: the generator's counter is contiguous in $PUT_CLUSTER's hourly logs, the put compactor's downtime included" \
+  "WITH c AS (SELECT DISTINCT pod, CAST(json_extract(message, '$.count') AS INTEGER) AS n FROM $(put_logs)
+     WHERE pod LIKE 'log-generator-%' AND message LIKE '%hello from log-generator%' AND time > $SINCE),
+   per_pod AS (SELECT pod, count(*) AS seen, min(n) AS lo, max(n) AS hi FROM c GROUP BY pod)
+   SELECT count(*) > 0 AND bool_and(seen = (SELECT count(*) FROM range(lo, hi + 1) r WHERE r.range % 10 <> 0)) FROM per_pod"
+assert "put: no raw1/$PUT_CLUSTER/ object is in the bucket (the agent's raw1/$CLUSTER/ ones are)" \
+  "SELECT (SELECT count(*) FROM glob('s3://$BUCKET/raw1/$PUT_CLUSTER/*/*/*/*')) = 0 AND (SELECT count(*) FROM $RAW_KEYS) > 0"
+if ! shipper_logs=$($KUBECTL -n "$PUT_NS" logs ds/stock-shipper 2>&1) \
+  || ! outage_logs=$($KUBECTL -n "$PUT_NS" logs ds/stock-shipper --timestamps --since-time="$PUT_DOWN_AT" 2>&1); then
+  echo "  FAIL: could not read the stock shipper's logs: $shipper_logs $outage_logs" >&2; ERRORS=$((ERRORS + 1))
+else
+  # only the lines of the outage: the shipper's start, before the put
+  # compactor's, fails uploads too
+  if awk -v up="$PUT_UP_AT" '$1 < up' <<<"$outage_logs" | grep -q 'PutObject request failed'; then
+    echo "  PASS: the shipper's uploads failed while the put compactor was down ($PUT_DOWN_AT to $PUT_UP_AT)"
+  else
+    echo "  FAIL: no upload of the shipper failed while the put compactor was down ($PUT_DOWN_AT to $PUT_UP_AT)" >&2; ERRORS=$((ERRORS + 1))
+  fi
+  if grep -iE 'will not retry|retry-exhausted|quarantine|cannot be retried' <<<"$shipper_logs" >&2; then
+    echo "  FAIL: the shipper gave up on a chunk (lines above)" >&2; ERRORS=$((ERRORS + 1))
+  else
+    echo "  PASS: the shipper gave up on no chunk"
+  fi
+fi
+# the PUTs of aws-cli
+if grep -q '^late-stored$' <<<"$PUT_PROBE"; then
+  echo "  PASS: put: aws-cli's signed PutObject is stored"
+else
+  echo "  FAIL: put: aws-cli's signed PutObject was not stored (output above)" >&2; ERRORS=$((ERRORS + 1))
+fi
+if grep -q 'SignatureDoesNotMatch' <<<"$PUT_PROBE" && grep -q '^wrong-exit [1-9]' <<<"$PUT_PROBE"; then
+  echo "  PASS: put: a PUT signed with a wrong secret is refused (SignatureDoesNotMatch)"
+else
+  echo "  FAIL: put: a PUT signed with a wrong secret was not refused (output above)" >&2; ERRORS=$((ERRORS + 1))
+fi
+if grep -q 'AccessDenied' <<<"$PUT_PROBE" && grep -q '^unsigned-exit [1-9]' <<<"$PUT_PROBE"; then
+  echo "  PASS: put: an unsigned PUT is refused (AccessDenied)"
+else
+  echo "  FAIL: put: an unsigned PUT was not refused (output above)" >&2; ERRORS=$((ERRORS + 1))
+fi
+assert "put: the late object's hour is final, its sidecar lists the key and the hour holds its lines" \
+  "SELECT (SELECT bool_or(final) AND count(*) FILTER (key = '$LATE_PUT_KEY') = 1
+           FROM read_csv('s3://$BUCKET/hourly/$PUT_CLUSTER/_folded/$LATE_PUT_HOUR.csv', header = true, columns = {'key': 'VARCHAR', 'final': 'BOOLEAN'}))
+      AND (SELECT count(*) = 3 FROM $(tier "s3://$BUCKET/hourly/$PUT_CLUSTER/logs/$LATE_PUT_HOUR") WHERE pod_uid = '$LATE_PUT_UID')"
+assert "put: no sidecar lists the refused keys" \
+  "SELECT count(*) = 0 FROM $PUT_FOLDED WHERE key LIKE '%/itest-late/0001-wrong.%' OR key LIKE '%/itest-late/0002-unsigned.%'"
+# The spool after the final folds: no file of a final hour is left, the
+# late object's hour included. Only files older than the last past pass's
+# start count: a late upload to a final hour waits for the next past pass,
+# and a file's time is its write's, which precedes its rename into the key
+# by the time the body took (30 s allowed). The final hours are read
+# first: an hour final then had its files of before that pass deleted by
+# the time of the listing.
+final_hours=$(q "SELECT DISTINCT regexp_extract(filename, '_folded/(.*)\\.csv\$', 1) AS h FROM $PUT_FOLDED WHERE final ORDER BY h")
+past_started=$($KUBECTL get --raw "/api/v1/namespaces/$PUT_NS/pods/$($KUBECTL -n "$PUT_NS" get pods -l app=blobs-compactor \
+    -o jsonpath='{.items[0].metadata.name}'):9090/proxy/metrics" 2>/dev/null \
+  | awk '$1 == "blobs_compactor_last_success_timestamp_seconds{job=\"past\"}" { e = $2 }
+         $1 == "blobs_compactor_last_duration_seconds{job=\"past\"}" { d = $2 }
+         END { if (e != "" && d != "") printf "%d\n", e - d - 30 }')
+if [ -z "$past_started" ]; then
+  echo "  FAIL: put: no past pass of the put compactor in its metrics" >&2; ERRORS=$((ERRORS + 1))
+elif spool_sh "find /spool -type f -exec stat -c '%Y %n' {} +"; then
+  spool_files=$(awk -v t="$past_started" '$1 < t { print $2 }' <<<"$POD_LOG")
+  echo "  the spool holds $(grep -c . <<<"$POD_LOG" || true) files, $(grep -c . <<<"$spool_files" || true) of them written before the last past pass; final hours: ${final_hours//$'\n'/ }"
+  left=$(for h in $final_hours; do grep -F "/spool/raw1/$PUT_CLUSTER/$h/" <<<"$spool_files" || true; done)
+  if grep -qxF "$LATE_PUT_HOUR" <<<"$final_hours" && [ -z "$left" ] && ! grep -qF /itest-late/ <<<"$spool_files"; then
+    echo "  PASS: put: the spool keeps no file of a final hour, the late object's included"
+  else
+    echo "  FAIL: put: the spool keeps files of final hours, or no hour is final: ${left:-none}" >&2; ERRORS=$((ERRORS + 1))
+  fi
+else
+  echo "  FAIL: could not list the spool: $POD_LOG" >&2; ERRORS=$((ERRORS + 1))
+fi
 
 echo
 if [ "$ERRORS" -gt 0 ]; then

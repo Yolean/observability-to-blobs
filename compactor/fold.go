@@ -38,6 +38,9 @@ type compactor struct {
 	// finalSeen is the latest previous hour seen final: a cache that spares
 	// the rolling pass a sidecar read, never state
 	finalSeen time.Time
+	// foldedKeys, with the put endpoint on, has every sidecar the folds
+	// read or commit, for the endpoint's PUTs of keys already folded
+	foldedKeys *foldedKeys
 
 	// Parquet encryption (encryption.go): the keys directory, "" without
 	// one; the active key id, "" to write plain objects; the keys the
@@ -50,7 +53,10 @@ type compactor struct {
 }
 
 func newCompactor(c config, log *slog.Logger) (*compactor, error) {
-	raw, tiers := c.stores()
+	raw, tiers, err := c.stores()
+	if err != nil {
+		return nil, err
+	}
 	httpfs, init := c.engineInit()
 	db, err := open(httpfs, init...)
 	if err != nil {
@@ -63,6 +69,9 @@ func newCompactor(c config, log *slog.Logger) (*compactor, error) {
 	cp := &compactor{l: layout{c.cluster}, raw: raw, tiers: tiers, db: db, grace: c.grace,
 		rawDelete: c.rawDelete, threads: c.threads, retries: retries, log: log, m: newMetrics(),
 		keysDir: c.parquetKeysDir, keyID: c.parquetKeyID}
+	if sp, ok := raw.(*spool); ok {
+		cp.m.spool = sp.stats
+	}
 	scratch := c.tempDir
 	if scratch == "" {
 		scratch = os.TempDir()
@@ -292,6 +301,7 @@ func (c *compactor) fold(ctx context.Context, h time.Time, listed []Object, now 
 	if err != nil {
 		return r, err
 	}
+	c.foldedKeys.set(h, folded)
 	for _, f := range folded {
 		r.final = r.final || f
 	}
@@ -353,6 +363,9 @@ func (c *compactor) fold(ctx context.Context, h time.Time, listed []Object, now 
 		if err := c.writeFolded(ctx, conn, sidecar, next); err != nil {
 			return r, err
 		}
+		// before any deletion below: a PUT that finds a file gone finds
+		// its key there
+		c.foldedKeys.set(h, next)
 		folded = next
 		r.wrote = true
 		r.final = r.final || r.full

@@ -9,7 +9,10 @@ kind: Kustomization
 # Parquet encryption is off: an overlay turns it on by mounting a Secret
 # of key files and setting PARQUET_KEYS_DIR and PARQUET_KEY_ID
 # (compactor/README.md, "Encryption").
+# ../spool is a component for spool mode: the agents upload to the
+# compactor's put endpoint, which keeps their objects on a volume until
+# folded (compactor/README.md, "The put endpoint and spool mode").
 # ../release adds the pinned image; itest/compactor shows an overlay,
-# encryption included.
+# encryption included, and itest/compactor-put one in spool mode.
 resources:
 - deployment.yaml

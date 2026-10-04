@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -221,6 +222,37 @@ func TestPastPassListsHourByHour(t *testing.T) {
 	for _, d := range []time.Time{day, next} {
 		if !w.exists(w.c.l.dailySidecar(d)) {
 			t.Fatalf("no rollup of %s", d)
+		}
+	}
+}
+
+// A put or metrics address that cannot be bound ends the run before its
+// first pass.
+func TestRunEndsOnAnAddressItCannotBind(t *testing.T) {
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close()
+	for _, tc := range []struct{ metrics, put, want string }{
+		{"127.0.0.1:0", taken.Addr().String(), "PUT_LISTEN"},
+		{taken.Addr().String(), "127.0.0.1:0", "METRICS_ADDR"},
+	} {
+		w := newSpoolWorld(t)
+		cfg := config{metricsAddr: tc.metrics, putListen: tc.put, bucket: "b", region: "us-east-1", putKeyID: "k",
+			putKey: "s", putMaxBytes: 1 << 20, rolling: time.Minute, past: time.Hour, jobTimeout: time.Minute}
+		done := make(chan error, 1)
+		go func() { done <- w.c.run(w.ctx, cfg) }()
+		select {
+		case err := <-done:
+			if len(w.c.m.runs) != 0 {
+				t.Fatalf("passes ran before the run ended (%v): %v", err, w.c.m.runs)
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("run: %v, want a %s error", err, tc.want)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatalf("run did not end on %s it cannot bind", tc.want)
 		}
 	}
 }

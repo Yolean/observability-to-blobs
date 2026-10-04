@@ -1,0 +1,12 @@
+# The spool: raw objects from upload until their hour's final fold, at most
+# about 2h of every agent's uploads (compactor/README.md, "The loop"), plus
+# whatever accumulates while folds fail.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: blobs-compactor-spool
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
