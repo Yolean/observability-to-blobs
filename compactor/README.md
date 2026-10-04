@@ -550,7 +550,9 @@ with `send_content_md5 on`, a `Content-MD5`. It makes no other call, at
 startup or around an upload. Any other method, a query string
 (multipart uploads, ACLs, tagging) or `aws-chunked` is answered with S3's
 XML error document, 501 `NotImplemented`. `PUT_LISTEN` (`:9000` in
-`deploy/spool`) turns it on; it needs `RAW_SOURCE=spool`.
+`deploy/spool`) turns it on; it needs `RAW_SOURCE=spool`. `run` binds it,
+and `METRICS_ADDR`, before its first pass: an address it cannot bind ends
+the process at once, as does a listener that fails later.
 
 **What it checks**, each refusal an S3 error document:
 

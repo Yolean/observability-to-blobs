@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -26,17 +28,29 @@ import (
 //
 // Nothing is remembered between ticks that the bucket does not say, so a
 // start is an ordinary tick. One writer: replicas 1, strategy Recreate.
+//
+// The metrics and put listeners are bound before the first pass, so that
+// an address that cannot be bound ends the run at once, as does a
+// listener that fails later.
 func (c *compactor) run(ctx context.Context, cfg config) error {
 	srv := &http.Server{Addr: cfg.metricsAddr, Handler: c.m, ReadHeaderTimeout: 10 * time.Second}
+	ml, err := net.Listen("tcp", cfg.metricsAddr)
+	if err != nil {
+		return fmt.Errorf("METRICS_ADDR: %w", err)
+	}
 	srvErr := make(chan error, 2)
-	go func() { srvErr <- srv.ListenAndServe() }()
+	go func() { srvErr <- fmt.Errorf("METRICS_ADDR: %w", srv.Serve(ml)) }()
 	defer srv.Close()
 	if cfg.putListen != "" {
 		put, err := c.putServer(cfg)
 		if err != nil {
 			return err
 		}
-		go func() { srvErr <- put.ListenAndServe() }()
+		pl, err := net.Listen("tcp", cfg.putListen)
+		if err != nil {
+			return fmt.Errorf("PUT_LISTEN: %w", err)
+		}
+		go func() { srvErr <- fmt.Errorf("PUT_LISTEN: %w", put.Serve(pl)) }()
 		// a stop lets the uploads in flight finish: each is answered
 		// only once it is synced
 		defer func() {
