@@ -1,0 +1,456 @@
+{
+  "components": {
+    "schemas": {
+      "ErrorDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "location": {
+            "description": "Where the error occurred, e.g. 'body.items[3].tags' or 'path.thing-id'",
+            "type": "string"
+          },
+          "message": {
+            "description": "Error message text",
+            "type": "string"
+          },
+          "value": {
+            "description": "The value at the given location"
+          }
+        },
+        "type": "object"
+      },
+      "ErrorModel": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/ErrorModel.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "detail": {
+            "description": "A human-readable explanation specific to this occurrence of the problem.",
+            "examples": [
+              "Property foo is required but is missing."
+            ],
+            "type": "string"
+          },
+          "errors": {
+            "description": "Optional list of individual error details",
+            "items": {
+              "$ref": "#/components/schemas/ErrorDetail"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "instance": {
+            "description": "A URI reference that identifies the specific occurrence of the problem.",
+            "examples": [
+              "https://example.com/error-log/abc123"
+            ],
+            "format": "uri",
+            "type": "string"
+          },
+          "status": {
+            "description": "HTTP status code",
+            "examples": [
+              400
+            ],
+            "format": "int64",
+            "type": "integer"
+          },
+          "title": {
+            "description": "A short, human-readable summary of the problem type. This value should not change between occurrences of the error.",
+            "examples": [
+              "Bad Request"
+            ],
+            "type": "string"
+          },
+          "type": {
+            "default": "about:blank",
+            "description": "A URI reference to human-readable documentation for the error.",
+            "examples": [
+              "https://example.com/errors/example"
+            ],
+            "format": "uri",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Kubernetes container logs from the hourly and daily tiers",
+    "title": "blobs-compactor",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/logs/n/{namespace}/{pod}": {
+      "get": {
+        "description": "Returns merged logs from all containers sorted by timestamp.",
+        "operationId": "get-pod-logs",
+        "parameters": [
+          {
+            "description": "Kubernetes namespace",
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "description": "Kubernetes namespace",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Pod name",
+            "in": "path",
+            "name": "pod",
+            "required": true,
+            "schema": {
+              "description": "Pod name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Include RFC3339Nano timestamps",
+            "explode": false,
+            "in": "query",
+            "name": "timestamps",
+            "schema": {
+              "default": false,
+              "description": "Include RFC3339Nano timestamps",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Prefix lines with [pod/{name}/{container}]",
+            "explode": false,
+            "in": "query",
+            "name": "prefix",
+            "schema": {
+              "default": false,
+              "description": "Prefix lines with [pod/{name}/{container}]",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Max lines returned (applied after grep)",
+            "explode": false,
+            "in": "query",
+            "name": "tail",
+            "schema": {
+              "default": 100,
+              "description": "Max lines returned (applied after grep)",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Line filter. Plain substring match, or ^-prefixed for anchored prefix match.",
+            "explode": false,
+            "in": "query",
+            "name": "grep",
+            "schema": {
+              "description": "Line filter. Plain substring match, or ^-prefixed for anchored prefix match.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Set to 'strip' to remove ANSI escape sequences from output.",
+            "explode": false,
+            "in": "query",
+            "name": "ansi",
+            "schema": {
+              "description": "Set to 'strip' to remove ANSI escape sequences from output.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Force log source. Omit for automatic selection based on pod phase.",
+            "explode": false,
+            "in": "query",
+            "name": "source",
+            "schema": {
+              "description": "Force log source. Omit for automatic selection based on pod phase.",
+              "enum": [
+                "blob",
+                "k8s"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "contentEncoding": "base64",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Content-Type": {
+                "schema": {
+                  "default": "text/plain; charset=utf-8",
+                  "type": "string"
+                }
+              },
+              "X-Logs-Pod-Phase": {
+                "schema": {
+                  "description": "Pod phase from cluster index",
+                  "enum": [
+                    "Running",
+                    "Succeeded",
+                    "Failed",
+                    "Pending",
+                    "Unknown",
+                    "Archived"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-Logs-Source": {
+                "schema": {
+                  "description": "Source of logs: k8s or blob",
+                  "enum": [
+                    "k8s",
+                    "blob",
+                    "blob+k8s"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-Logs-Tail-Effect": {
+                "schema": {
+                  "description": "Whether tail truncated the output",
+                  "enum": [
+                    "cap",
+                    "all",
+                    "unknown"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-Logs-Timestamp-End": {
+                "schema": {
+                  "description": "Last CRI timestamp of the returned logs",
+                  "maxLength": 30,
+                  "minLength": 30,
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{9}Z$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get pod logs for all containers",
+        "tags": [
+          "Logs"
+        ]
+      }
+    },
+    "/api/v1/logs/n/{namespace}/{pod}/{container}": {
+      "get": {
+        "description": "Returns plain text logs of the pod's latest incarnation from the hourly and daily tiers. Timestamps are stripped by default.",
+        "operationId": "get-pod-logs-container",
+        "parameters": [
+          {
+            "description": "Kubernetes namespace",
+            "in": "path",
+            "name": "namespace",
+            "required": true,
+            "schema": {
+              "description": "Kubernetes namespace",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Pod name",
+            "in": "path",
+            "name": "pod",
+            "required": true,
+            "schema": {
+              "description": "Pod name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Container name. Omit for all containers merged by timestamp.",
+            "in": "path",
+            "name": "container",
+            "schema": {
+              "description": "Container name. Omit for all containers merged by timestamp.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Include RFC3339Nano timestamps",
+            "explode": false,
+            "in": "query",
+            "name": "timestamps",
+            "schema": {
+              "default": false,
+              "description": "Include RFC3339Nano timestamps",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Prefix lines with [pod/{name}/{container}]",
+            "explode": false,
+            "in": "query",
+            "name": "prefix",
+            "schema": {
+              "default": false,
+              "description": "Prefix lines with [pod/{name}/{container}]",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Max lines returned (applied after grep)",
+            "explode": false,
+            "in": "query",
+            "name": "tail",
+            "schema": {
+              "default": 100,
+              "description": "Max lines returned (applied after grep)",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Line filter. Plain substring match, or ^-prefixed for anchored prefix match.",
+            "explode": false,
+            "in": "query",
+            "name": "grep",
+            "schema": {
+              "description": "Line filter. Plain substring match, or ^-prefixed for anchored prefix match.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Set to 'strip' to remove ANSI escape sequences from output.",
+            "explode": false,
+            "in": "query",
+            "name": "ansi",
+            "schema": {
+              "description": "Set to 'strip' to remove ANSI escape sequences from output.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Force log source. Omit for automatic selection based on pod phase.",
+            "explode": false,
+            "in": "query",
+            "name": "source",
+            "schema": {
+              "description": "Force log source. Omit for automatic selection based on pod phase.",
+              "enum": [
+                "blob",
+                "k8s"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "contentEncoding": "base64",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Content-Type": {
+                "schema": {
+                  "default": "text/plain; charset=utf-8",
+                  "type": "string"
+                }
+              },
+              "X-Logs-Pod-Phase": {
+                "schema": {
+                  "description": "Pod phase from cluster index",
+                  "enum": [
+                    "Running",
+                    "Succeeded",
+                    "Failed",
+                    "Pending",
+                    "Unknown",
+                    "Archived"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-Logs-Source": {
+                "schema": {
+                  "description": "Source of logs: k8s or blob",
+                  "enum": [
+                    "k8s",
+                    "blob",
+                    "blob+k8s"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-Logs-Tail-Effect": {
+                "schema": {
+                  "description": "Whether tail truncated the output",
+                  "enum": [
+                    "cap",
+                    "all",
+                    "unknown"
+                  ],
+                  "type": "string"
+                }
+              },
+              "X-Logs-Timestamp-End": {
+                "schema": {
+                  "description": "Last CRI timestamp of the returned logs",
+                  "maxLength": 30,
+                  "minLength": 30,
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{9}Z$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "Get pod logs for a specific container",
+        "tags": [
+          "Logs"
+        ]
+      }
+    }
+  }
+}
