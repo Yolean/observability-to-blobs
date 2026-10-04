@@ -82,6 +82,14 @@ journal. CI runs the same script. The compactor's image is built by
 `SKIP_BUILD=1 ./test.sh itest` reuses the last images for a quick loop
 against the running cluster.
 
+**Run the tests before every push**, in this repository and in forks
+alike: `./test.sh` for any change to code, manifests, `test.sh` or
+`itest/`, and at least `./test.sh checks` for documentation only. Say in
+the pull request what you ran and its result. CI runs on pushes and pull
+requests in the upstream repository only; in a fork it runs only when
+started by hand (Actions, "ci", "Run workflow"), so a push there is not
+tested unless you tested it.
+
 ## What the itest verifies
 
 Against a real k3s node, from the raw objects read back with DuckDB's
