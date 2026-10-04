@@ -1,9 +1,10 @@
 -- One view per table over `raw` (raw.sql): the rows the compactor writes,
 -- before DISTINCT and sorting, plus filename, the key a row came from,
 -- which the compactor drops. logs.time is coalesce(time, ts): journal rows
--- have only the microsecond ts. Rows with no namespace (the node's journal,
--- node-level scrapes) get the pseudo-namespace _node, which no Kubernetes
--- namespace can be. metrics is one row per sample.
+-- have only the microsecond ts. Rows with no namespace (the node's journal)
+-- get the pseudo-namespace _node, which no Kubernetes namespace can be;
+-- metrics lines always carry one, the agent's own for node-level scrapes.
+-- metrics is one row per sample.
 --
 -- Names resolve when a query runs, and a temp table takes precedence over
 -- a view of the same name, even qualified as main.<name> (temp tables live
