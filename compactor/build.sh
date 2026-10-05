@@ -244,7 +244,9 @@ publish() {
   builder "$HOST_PLATFORM" sh -euc '
     crane() { go run "github.com/google/go-containerregistry/cmd/crane@$CRANE" "$@"; }
     echo "$REGISTRY_TOKEN" | crane auth login "${3%%/*}" -u "$REGISTRY_USER" --password-stdin
-    crane push --index "/repo/$1" "$3:$2"
+    # the one image in the layout is the index the pin names; with --index
+    # crane would push index.json itself, a wrapper around it, under the tag
+    crane push "/repo/$1" "$3:$2"
   ' sh "$OUT/oci" "$tag" "$IMAGE_REPO"
   BUILDER_ENV=()
   log "pushed $IMAGE_REPO:$tag@$DIGEST"
