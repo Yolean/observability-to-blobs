@@ -67,7 +67,7 @@ grep -qx 'node_reboot_required 0' "$prom" || fail "node_reboot_required is 0 wit
 grep -qx 'node_reboot_required_since_seconds 0' "$prom" || fail "since is 0 without a flag"
 grep -q 'node_reboot_required_packages' "$prom" && fail "no package series without a flag"
 ok "no flag: 0, since 0, no packages"
-touch -d @1700000000 "$HEARTBEAT_REBOOT_FLAG"
+TZ=UTC touch -t 202311142213.20 "$HEARTBEAT_REBOOT_FLAG"  # 1700000000, a form GNU and BSD touch both take
 printf 'linux-base\nlibc6\nlinux-base\n\nweird"pkg\\name\n' >"$HEARTBEAT_REBOOT_FLAG.pkgs"
 run
 grep -qx 'node_reboot_required 1' "$prom" || fail "node_reboot_required is 1 with the flag"
