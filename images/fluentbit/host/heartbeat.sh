@@ -71,7 +71,7 @@ printf '%s %s\n' "$boot_id" "$counter" | write_atomic "$counter_file" \
 write_flag_metrics() {
   if [ -e "$flag" ]; then
     required=1
-    since=$(stat -c %Y "$flag" 2>/dev/null || echo 0)
+    since=$(stat -c %Y "$flag" 2>/dev/null || stat -f %m "$flag" 2>/dev/null || echo 0)
   else
     required=0
     since=0
