@@ -15,7 +15,7 @@ import (
 func fixture(t *testing.T) (context.Context, *sql.Conn, string, string) {
 	t.Helper()
 	ctx := context.Background()
-	db, err := open("")
+	db, err := open("", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestEngineParquetEncryption(t *testing.T) {
 	}
 	engine := func(init ...initStmt) *sql.DB {
 		t.Helper()
-		db, err := open("", append(init, keys...)...)
+		db, err := open("", "", append(init, keys...)...)
 		if err != nil {
 			t.Fatal(err)
 		}

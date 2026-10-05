@@ -58,7 +58,7 @@ func newCompactor(c config, log *slog.Logger) (*compactor, error) {
 		return nil, err
 	}
 	httpfs, init := c.engineInit()
-	db, err := open(httpfs, init...)
+	db, err := open(httpfs, c.tempDir, init...)
 	if err != nil {
 		return nil, err
 	}

@@ -57,7 +57,7 @@ func newLogsReader(cfg config, raw RawSource, tiers TierStore, log *slog.Logger)
 	if httpfs != "" {
 		init = append(init, initStmt{sql: fmt.Sprintf("SET http_retries = %d", cfg.httpRetries)})
 	}
-	db, err := open(httpfs, init...)
+	db, err := open(httpfs, ecfg.tempDir, init...)
 	if err != nil {
 		return nil, err
 	}

@@ -8,6 +8,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"runtime/debug"
@@ -172,10 +173,15 @@ type initStmt struct {
 
 // open returns an in-memory engine whose every connection has autoinstall
 // off, when httpfs is non-empty the extension loaded from that path, and
-// then runs init. Settings are per connection, so they go in the
-// connector's init.
-func open(httpfs string, init ...initStmt) (*sql.DB, error) {
-	c, err := duckdb.NewConnector("", func(e driver.ExecerContext) error {
+// then runs init. tempDir, when set, is the engine's temp_directory, given
+// once at open: jobs take a fresh connection each, and DuckDB refuses to set
+// it again after a job has spilled there.
+func open(httpfs, tempDir string, init ...initStmt) (*sql.DB, error) {
+	dsn := ""
+	if tempDir != "" {
+		dsn = "?" + url.Values{"temp_directory": {tempDir}}.Encode()
+	}
+	c, err := duckdb.NewConnector(dsn, func(e driver.ExecerContext) error {
 		stmts := []initStmt{
 			{sql: "SET autoinstall_known_extensions = false"},
 			{sql: "SET autoload_known_extensions = false"},
@@ -219,7 +225,7 @@ func sqlString(s string) string {
 }
 
 func version(ctx context.Context, log *slog.Logger) error {
-	db, err := open("")
+	db, err := open("", "")
 	if err != nil {
 		return err
 	}

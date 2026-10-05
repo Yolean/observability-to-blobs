@@ -6,7 +6,7 @@ import (
 )
 
 func TestRoundtripDeduplicates(t *testing.T) {
-	db, err := open("")
+	db, err := open("", "")
 	if err != nil {
 		t.Fatal(err)
 	}

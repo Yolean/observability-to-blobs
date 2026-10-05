@@ -292,7 +292,7 @@ func TestLoadParquetKeys(t *testing.T) {
 }
 
 func TestEncryptedRoundtrip(t *testing.T) {
-	db, err := open("", initStmt{sql: "SET force_mbedtls_unsafe = true"})
+	db, err := open("", "", initStmt{sql: "SET force_mbedtls_unsafe = true"})
 	if err != nil {
 		t.Fatal(err)
 	}

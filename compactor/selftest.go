@@ -19,7 +19,7 @@ func selftest(ctx context.Context, log *slog.Logger) error {
 	if err := version(ctx, log); err != nil {
 		return err
 	}
-	db, err := open(httpfsPath())
+	db, err := open(httpfsPath(), "")
 	if err != nil {
 		return err
 	}

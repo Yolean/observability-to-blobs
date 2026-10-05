@@ -206,7 +206,7 @@ type logsAPI struct {
 
 func serveLogs(t *testing.T, w *world, now time.Time, lookback time.Duration) *logsAPI {
 	t.Helper()
-	db, err := open("", initStmt{sql: "SET force_mbedtls_unsafe = true"}, initStmt{sql: "SET TimeZone = 'UTC'"})
+	db, err := open("", "", initStmt{sql: "SET force_mbedtls_unsafe = true"}, initStmt{sql: "SET TimeZone = 'UTC'"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -583,7 +583,7 @@ func rawLines(lines []fixLine) []line {
 // The engine's grep and ANSI stripping, which narrow the rows before
 // formatOutput, give removeAnsi's and matchGrep's results.
 func TestGrepSQLMatchesGo(t *testing.T) {
-	db, err := open("")
+	db, err := open("", "")
 	if err != nil {
 		t.Fatal(err)
 	}

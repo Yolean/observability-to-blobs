@@ -37,7 +37,7 @@ type world struct {
 func newWorld(t *testing.T) *world {
 	t.Helper()
 	ctx := context.Background()
-	db, err := open("", initStmt{sql: "SET force_mbedtls_unsafe = true"})
+	db, err := open("", "", initStmt{sql: "SET force_mbedtls_unsafe = true"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -278,9 +278,6 @@ func (c config) engineInit() (httpfs string, init []initStmt) {
 	if c.memoryLimit > 0 {
 		init = append(init, initStmt{sql: fmt.Sprintf("SET memory_limit = '%dB'", c.memoryLimit)})
 	}
-	if c.tempDir != "" {
-		init = append(init, initStmt{sql: "SET temp_directory = " + sqlString(c.tempDir)})
-	}
 	if c.dir != "" {
 		// httpfs is for the bucket, and for encrypted writes: without it
 		// the engine's crypto is read-only (sqlfiles_test.go). A keys

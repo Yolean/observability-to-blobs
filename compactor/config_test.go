@@ -82,7 +82,7 @@ func TestConfigRefuses(t *testing.T) {
 
 // The secret never appears in an error from the engine's init.
 func TestInitRedactsTheSecret(t *testing.T) {
-	db, err := open("", initStmt{label: "CREATE SECRET", redact: []string{"hunter2"}, sql: "SELECT 'hunter2' FROM nowhere"})
+	db, err := open("", "", initStmt{label: "CREATE SECRET", redact: []string{"hunter2"}, sql: "SELECT 'hunter2' FROM nowhere"})
 	if err == nil {
 		err = db.Ping()
 		db.Close()
