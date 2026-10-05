@@ -54,7 +54,7 @@ spec:
         - name: data
           mountPath: /prometheus
       - name: blobs
-        image: ghcr.io/yoleanagents/blobs-to-prometheus
+        image: ghcr.io/yolean/observability-prometheus
         env:
         - name: S3_ENDPOINT
           value: http://versitygw.default.svc.cluster.local:7070

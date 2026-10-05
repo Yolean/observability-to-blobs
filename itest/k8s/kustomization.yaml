@@ -17,7 +17,7 @@ secretGenerator:
   - AWS_SECRET_ACCESS_KEY=demosecret
 
 images:
-- name: ghcr.io/yolean/node-agent
+- name: ghcr.io/yolean/observability-nodeagent
   newName: node-agent
   newTag: itest
 

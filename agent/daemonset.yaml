@@ -23,7 +23,7 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
       - name: agent
-        image: ghcr.io/yolean/node-agent
+        image: ghcr.io/yolean/observability-nodeagent
         imagePullPolicy: IfNotPresent
         args:
         - -c

@@ -14,6 +14,6 @@ secretGenerator:
   - AWS_SECRET_ACCESS_KEY=demosecret
 
 images:
-- name: ghcr.io/yoleanagents/blobs-to-prometheus
+- name: ghcr.io/yolean/observability-prometheus
   newName: blobs-to-prometheus
   newTag: itest

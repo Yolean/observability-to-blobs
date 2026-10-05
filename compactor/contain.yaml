@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://github.com/turbokube/contain/raw/refs/heads/main/jsonschema/config.json
 #
-# OCI image spec for ghcr.io/yolean/blobs-compactor, assembled by
+# OCI image spec for ghcr.io/yolean/observability-state, assembled by
 # build.sh (the only build recipe). No platforms here: build.sh always
 # sets PLATFORMS, the release platforms or the itest host's.
 base: gcr.io/distroless/cc-debian13:nonroot@sha256:54df941ed0d06a1bd95ef5e0ce391fd8d9f94b64782dc9a60062727849ee3f97

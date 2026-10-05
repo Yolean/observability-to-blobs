@@ -45,7 +45,7 @@ configMapGenerator:
   - fluent-bit.yaml
 
 images:
-- name: ghcr.io/yolean/blobs-compactor
+- name: ghcr.io/yolean/observability-state
   newTag: build
 # Fluent Bit v5.1.3, the official multi-arch index
 - name: fluent/fluent-bit

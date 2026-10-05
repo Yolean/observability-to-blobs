@@ -207,7 +207,7 @@ cluster_builder() {
 # arch only (compactor/README.md, "The build script"); the release pin is
 # build.sh check's business, not the itest's. Without docker, build.sh's
 # image-buildkit runs the same steps through buildctl.
-COMPACTOR_IMAGE=ghcr.io/yolean/blobs-compactor:build
+COMPACTOR_IMAGE=ghcr.io/yolean/observability-state:build
 build_compactor() {
   phase "image: build $COMPACTOR_IMAGE ($IMAGE_BUILDER)"
   if [ "${SKIP_BUILD:-}" = 1 ] && [ -f target/images/compactor-oci/index.json ]; then

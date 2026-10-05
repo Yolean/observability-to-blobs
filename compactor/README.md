@@ -26,7 +26,7 @@
 | Runtime base | `gcr.io/distroless/cc-debian13:nonroot`, digest-pinned; same Debian release as the builder, so glibc matches |
 | httpfs | not in the static libraries (they carry json, parquet, icu, core_functions); a signed `httpfs.duckdb_extension` per platform, sha256-pinned, baked into the image, `LOAD`ed by path with autoinstall off |
 | Platforms | linux/amd64 and linux/arm64, one index digest |
-| Image | `ghcr.io/yolean/blobs-compactor:<UTC-seconds tag>@<digest>`, pinned in `deploy/release/kustomization.yaml` |
+| Image | `ghcr.io/yolean/observability-state:<UTC-seconds tag>@<digest>`, pinned in `deploy/release/kustomization.yaml` |
 
 ## Spike results (2026-09-25, on an arm64 Mac with Docker 29.8)
 
@@ -66,7 +66,7 @@ locally and in CI:
 | `image [oci-dir]` | for each of `PLATFORMS` (default: the release platforms) builds the binary, fetches and verifies httpfs, runs `selftest` natively, assembles the OCI layout with contain, prints the index digest |
 | `check` | `image`, then fails unless the digest equals the release pin, printing `build.sh bump` as the remedy |
 | `bump` | `image`; if the digest differs from the pin, mint a UTC-seconds tag and rewrite the pin; if equal, no-op |
-| `publish` | `check`, then push the OCI layout to `ghcr.io/yolean/blobs-compactor:<pinned tag>` with credentials from `REGISTRY_USER`/`REGISTRY_TOKEN` |
+| `publish` | `check`, then push the OCI layout to `ghcr.io/yolean/observability-state:<pinned tag>` with credentials from `REGISTRY_USER`/`REGISTRY_TOKEN` |
 | `host-setup` | registers qemu binfmt for the foreign arch (`docker run --privileged` of a digest-pinned `tonistiigi/binfmt`); once per Ubuntu host, once per CI job, not needed with Docker Desktop. `image` detects a missing handler and names this command |
 
 How every step runs:

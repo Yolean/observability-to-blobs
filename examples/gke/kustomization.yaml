@@ -12,7 +12,7 @@ resources:
 - ../../agent
 
 images:
-- name: ghcr.io/yolean/node-agent
+- name: ghcr.io/yolean/observability-nodeagent
   newTag: <commit sha from the ci workflow>
 
 secretGenerator:

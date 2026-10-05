@@ -30,7 +30,7 @@ secretGenerator:
 
 # the OCI layout's own ref, as build.sh image names it
 images:
-- name: ghcr.io/yolean/blobs-compactor
+- name: ghcr.io/yolean/observability-state
   newTag: build
 
 patches:
