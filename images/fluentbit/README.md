@@ -14,6 +14,16 @@ the agent needs is stock `out_s3` (`format json_lines`, `compression zstd`,
 `upload_timeout`, `$UUID` keys). `UPSTREAM.md` lists what should go back
 upstream.
 
+## Host mode
+
+The same Fluent Bit also runs as a systemd service on a host outside the
+cluster (`../../HOST_MODE.md`). `host/` holds what that service is made of
+(`host.yaml`, the heartbeat script, the unit) and `host/build.sh` builds the
+release tarball: the Dockerfile's `build` stage again, on `ubuntu:24.04` and
+with `FLB_CMAKE_EXTRA` adding the `exec` input and leaving out Kafka and the
+Go plugin loader, then `host-package` and `host-tarball`. `host/test-heartbeat.sh`
+tests the heartbeat script alone; `test.sh checks` runs it.
+
 ## Working on the patch
 
 The patch file is generated, not edited. Keep it as a commit on a branch of

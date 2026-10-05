@@ -75,6 +75,8 @@ jobs:
     - run: ./test.sh
       env:
         IMAGE_BUILD_ARGS: --cache-from type=gha,scope=node-agent-test --cache-to type=gha,mode=max,scope=node-agent-test
+        # the host tarball is built on another base: a cache scope of its own
+        HOST_BUILD_ARGS: --cache-from type=gha,scope=node-agent-host-test --cache-to type=gha,mode=max,scope=node-agent-host-test
 
     - name: Agent logs on failure
       if: failure()

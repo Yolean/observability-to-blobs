@@ -9,15 +9,25 @@
 #   ./test.sh up         provision the cluster and deploy the agent, the
 #                        compactor and the sample workloads, print how to
 #                        look around; no checks, no assertions, nothing purged.
+#   ./test.sh host       only the host phase (HOST_MODE.md) against the running
+#                        qemu cluster: itest/host/phase.sh. It also runs at
+#                        the end of the full run, on the qemu backend.
 #
 # Env:
 #   SKIP_BUILD=1         reuse target/images/node-agent.tar and
 #                        target/images/compactor-oci
+#   HOST_TARBALL=file    run the host phase with this tarball instead of
+#                        building one (HOST_BUILD_ARGS: extra buildx flags;
+#                        more in itest/host/phase.sh)
 #   IMAGE_REF=ref        load a published image instead of building
 #   CLUSTER_CONFIG=dir   y-cluster config dir (default: itest/cluster/qemu with
 #                        /dev/kvm, itest/cluster/docker otherwise)
 #   CONTEXT, S3_PORT     must match CLUSTER_CONFIG when overriding it
 #   IMAGE_BUILD_ARGS     extra docker buildx flags, e.g. a CI cache
+#   IMAGE_BUILDER        docker (default when docker is installed), buildkit
+#                        (buildctl against BUILDKIT_HOST) or cluster (buildctl
+#                        against a rootless BuildKit pod in the itest cluster,
+#                        default without docker: no daemon on the host at all)
 #
 # The cluster is left running; y-cluster teardown -c <config dir> removes it.
 set -euo pipefail
@@ -38,7 +48,22 @@ PARQUET_KEYS=target/itest/parquet-keys
 export KUBECONFIG=$PWD/itest/cluster/kubeconfig
 KUBECTL="kubectl --context=$CONTEXT"
 MODE=${1:-all}
-case "$MODE" in (all|checks|itest|up) ;; (*) echo "usage: $0 [checks|itest|up]" >&2; exit 2;; esac
+case "$MODE" in (all|checks|itest|up|host) ;; (*) echo "usage: $0 [checks|itest|up|host]" >&2; exit 2;; esac
+[ "$MODE" != host ] || exec env CONTEXT="$CONTEXT" CLUSTER_CONFIG="${CLUSTER_CONFIG:-itest/cluster/qemu}" itest/host/phase.sh
+
+# one exit trap for the whole script: a second `trap ... EXIT` replaces the
+# first, which would leave the BuildKit port-forward running
+BUILDKIT_PF=""
+INIT=""
+# the port-forwards to the logs API (logs_forward below)
+LOGS_PF_PIDS=()
+cleanup() {
+  [ -z "$BUILDKIT_PF" ] || kill "$BUILDKIT_PF" 2>/dev/null || true
+  [ ${#LOGS_PF_PIDS[@]} -eq 0 ] || kill "${LOGS_PF_PIDS[@]}" 2>/dev/null || true
+  # the assertions' temporary files, all named after INIT
+  [ -z "$INIT" ] || rm -f "$INIT" "$INIT".*
+}
+trap cleanup EXIT
 
 phase() { printf '\n==> %s\n' "$*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -76,7 +101,6 @@ spool_sh() {
     \"volumes\": [{\"name\": \"spool\", \"persistentVolumeClaim\": {\"claimName\": \"blobs-compactor-spool\"}}]}}" sh -c "$1"
 }
 
-need docker "https://docs.docker.com/engine/install/"
 need kubectl "https://kubernetes.io/docs/tasks/tools/"
 
 # ---------------------------------------------------------------- checks --
@@ -98,6 +122,14 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
     )
   done
 
+  phase "checks: host mode"
+  need jq "https://jqlang.github.io/jq/"
+  need python3 "python3"
+  shellcheck images/fluentbit/host/*.sh itest/host/*.sh
+  images/fluentbit/host/test-heartbeat.sh
+  python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' itest/host/s3-recorder.py
+  kubectl kustomize itest/host >/dev/null
+
   phase "checks: kustomize"
   kubectl kustomize agent >/dev/null
   kubectl kustomize itest/k8s >/dev/null
@@ -106,6 +138,7 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
   kubectl kustomize itest/compactor >/dev/null
   kubectl kustomize itest/compactor-put >/dev/null
   kubectl kustomize compactor/deploy/spool-networkpolicy >/dev/null
+  kubectl kustomize itest/buildkit >/dev/null
 fi
 
 [ "$MODE" != checks ] || exit 0
@@ -123,28 +156,73 @@ fi
 
 # ----------------------------------------------------------------- build --
 
-phase "image: build $IMAGE"
-mkdir -p target/images
-if [ -n "${IMAGE_REF:-}" ]; then
-  echo "IMAGE_REF=$IMAGE_REF, skipping the build"
-elif [ "${SKIP_BUILD:-}" = 1 ] && [ -f target/images/node-agent.tar ]; then
-  echo "SKIP_BUILD=1, reusing target/images/node-agent.tar"
-else
-  read -ra build_args <<< "${IMAGE_BUILD_ARGS:-}"
-  docker buildx build "${build_args[@]}" \
-    --output "type=oci,dest=target/images/node-agent.tar,name=docker.io/library/$IMAGE" \
-    images/fluentbit
+if [ -z "${IMAGE_BUILDER:-}" ]; then
+  if [ -n "${BUILDKIT_HOST:-}" ]; then IMAGE_BUILDER=buildkit
+  elif command -v docker >/dev/null 2>&1; then IMAGE_BUILDER=docker
+  else IMAGE_BUILDER=cluster; fi
 fi
+case "$IMAGE_BUILDER" in (docker|buildkit|cluster) ;; (*) fail "IMAGE_BUILDER: docker, buildkit or cluster";; esac
+BUILD=yes
+if [ -n "${IMAGE_REF:-}" ] || { [ "${SKIP_BUILD:-}" = 1 ] && [ -f target/images/node-agent.tar ]; }; then
+  BUILD=no
+elif [ "$IMAGE_BUILDER" = docker ]; then
+  need docker "https://docs.docker.com/engine/install/"
+else
+  need buildctl "https://github.com/moby/buildkit/releases"
+fi
+
+build_image() {
+  phase "image: build $IMAGE ($IMAGE_BUILDER)"
+  mkdir -p target/images
+  if [ -n "${IMAGE_REF:-}" ]; then
+    echo "IMAGE_REF=$IMAGE_REF, skipping the build"
+  elif [ "$BUILD" = no ]; then
+    echo "SKIP_BUILD=1, reusing target/images/node-agent.tar"
+  elif [ "$IMAGE_BUILDER" = docker ]; then
+    read -ra build_args <<< "${IMAGE_BUILD_ARGS:-}"
+    docker buildx build "${build_args[@]}" \
+      --output "type=oci,dest=target/images/node-agent.tar,name=docker.io/library/$IMAGE" \
+      images/fluentbit
+  else
+    buildctl build --frontend dockerfile.v0 \
+      --local context=images/fluentbit --local dockerfile=images/fluentbit \
+      --output "type=oci,dest=target/images/node-agent.tar,name=docker.io/library/$IMAGE"
+  fi
+}
+
+# BuildKit in the itest cluster, reached through a port-forward, so a host
+# with neither docker nor a BuildKit daemon can build
+cluster_builder() {
+  phase "image: BuildKit in $CONTEXT"
+  $KUBECTL apply -k itest/buildkit >/dev/null
+  $KUBECTL -n itest-buildkit rollout status deployment/buildkitd --timeout=300s
+  $KUBECTL -n itest-buildkit port-forward deployment/buildkitd 18234:1234 >/dev/null 2>&1 &
+  BUILDKIT_PF=$!
+  export BUILDKIT_HOST=tcp://127.0.0.1:18234
+  for _ in $(seq 1 30); do buildctl debug workers >/dev/null 2>&1 && return 0; sleep 1; done
+  fail "BuildKit in $CONTEXT does not answer on $BUILDKIT_HOST"
+}
 
 # The compactor's image comes from its own build script, for this host's
 # arch only (compactor/README.md, "The build script"); the release pin is
-# build.sh check's business, not the itest's.
+# build.sh check's business, not the itest's. Without docker, build.sh's
+# image-buildkit runs the same steps through buildctl.
 COMPACTOR_IMAGE=ghcr.io/yolean/blobs-compactor:build
-phase "image: build $COMPACTOR_IMAGE"
-if [ "${SKIP_BUILD:-}" = 1 ] && [ -f target/images/compactor-oci/index.json ]; then
-  echo "SKIP_BUILD=1, reusing target/images/compactor-oci"
-else
-  PLATFORMS="linux/$(docker version --format '{{.Server.Arch}}')" compactor/build.sh image target/images/compactor-oci
+build_compactor() {
+  phase "image: build $COMPACTOR_IMAGE ($IMAGE_BUILDER)"
+  if [ "${SKIP_BUILD:-}" = 1 ] && [ -f target/images/compactor-oci/index.json ]; then
+    echo "SKIP_BUILD=1, reusing target/images/compactor-oci"
+  elif [ "$IMAGE_BUILDER" = docker ]; then
+    PLATFORMS="linux/$(docker version --format '{{.Server.Arch}}')" compactor/build.sh image target/images/compactor-oci
+  else
+    PLATFORMS="linux/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" compactor/build.sh image-buildkit target/images/compactor-oci
+  fi
+}
+
+# the cluster builder needs the cluster first; the others build before it
+if [ "$IMAGE_BUILDER" != cluster ]; then
+  build_image
+  build_compactor
 fi
 
 # --------------------------------------------------------------- cluster --
@@ -170,6 +248,14 @@ if [ "$BACKEND" = docker ]; then
   MANIFESTS=itest/k8s-docker
 else
   MANIFESTS=itest/k8s
+fi
+
+if [ "$IMAGE_BUILDER" = cluster ]; then
+  if [ "$BUILD" = yes ] || [ "${SKIP_BUILD:-}" != 1 ] || [ ! -f target/images/compactor-oci/index.json ]; then
+    cluster_builder
+  fi
+  build_image
+  build_compactor
 fi
 
 phase "cluster: load image"
@@ -424,10 +510,6 @@ umask 077  # the S3 secret and the parquet keys go into files below
 INIT=$(mktemp "${TMPDIR:-/tmp}/itest.XXXXXX")
 INIT_S3=$INIT.s3 SCOPED=$INIT.scoped SNAPSHOT=$INIT.raw.csv PODS_BEFORE=$INIT.pods.parquet ROTATED=$INIT.rotated.csv
 LOGS_HDR=$INIT.logs.headers LOGS_OUT=$INIT.logs.body
-# the port-forwards to the logs API (logs_forward below)
-LOGS_PF_PIDS=()
-trap 'rm -f "$INIT" "$INIT_S3" "$SCOPED" "$SNAPSHOT" "$PODS_BEFORE" "$ROTATED" "$LOGS_HDR" "$LOGS_OUT"
-  [ ${#LOGS_PF_PIDS[@]} -eq 0 ] || kill "${LOGS_PF_PIDS[@]}" 2>/dev/null || true' EXIT
 cat >"$INIT_S3" <<SQL
 .output /dev/null
 INSTALL httpfs; LOAD httpfs; SET TimeZone='UTC';
@@ -1132,6 +1214,14 @@ logs_api 18080 Running Succeeded
 phase "assert: the logs API ($PUT_CLUSTER: plain tiers, the spool)"
 logs_forward "$PUT_NS" svc/blobs-compactor-logs 18081 || fail "no logs API on svc/blobs-compactor-logs in $PUT_NS"
 logs_api 18081 Unknown Unknown
+
+# The host agent on the node itself (HOST_MODE.md): tarball, systemd unit,
+# its own bucket. It needs the qemu node; k3s-in-docker has no systemd.
+if [ "$BACKEND" = docker ]; then
+  echo "  SKIP: host phase (k3s-in-docker is not a host with systemd)"
+else
+  CONTEXT=$CONTEXT CLUSTER_CONFIG=$CLUSTER_CONFIG itest/host/phase.sh || ERRORS=$((ERRORS + 1))
+fi
 
 echo
 if [ "$ERRORS" -gt 0 ]; then

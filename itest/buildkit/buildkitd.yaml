@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: buildkitd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: buildkitd
+  template:
+    metadata:
+      labels:
+        app: buildkitd
+    spec:
+      containers:
+      - name: buildkitd
+        # the same version as the buildctl client test.sh expects
+        image: moby/buildkit:v0.33.0-rootless@sha256:80b15f0735e87bab7bf59ec4d695dfb4a7cfb25521cf56dc75d6f256285b63ef
+        args:
+        - --addr
+        - unix:///run/user/1000/buildkit/buildkitd.sock
+        - --addr
+        - tcp://0.0.0.0:1234
+        - --oci-worker-no-process-sandbox
+        ports:
+        - containerPort: 1234
+          name: buildkit
+        readinessProbe:
+          exec:
+            command: [buildctl, debug, workers]
+          periodSeconds: 5
+        # rootless BuildKit needs user namespaces, which the default seccomp
+        # and AppArmor profiles refuse
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          seccompProfile:
+            type: Unconfined
+          appArmorProfile:
+            type: Unconfined

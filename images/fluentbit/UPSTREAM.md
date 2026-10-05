@@ -49,3 +49,27 @@ cpu0/cpufreq/cpuinfo_cur_freq'` and five siblings per CPU on every scrape
 when the tree is absent (VMs, many cloud nodes). Once per missing file, or
 debug level, would do. Worked around by leaving the collector out of
 `metrics`.
+
+## in_node_exporter_metrics: the textfile collector never forgets a series
+
+Each scrape decodes the `.prom` files and concatenates the result into the
+input's long-lived metrics context, so a series that disappears from a file
+(a label set that is no longer written) stays in the exposition, at its last
+value, until the process restarts. Seen on v5.1.2 with the host agent's
+`node_reboot_required_packages{package=...}` after the flag file was removed
+without a restart. Replacing the context per scrape, or per file, would do.
+
+## in_node_exporter_metrics: a directory path with a dot in it is not a directory
+
+`textfile_update()` looks for the last `.` in `collector.textfile.path`; when
+what follows is not `.prom` it `stat()`s the path and only a regular file is
+treated as such, so a directory like `/var/lib/example.d/metrics` falls through
+with `use_directory_pattern` left false and is scanned as one file. Read in the
+source of v5.1.2, not reproduced; the host agent's state directory has no dot.
+
+## in_tail: an unreadable directory in a glob is an error every refresh
+
+A `path` glob such as `/var/log/unattended-upgrades/*.log` whose directory the
+process may not read logs `read error, check permissions` and `error scanning
+path` at every `refresh_interval` (5 s here), where a glob that matches nothing
+is silent. Seen on v5.1.2 as an unprivileged user.

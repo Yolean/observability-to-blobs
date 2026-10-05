@@ -7,6 +7,9 @@
 #   build.sh test               go vet and go test, host arch
 #   build.sh image [oci-dir]    binaries for PLATFORMS, httpfs, OCI layout,
 #                               selftest on the host arch; prints the digest
+#   build.sh image-buildkit [oci-dir]
+#                               the same steps for one platform, run by buildctl against
+#                               BUILDKIT_HOST instead of docker (a host without docker)
 #   build.sh check              image, and fail unless the digest is the release pin
 #   build.sh bump               image, and move the release pin if the digest moved
 #   build.sh publish            check, then push the pinned tag (REGISTRY_USER, REGISTRY_TOKEN)
@@ -38,7 +41,11 @@ case "$BUILDER" in
   *) echo "[build.sh] warning: $BUILDER is not $GOTOOLCHAIN, every cold build downloads the toolchain" >&2 ;;
 esac
 
-HOST_PLATFORM=linux/$(docker version --format '{{.Server.Arch}}')
+if command -v docker >/dev/null 2>&1; then
+  HOST_PLATFORM=linux/$(docker version --format '{{.Server.Arch}}')
+else
+  case "$(uname -m)" in (x86_64) HOST_PLATFORM=linux/amd64 ;; (aarch64|arm64) HOST_PLATFORM=linux/arm64 ;; (*) HOST_PLATFORM=linux/$(uname -m) ;; esac
+fi
 
 log() { echo "[build.sh] $*" >&2; }
 
@@ -142,6 +149,50 @@ image() {
   [ -n "$DIGEST" ] || { log "no image index digest in $oci/index.json"; exit 1; }
 }
 
+# image_buildkit [oci-dir]: image's compile, httpfs, selftest and contain steps, with the same
+# pins, as one BuildKit build. One platform, the selftest's; the release build stays image's.
+image_buildkit() {
+  local oci=${1:-$OUT/oci} p=${PLATFORMS} arch dir var base
+  case "$p" in (*,*) log "image-buildkit builds one platform, PLATFORMS=$p"; exit 1 ;; esac
+  [ -n "${BUILDKIT_HOST:-}" ] || { log "image-buildkit needs BUILDKIT_HOST"; exit 1; }
+  command -v buildctl >/dev/null 2>&1 || { log "image-buildkit needs buildctl"; exit 1; }
+  arch=${p#linux/}
+  var=HTTPFS_SHA256_linux_$arch
+  base=$(sed -n 's/^base: //p' "$HERE/contain.yaml")
+  dir=$(mktemp -d); trap 'rm -rf "$dir"' RETURN
+  cat >"$dir/Dockerfile" <<DOCKERFILE
+FROM $(builder_ref "$p") AS build
+ENV HOME=/tmp GOFLAGS=-mod=readonly CGO_ENABLED=1 GOTOOLCHAIN=$GOTOOLCHAIN
+COPY . /repo/compactor
+WORKDIR /repo/compactor
+RUN go build -trimpath -buildvcs=false -ldflags='-s -w' -o /repo/$OUT/app/$p/blobs-compactor .
+RUN mkdir -p /repo/$OUT/duckdb/$p \\
+ && curl -fsSL -o /tmp/httpfs.gz "https://extensions.duckdb.org/$DUCKDB_VERSION/linux_$arch/httpfs.duckdb_extension.gz" \\
+ && echo "${!var:?$var missing in build.env}  /tmp/httpfs.gz" | sha256sum -c --status \\
+ && gunzip -c /tmp/httpfs.gz > /repo/$OUT/duckdb/$p/httpfs.duckdb_extension
+
+FROM $base AS selftest
+COPY --from=build /repo/$OUT/app/$p/blobs-compactor /usr/local/bin/blobs-compactor
+COPY --from=build /repo/$OUT/duckdb/$p/httpfs.duckdb_extension /usr/local/lib/duckdb/httpfs.duckdb_extension
+USER 65532:65534
+RUN ["/usr/local/bin/blobs-compactor", "selftest"]
+
+FROM build AS assemble
+COPY --from=selftest /usr/local/bin/blobs-compactor /tmp/selftested
+ENV PLATFORMS=$p IMAGE=$IMAGE_REPO:build
+RUN go run github.com/turbokube/contain/cmd/contain@$CONTAIN build --platforms-env-require --push=false --output /out --logger plain
+
+FROM scratch
+COPY --from=assemble /out /
+DOCKERFILE
+  log "image-buildkit $p on $BUILDKIT_HOST"
+  rm -rf "${REPO:?}/$oci"
+  buildctl build --frontend dockerfile.v0 --local context="$HERE" --local dockerfile="$dir" \
+    --opt platform="$p" --output "type=local,dest=$REPO/$oci" >&2
+  DIGEST=$(sed -n 's/.*"digest": *"\(sha256:[0-9a-f]*\)".*/\1/p' "$REPO/$oci/index.json" | head -n 1)
+  [ -n "$DIGEST" ] || { log "no image digest in $oci/index.json"; exit 1; }
+}
+
 pinned() { [ ! -f "$REPO/$PIN" ] || sed -n "s/^  $1: //p" "$REPO/$PIN"; }
 
 check() {
@@ -215,6 +266,7 @@ CMD=${1:-}
 case "$CMD" in
   test)       cache_init; builder "$HOST_PLATFORM" sh -euc 'go vet ./... && go test ./...' ;;
   image)      image "${2:-}"; echo "$DIGEST" ;;
+  image-buildkit) image_buildkit "${2:-}"; echo "$DIGEST" ;;
   check)      check ;;
   bump)       bump ;;
   publish)    publish ;;

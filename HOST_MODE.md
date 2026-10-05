@@ -1,0 +1,252 @@
+# Host mode: the agent as a systemd service
+
+Status: built. `images/fluentbit/host/` makes the release tarball (the pipeline `host.yaml`, the
+heartbeat script, the systemd unit), `itest/host/` is the itest. The DaemonSet (`agent/`) ships what
+a Kubernetes node knows about its workloads. Host mode ships what the host itself records, from
+outside the cluster, to a bucket of its own that the host can add objects to but never read, change
+or delete. The two run side by side on a node and share no credential.
+
+## What it ships
+
+| Source | How | Notes |
+|---|---|---|
+| The journal | `systemd` input, every unit, with a denylist | A denylist fails toward collecting too much: an allowlist of units misses messages logged by PID 1 about a unit, such as a stop. Defaults deny nothing; `HOST_JOURNAL_DENY`, a regular expression on a row's `unit`, names noisy units to leave out. |
+| The audit log, `/var/log/audit/audit.log` | `tail`, following the file by inode across rotation, never the numbered files | auditd's `audit(timestamp:serial)` identifies each record. Reading it needs auditd's `log_group` set to a group the service is in (`adm`). |
+| Package changes: `/var/log/dpkg.log`, `/var/log/apt/history.log`, `/var/log/unattended-upgrades/*.log` | `tail` | |
+| Further files, configured | `tail`, `HOST_EXTRA_FILES` | Comma-separated paths or globs, for example a Kubernetes API server audit log written on the host. |
+| A heartbeat | every 60 s, a metrics line with the boot id and a counter | The counter is kept in the state directory: it continues across restarts of the service and starts again at a new boot id. A missing counter value or a silence longer than the interval shows a gap at the receiver. |
+| Node metrics and the restart flag | `node_exporter_metrics` (see Metrics) | Served on the node, not shipped (see Metrics). |
+
+## Schema: a subset of `raw1`
+
+Host lines use the raw tier's line contract (`compactor/sql/raw.sql`) and add no column, so every
+reader of `raw1` reads them:
+
+- **Journal entries** are `logs` rows exactly as the DaemonSet's journal rows: `stream` `journal`,
+  `unit`, `priority`, `message`, `ts`, `cluster`, `node`. They use the DaemonSet's processors, plus
+  the denylist.
+- **Lines of tailed files** are `logs` rows with `stream` `file` and `unit` the file's path, for
+  example `/var/log/audit/audit.log`, with `message`, `ts`, `cluster` and `node`. These two values
+  are the only extension, documented in `raw.sql`; the audit log is read from its file because
+  journald's copy of audit events is best effort. `ts` is the time the agent read the line; the
+  line's own stamp (the audit record's `audit(...)`) is in the message.
+- **Metrics** are `metrics` rows as the DaemonSet's node scrape (`job` `node`, `instance`,
+  `samples`): today the heartbeat, as one sample, `observability_host_heartbeat{boot_id="..."}`
+  (type `counter`) with the counter as value, and `instance` the node's name and the metrics port.
+  Rows carry `time` (the script's stamp to the nanosecond, as the node agent's scrapes do) and `ts`
+  (the same, rendered at microseconds), and no `namespace`, `pod` or `container`. The node exporter
+  series, the restart flag and the agent's own metrics are served on the node; shipping them is
+  not built (see Metrics).
+- No `podindex` rows.
+
+## Where it writes
+
+- One object per upload window (default 30 s, `UPLOAD_TIMEOUT`), JSON lines, zstd, with PutObject only
+  (`use_put_object`) and `send_content_md5: true`, which buckets with Object Lock require.
+- Key: `/${KEY_ROOT}/${CLUSTER_NAME}/%Y-%m-%d/%H/${NODE_NAME}/%M%S-$UUID.jsonl.zst`. `KEY_ROOT`
+  defaults to `host1` and is configurable (for example `security1`). The layout below the root is
+  the DaemonSet's `raw1/`, at the same depth, so the same globs and readers work on either root;
+  hour before node, so a consumer lists one hour for the whole cluster. The root says what the
+  objects are: the host agent never writes under the DaemonSet's root, and the two never share
+  one. No marker such as `_host` in the path: a segment only some objects have splits every
+  fixed-depth glob, and readers in the Hadoop tradition skip paths that start with `_`.
+- The agent never lists, reads, overwrites or deletes an object. Its key can be a write-only one,
+  and the bucket can carry Object Lock and a default retention.
+- Every upload attempt gets a fresh key. A retry under the same key would create a second version
+  of an existing object on a versioned bucket, which a check for keys with more than one version
+  reads as tampering. The cost is a possible duplicate object when an upload succeeded but its
+  response was lost; consumers deduplicate on the record's own identity (the audit serial, the
+  heartbeat's boot id and counter; for a journal row `ts`, `unit` and `message`, because the rows
+  carry no cursor).
+
+### How the fresh key comes about
+
+Read in fluent-bit v5.1.2's `out_s3` (`plugins/out_s3/s3.c`, `src/aws/flb_aws_util.c`): with
+`use_put_object` every attempt goes through `s3_put_object()`, which calls `flb_get_s3_key()`
+afresh, and that draws `$UUID` again: eight characters from `[0-9a-zA-Z]`, from random bytes
+(`flb_sts_session_name()`). So `$UUID` is per attempt, not per chunk, and no patch is needed. What
+stays the same across the attempts of one chunk is everything else in the key: the time, which is
+the chunk's first record (`%Y-%m-%d/%H` and `%M%S`), so a retried object lands in the same hour
+directory with the same `MMSS`, under another suffix. Two attempts draw the same suffix with a
+probability of 62^-8; the itest checks that no key is written twice and that a refused upload
+reappears under a new suffix. This holds only for PutObject: a multipart upload fixes its key when
+it is created, which is one more reason for `use_put_object`.
+
+## Buffering
+
+- `storage.type: filesystem` on every input that feeds the bucket and `storage.sync: full`, so a
+  record the input has read survives a crash or a power loss of the host, not only a restart of
+  the service. The positions are written with `db.sync: full` as well.
+- The inputs keep their positions in the state directory (`db` for `tail`, the journal cursor for
+  `systemd`), so after a restart or a reboot delivery resumes where it stopped: records arrive once,
+  not from "now" and not twice. On the first start the journal is read from its end and the files
+  from their start.
+- The output buffers in the state directory up to `HOST_BUFFER_LIMIT` (default 4G) in each of its two
+  buffers, and retries without a budget (`retry_limit` set explicitly, see
+  `images/fluentbit/UPSTREAM.md`), as the DaemonSet does. Beyond the limit the oldest input chunks
+  are dropped.
+- A shutdown flushes what was read (`grace` 10 s); what the bucket does not take stays on disk for
+  the next start.
+
+## Packaging
+
+- The binary is the agent image's fluent-bit (same version and patches, `images/fluentbit/`), built
+  in a stage for the host's distribution (Ubuntu 24.04 first) so it links against the host's C
+  library, without the `cri_scrape` plugin, which needs the container runtime, and without the
+  Kafka output. It has the `exec` input, which the heartbeat uses and the agent image leaves out.
+  The Dockerfile's `host-package` stage refuses any base other than `HOST_DISTRO`.
+- `images/fluentbit/host/build.sh` builds the tarball
+  `observability-to-blobs-host-<version>-linux-amd64.tar.gz` and its `.sha256` (the version is
+  `HOST_VERSION`). The tarball holds, relative to the install prefix `/opt/observability-host`:
+
+  | path | what |
+  |---|---|
+  | `bin/fluent-bit` | the binary, stripped |
+  | `bin/observability-host-heartbeat` | the heartbeat script (POSIX `sh`, coreutils and `sed`) |
+  | `etc/host.yaml` | the pipeline, with the defaults of every setting |
+  | `etc/observability-host.env.example` | the environment file, commented |
+  | `lib/systemd/system/observability-host.service` | the unit; goes to `/etc/systemd/system/` |
+  | `share/fluent-bit-LICENSE` | Fluent Bit's licence |
+
+- The binary needs from the host's packages (Ubuntu 24.04): `libc6`, `libgcc-s1`, `libstdc++6`,
+  `libssl3t64`, `libyaml-0-2` and `libsystemd0`, and `ca-certificates` for TLS. The build fails if
+  the binary links anything else.
+- A configuration management tool installs it: downloads the tarball, verifies the checksum,
+  extracts it to the prefix, creates the user, writes the environment file and the credential, links
+  the unit and keeps the installed files from drifting. The repository does not install anything on
+  a host by itself; `itest/host/run.sh` shows the steps.
+
+## The systemd unit
+
+- A system user of its own, `observability-host`, created by the installer
+  (`useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin observability-host`),
+  and `SupplementaryGroups=systemd-journal adm` for the journal and the logs.
+- `StateDirectory=observability-host`: positions, storage and the output buffer in
+  `/var/lib/observability-host`, never the DaemonSet's `/var/lib/node-agent`.
+- `LoadCredential=s3:/etc/observability-host/s3-credentials`: the bucket key from a root-only file in
+  the AWS shared credentials format, handed to the service in its credentials directory
+  (`AWS_SHARED_CREDENTIALS_FILE=%d/s3`); it is never in the environment file, the unit or the
+  command line. fluent-bit's credential chain reads, in this order, the `AWS_ACCESS_KEY_ID`
+  variables and then that file (`src/aws/flb_aws_credentials.c` and `flb_aws_credentials_profile.c`,
+  profile `default`), so the variables must stay unset. It reads the file when it first needs
+  credentials and keeps what it read: a changed key takes a restart of the unit.
+- `EnvironmentFile=/etc/observability-host/env`: `CLUSTER_NAME`, `NODE_NAME` (default: the host
+  name), `S3_BUCKET`, `S3_ENDPOINT`, `S3_REGION`, `S3_TLS`, `KEY_ROOT`, and the settings below. The
+  unit refuses to start without `CLUSTER_NAME`, `S3_BUCKET` and `S3_ENDPOINT`.
+- `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`, an empty
+  capability set, write access only to the state directory.
+- `Restart=always` without a start limit. Stopping or disabling the unit is itself a journal record;
+  the agent ships it when it next starts at the latest (the journal position survives, and the
+  itest checks that the record arrives), and the heartbeat's silence shows the stop.
+
+### Settings
+
+All are optional but the first four; the defaults are in `etc/host.yaml`.
+
+| setting | default | |
+|---|---|---|
+| `CLUSTER_NAME`, `NODE_NAME` | `NODE_NAME`: the host name | in every line and every key |
+| `S3_BUCKET`, `S3_ENDPOINT` | | `S3_ENDPOINT` with its scheme |
+| `S3_REGION`, `S3_TLS` | `us-east-1`, `on` | |
+| `KEY_ROOT` | `host1` | |
+| `UPLOAD_TIMEOUT` | `30s` | |
+| `HOST_EXTRA_FILES` | none | comma-separated paths or globs to tail |
+| `HOST_JOURNAL_DENY` | matches nothing | regular expression on the row's `unit`; matches are left out |
+| `HOST_NODE_COLLECTORS` | see Metrics | `textfile` alone on a Kubernetes node |
+| `HOST_METRICS_LISTEN`, `HOST_METRICS_PORT` | `127.0.0.1`, `2023` | the address and the port the metrics are served on |
+| `HOST_BUFFER_LIMIT` | `4G` | each of the output's two on-disk buffers |
+
+## Metrics
+
+The same signals SRE staff know from the DaemonSet's nodes, under the same names: fluent-bit's
+`node_exporter_metrics` input, configured as in `agent/fluent-bit.yaml` (same collectors, same
+interval), so a host's `node_*` series look like a Kubernetes node's and existing dashboards and
+alert rules apply. The host adds `timex` (the clock offset, `node_timex_offset_seconds`, and
+`node_timex_sync_status`), `systemd` (the unit states) and `textfile` (the restart flag below) to the
+DaemonSet's collectors; `HOST_NODE_COLLECTORS` is the list.
+
+They are served by a `prometheus_exporter` output on `HOST_METRICS_LISTEN:HOST_METRICS_PORT`, an
+address on the node (default `127.0.0.1:2023`), together with the service's own metrics (input and
+output records, errors, retries, buffer use). Where to:
+
+- **On a Kubernetes node** the DaemonSet already exports `node_*` for the machine. Set
+  `HOST_NODE_COLLECTORS=textfile`: the host agent then serves only the series the DaemonSet cannot
+  see (the restart flag, its own metrics), so no series is doubled, and the DaemonSet scrapes
+  `HOST_METRICS_LISTEN` (the node's address) as a static target of `cri_scrape`: they reach the node
+  data bucket and the DaemonSet's re-serving endpoint like any other target, and no key crosses
+  between the two buckets. The static target is not part of `agent/`, which does not know whether
+  a host agent runs beside it.
+- **On a host without Kubernetes** nothing else exports them. The host agent serves all of them for
+  a local Prometheus. Shipping them to the bucket as the `metrics` table (the DaemonSet's schema)
+  under its own root is **not built yet**: it needs a scraper in the host build, and `cri_scrape`,
+  the only one the agent has, needs the container runtime. Until then only the heartbeat is shipped
+  as a metrics row.
+
+## Restart needed
+
+Packages that need a reboot (a kernel, libc, systemd) leave `/var/run/reboot-required` and the
+list `/var/run/reboot-required.pkgs`. The host agent does not reboot anything; it exposes the flag
+as metrics, in the names the Prometheus community's textfile collector scripts use, so a common
+alert rule fits:
+
+- `node_reboot_required` 1 when the flag exists, else 0;
+- `node_reboot_required_since_seconds` the flag's modification time, so an alert on age survives a
+  restart of whatever evaluates it (a rule's `for:` does not); 0 when there is no flag, so a rule on
+  the age multiplies by `node_reboot_required`;
+- `node_reboot_required_packages{package="..."}` 1 per package in the list, so a rule can treat a
+  kernel or a package with a known exploited vulnerability differently from the rest.
+
+The heartbeat script writes them every interval to `reboot-required.prom` in the state directory,
+which the `textfile` collector reads. The collector keeps every series it has read until the agent
+restarts, so a flag removed without a reboot leaves its package series at 1 until then; a reboot,
+which is what clears the flag, restarts the agent. This repository defines the metrics; the alert
+rules (how old a pending reboot may get) belong to whoever runs the alerting.
+
+## What the itest verifies (host phase, on the qemu node)
+
+The host agent installed from the tarball as a systemd unit on the node, writing through a recording
+proxy to its own versitygw bucket. What the storage enforces (Object Lock, retention, which key may
+do what) is the storage's responsibility and not tested here; the itest verifies that the agent
+writes in a way that makes those guarantees possible. `itest/host/run.sh` runs after the node
+agent's assertions in `./test.sh` (qemu backend only, the docker node has no systemd) and alone
+with `./test.sh host`.
+
+The gateway is a second versitygw (`itest/host/`) with an IAM directory and an access log; the
+agent's key is a user allowed `s3:PutObject` under `host1/` by a bucket policy, and the phase first
+checks, with a second user under the same policy, that nothing else works with it. The recorder
+(`itest/host/s3-recorder.py`) sits between the agent and the gateway on the node: it keeps one JSON
+line per request, forwards it unchanged, and refuses requests when told to, which is how the phase
+stops delivery and makes uploads fail.
+
+- **Survival:** an authentication event on the host (a login of a user that does not exist), its
+  local logs deleted by root after the agent has read them (the audit log emptied, the journal
+  rotated and vacuumed, the syslog file removed); the event is in the bucket as a journal row and
+  as an audit log row, and the time from event to object is measured and printed.
+- **Exactly once:** delivery stopped, events created (journal lines and lines of a configured file),
+  the service restarted, more events created, the node rebooted, still more events created, delivery
+  restored: every event arrives, once. The journal is persistent on the node, as on a production
+  host.
+- **Gap:** the service stopped for longer than the heartbeat interval (130 s); the heartbeat's
+  counter continues and its time shows the gap, the counter goes up by one within a boot and never
+  repeats, and the reboot starts a new boot id and the counter at 1. A line logged while the service
+  was stopped arrives once after the start, and the service's own stop record arrives as well.
+- **Put only:** the agent works with a key allowed nothing but PutObject on its root, and the
+  gateway's request log shows nothing but PutObject answered 200 from it, all under the root: no
+  list, read, head or delete, no multipart upload, no denied request.
+- **Content-MD5:** every upload the recorder saw carries a Content-MD5 header that matches the body.
+- **Fresh keys:** uploads that are refused and retried land under new keys, no key is written twice
+  (in the recorder's log of every attempt and in the gateway's log), and a refused upload reappears
+  in the same hour and `MMSS` under another suffix.
+- **Schema:** every host line reads through `compactor/sql/raw.sql` with no field outside its
+  columns; the keys of journal, file and heartbeat lines are exactly the ones above; `table` is
+  `logs` or `metrics`; `stream` and `unit` take the values above.
+- **Coverage:** one record each of a login, a failed login, an account change, a privileged
+  command, a configuration file change, a service stopped and a package installed, from the sources
+  the spec names (the journal, the audit log, dpkg's log and apt's history).
+- The node serves the restart flag and the agent's own metrics on the metrics port and, with
+  `HOST_NODE_COLLECTORS=textfile`, no `node_*` of the machine.
+
+## Not decided here
+
+The receiver: what reads the bucket, the gap and tampering checks and their alarms. The host agent
+only makes them possible.

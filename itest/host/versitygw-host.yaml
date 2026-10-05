@@ -1,0 +1,82 @@
+# A second versitygw, apart from itest/k8s/versitygw: the host agent's
+# bucket. The root account (demoaccess) creates the bucket and a policy, and
+# the host phase creates the agent's user, which the policy lets PutObject
+# under one key prefix and nothing else. Every request is in the access log
+# (/logs/access.log), which the phase reads with kubectl exec.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: versitygw-host
+spec:
+  serviceName: versitygw-host
+  replicas: 1
+  selector:
+    matchLabels:
+      app: versitygw-host
+  template:
+    metadata:
+      labels:
+        app: versitygw-host
+    spec:
+      containers:
+      - name: versitygw
+        image: docker.io/versity/versitygw:v1.7.0
+        # the global options are environment variables because they must
+        # precede the backend in the command line
+        args:
+        - posix
+        - /data
+        env:
+        - name: ROOT_ACCESS_KEY
+          value: demoaccess
+        - name: ROOT_SECRET_KEY
+          value: demosecret
+        - name: VGW_IAM_DIR
+          value: /iam
+        - name: VGW_ACCESS_LOG
+          value: /logs/access.log
+        - name: VGW_ADMIN_PORT
+          value: ":7080"
+        ports:
+        - containerPort: 7070
+        - containerPort: 7080
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: iam
+          mountPath: /iam
+        - name: logs
+          mountPath: /logs
+      volumes:
+      - name: data
+        emptyDir: {}
+      - name: iam
+        emptyDir: {}
+      - name: logs
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: versitygw-host
+spec:
+  selector:
+    app: versitygw-host
+  ports:
+  - name: s3
+    port: 7070
+    targetPort: 7070
+---
+# What the host agent on the node reaches, through the recorder (itest/host/s3-recorder.py)
+apiVersion: v1
+kind: Service
+metadata:
+  name: versitygw-host-nodeport
+spec:
+  type: NodePort
+  selector:
+    app: versitygw-host
+  ports:
+  - port: 7070
+    targetPort: 7070
+    nodePort: 30071
