@@ -916,11 +916,18 @@ assert "configmaps are snapshotted at least twice at multiples of SNAPSHOT_INTER
      AND minute(time) % 2 = 0 AND second(time) < 5 AND time > $SINCE"
 assert "no object carries managedFields" \
   "SELECT count(*) > 0 AND bool_and(NOT contains(object, '\"managedFields\"')) FROM objects WHERE object IS NOT NULL"
-assert "Secrets keep their key names with empty values, and the redaction mark" \
-  "SELECT count(*) > 0
-      AND bool_and(NOT regexp_matches(coalesce(json_extract(object, '\$.data')::VARCHAR, '{}'), '\":\"[^\"]'))
-      AND bool_and(json_extract_string(object, '\$.metadata.annotations.\"observability-to-blobs/redacted\"') = 'data')
+# every value of every Secret row, as (key, value) structs
+SECRET_VALUES="(SELECT namespace, name, unnest(map_entries(json_transform(json_extract(object, '\$.data'), '\"MAP(VARCHAR, VARCHAR)\"'))) AS e
+  FROM objects WHERE api_version = 'v1' AND resource = 'secrets' AND object IS NOT NULL)"
+assert "Secrets carry the redaction mark" \
+  "SELECT count(*) > 0 AND bool_and(json_extract_string(object, '\$.metadata.annotations.\"observability-to-blobs/redacted\"') = 'data')
    FROM objects WHERE api_version = 'v1' AND resource = 'secrets' AND object IS NOT NULL"
+assert "Secret values are k8sobs_ and random letters and digits, empty ones empty" \
+  "SELECT count(*) > 0 AND bool_and(e.value = '' OR regexp_full_match(decode(from_base64(e.value)), 'k8sobs_[A-Za-z0-9]+')) FROM $SECRET_VALUES"
+# demoaccess and demosecret, 10 bytes each
+assert "a scrambled value has a tenth of the original's length, rounded up (node-agent-s3: k8sobs_ and one)" \
+  "SELECT count(*) > 0 AND bool_and(length(decode(from_base64(e.value))) = 8) FROM $SECRET_VALUES
+   WHERE namespace = 'observability' AND name LIKE 'node-agent-s3-%'"
 # node-agent-s3, created by kubectl apply -k: its data and the applied
 # manifest annotation both hold the base64 of the secret key
 assert "no row holds the S3 secret's data, base64 or applied" \

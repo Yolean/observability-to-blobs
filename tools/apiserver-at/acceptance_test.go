@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -154,10 +155,13 @@ func (c *cluster) setStatus(t *testing.T, ctx context.Context, u *unstructured.U
 }
 
 // state is every watched object, as the agent would ship it, minus
-// resourceVersion: resource -> namespace/name -> JSON.
+// resourceVersion and with the random part of scrambled Secret values
+// masked: resource -> namespace/name -> JSON.
 type state map[string]map[string]string
 
-func (c *cluster) dump(t *testing.T, ctx context.Context, gvrs []schema.GroupVersionResource) state {
+// dump is the state of the cluster; sanitize, for the source, does to its
+// objects what the agent does, which apiserver-at's objects already had.
+func (c *cluster) dump(t *testing.T, ctx context.Context, gvrs []schema.GroupVersionResource, sanitize bool) state {
 	t.Helper()
 	s := state{}
 	for _, g := range gvrs {
@@ -168,12 +172,38 @@ func (c *cluster) dump(t *testing.T, ctx context.Context, gvrs []schema.GroupVer
 		m := map[string]string{}
 		for i := range l.Items {
 			u := &l.Items[i]
-			kobjects.Sanitize(g, u)
+			if sanitize {
+				kobjects.Sanitize(g, u)
+			}
+			if g == secrets {
+				maskScrambled(t, u)
+			}
 			m[u.GetNamespace()+"/"+u.GetName()] = canonical(t, u)
 		}
 		s[g.String()] = m
 	}
 	return s
+}
+
+// maskScrambled replaces the random part of every scrambled value of a
+// Secret with as many x, so that two scrambles of a value compare equal
+// and a value of another length does not. A value that is not scrambled
+// fails the test, unless it is empty.
+func maskScrambled(t *testing.T, u *unstructured.Unstructured) {
+	t.Helper()
+	data, _ := u.Object["data"].(map[string]interface{})
+	for k, v := range data {
+		s, _ := v.(string)
+		if s == "" {
+			continue
+		}
+		b, err := base64.StdEncoding.DecodeString(s)
+		rest, ok := strings.CutPrefix(string(b), kobjects.ScrambledPrefix)
+		if err != nil || !ok {
+			t.Fatalf("secret %s/%s key %s is not scrambled: %q", u.GetNamespace(), u.GetName(), k, b)
+		}
+		data[k] = base64.StdEncoding.EncodeToString([]byte(kobjects.ScrambledPrefix + strings.Repeat("x", len(rest))))
+	}
 }
 
 func canonical(t *testing.T, u *unstructured.Unstructured) string {
@@ -412,7 +442,7 @@ func TestAcceptance(t *testing.T) {
 	// --- t1, then changes, then t2
 	time.Sleep(50 * time.Millisecond)
 	t1 := time.Now()
-	at1 := src.dump(t, ctx, gvrs)
+	at1 := src.dump(t, ctx, gvrs, true)
 	time.Sleep(50 * time.Millisecond)
 
 	for _, u := range decode(t, changes) {
@@ -439,7 +469,7 @@ func TestAcceptance(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond)
 	t2 := time.Now()
-	at2 := src.dump(t, ctx, gvrs)
+	at2 := src.dump(t, ctx, gvrs, true)
 	stopWatcher()
 
 	// --- the raw object, read back by the SQL every consumer uses
@@ -490,7 +520,7 @@ func TestAcceptance(t *testing.T) {
 			at := newCluster(t, &rest.Config{Host: s.URL})
 
 			// every object, as the source had it at that time
-			for _, d := range diff(c.want, at.dump(t, ctx, gvrs)) {
+			for _, d := range diff(c.want, at.dump(t, ctx, gvrs, false)) {
 				if !expectedDifference(d) {
 					t.Error(d)
 				}

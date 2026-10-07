@@ -55,8 +55,17 @@ view, which adds `api_group`.
 - **managedFields** are removed from every object: they record field
   ownership, are often larger than the object, and no `kubectl get` shows
   them.
-- **Secrets** keep their type and key names, with every value empty and
-  the annotation `observability-to-blobs/redacted: data`. Their
+- **Secrets** keep their type and key names, and the annotation
+  `observability-to-blobs/redacted: data`. Every value is scrambled:
+  `k8sobs_` and random letters and digits, a tenth of the original
+  value's length in bytes, rounded up. A 10-byte password becomes
+  `k8sobs_` and one character, a 1.6 KB certificate `k8sobs_` and 160. So
+  a reader sees that a key had a value, and roughly how long it was, and
+  nothing of the value. In `data` the scrambled value is base64-encoded
+  like any value, so an API server, apiserver-at's included, reads the
+  Secret. An empty value stays empty. Scrambling is fresh at every
+  ingest: an unchanged Secret keeps its scrambled values while it stays
+  in the agent's store, and gets new ones after a restart or a relist. Their
   `kubectl.kubernetes.io/last-applied-configuration`, which holds the
   data, is removed. This happens in the informer's transform, so the agent
   never holds Secret data, even in memory. `kubectl get secrets` still
@@ -165,10 +174,10 @@ What apiserver-at shows differently from the cluster at that time:
 
 | test | what |
 |---|---|
-| `kobjects` units (fake clients) | snapshot rows then the snapshot row, no initial-list events, changes in all namespaces, a requested snapshot, Secret redaction on every row, discovery filtering, snapshot alignment |
+| `kobjects` units (fake clients) | snapshot rows then the snapshot row, no initial-list events, changes in all namespaces, a requested snapshot, Secret values scrambled on every row (empty ones kept empty), discovery filtering, snapshot alignment |
 | `tools/apiserver-at` `TestObjectsAt` | `objects_at` over crafted raw rows, through `raw.sql` and `tables.sql` |
 | `tools/apiserver-at` `TestAcceptance` | a real API server as the source. The watcher's rows go through the SQL to apiserver-at. Every object of the 62 resources is equal at a past time and at the present. At the present, the server-side Tables of all of them are equal, as is `kubectl describe` of a pod, a node and a deployment. The source's etcd keys are the keys apiserver-at writes. A write is refused. About 40 s, part of `./test.sh checks` |
-| `./test.sh` itest | the cluster agent in k3s, through out_s3 and the compactor: its keys and lines, built-in and custom resources snapshotted at the scheduled interval, snapshot counts, no managedFields, no Secret data anywhere, Events of all namespaces including one about the Node, three pod incarnations, the objects tier equal to raw hourly and daily. Then kubectl through apiserver-at: a ConfigMap before its creation, at each of its two values, after its deletion, and fourteen `kubectl get`/`describe` outputs equal to the live cluster's |
+| `./test.sh` itest | the cluster agent in k3s, through out_s3 and the compactor: its keys and lines, built-in and custom resources snapshotted at the scheduled interval, snapshot counts, no managedFields, Secret values scrambled to a tenth of their length and no Secret data anywhere, Events of all namespaces including one about the Node, three pod incarnations, the objects tier equal to raw hourly and daily. Then kubectl through apiserver-at: a ConfigMap before its creation, at each of its two values, after its deletion, and fourteen `kubectl get`/`describe` outputs equal to the live cluster's |
 
 ## Measured
 
@@ -202,7 +211,7 @@ daily tier.
   API (compactor/README.md, "The logs API"), which already answers by
   namespace, pod and container.
 - **Data handling**: the bucket now holds every ConfigMap and the env of every pod,
-  as the API server does. Secrets are redacted, but values that
+  as the API server does. Secret values are scrambled, but values that
   workloads put elsewhere are not.
 - **Backpressure**: while Fluent Bit does not drain, every dropped row
   asks for a snapshot, and a snapshot's rows can be dropped too. That

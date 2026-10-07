@@ -2,9 +2,13 @@ package kobjects
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
+	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -49,8 +53,15 @@ func TestSanitizeSecret(t *testing.T) {
 	})
 	u.SetManagedFields([]metav1.ManagedFieldsEntry{{Manager: "kubectl"}})
 	Sanitize(secrets, u)
-	if got := u.Object["data"]; !reflect.DeepEqual(got, map[string]interface{}{"password": "", "user": ""}) {
-		t.Fatalf("data %v", got)
+	// hunter2 and admin, 7 and 5 bytes: one random character each
+	data := u.Object["data"].(map[string]interface{})
+	if len(data) != 2 {
+		t.Fatalf("data %v", data)
+	}
+	for k, v := range data {
+		if !scrambled(t, v, 1) {
+			t.Fatalf("%s: %v", k, v)
+		}
 	}
 	want := map[string]string{"keep": "this", RedactedAnnotation: "data"}
 	if got := u.GetAnnotations(); !reflect.DeepEqual(got, want) {
@@ -61,6 +72,48 @@ func TestSanitizeSecret(t *testing.T) {
 	}
 	if u.Object["type"] != "Opaque" {
 		t.Fatal("type lost")
+	}
+}
+
+// scrambled tells whether v is the base64 of ScrambledPrefix and n random
+// letters and digits.
+func scrambled(t *testing.T, v interface{}, n int) bool {
+	t.Helper()
+	s, _ := v.(string)
+	b, err := base64.StdEncoding.DecodeString(s)
+	return err == nil && regexp.MustCompile(fmt.Sprintf(`^k8sobs_[A-Za-z0-9]{%d}$`, n)).Match(b)
+}
+
+func TestScramble(t *testing.T) {
+	for n, want := range map[int]int{0: 0, 1: 1, 10: 1, 11: 2, 64: 7, 4096: 410} {
+		s := Scramble(n)
+		if !strings.HasPrefix(s, ScrambledPrefix) || len(s) != len(ScrambledPrefix)+want {
+			t.Errorf("Scramble(%d) = %q, want the prefix and %d characters", n, s, want)
+		}
+		if strings.Trim(s[len(ScrambledPrefix):], scrambleAlphabet) != "" {
+			t.Errorf("Scramble(%d) = %q: not letters and digits", n, s)
+		}
+	}
+	if Scramble(4096) == Scramble(4096) {
+		t.Error("two scrambles of a value alike")
+	}
+}
+
+func TestSanitizeSecretStringData(t *testing.T) {
+	u := obj("v1", "Secret", "app", "s", "1", map[string]interface{}{
+		"stringData": map[string]interface{}{"token": strings.Repeat("x", 25), "none": ""},
+		"data":       map[string]interface{}{"empty": ""},
+	})
+	Sanitize(secrets, u)
+	if v := u.Object["stringData"].(map[string]interface{})["token"].(string); !regexp.MustCompile(`^k8sobs_[A-Za-z0-9]{3}$`).MatchString(v) {
+		t.Errorf("stringData %q", v)
+	}
+	// an empty value stays empty
+	if v := u.Object["data"].(map[string]interface{})["empty"]; v != "" {
+		t.Errorf("an empty data value: %v", v)
+	}
+	if v := u.Object["stringData"].(map[string]interface{})["none"]; v != "" {
+		t.Errorf("an empty stringData value: %v", v)
 	}
 }
 
@@ -320,7 +373,8 @@ func TestWatcherSnapshotsThenEvents(t *testing.T) {
 		if r.GVR == secrets && r.Object != nil {
 			var o map[string]interface{}
 			_ = json.Unmarshal(r.Object, &o)
-			if !reflect.DeepEqual(o["data"], map[string]interface{}{"password": ""}) {
+			d, _ := o["data"].(map[string]interface{})
+			if len(d) != 1 || !scrambled(t, d["password"], 1) {
 				t.Fatalf("%s secret row with data %v", r.Kind, o["data"])
 			}
 		}

@@ -4,7 +4,7 @@ metadata:
   name: k8sagent
 ---
 # Read everything the API server serves: the agent ships what kubectl get
-# can show. Secrets are read too and leave the agent with empty values
+# can show. Secrets are read too and leave the agent with scrambled values
 # (K8SAGENT.md, "Secrets"); an overlay that must not grant even that
 # replaces this rule with an explicit list without secrets, and the agent
 # skips what it is not allowed to list.

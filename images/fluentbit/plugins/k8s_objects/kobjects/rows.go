@@ -9,6 +9,8 @@
 package kobjects
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"time"
 
@@ -32,8 +34,15 @@ const (
 	KindSnapshot = "snapshot"
 )
 
-// RedactedAnnotation marks a Secret whose data values the agent emptied.
+// RedactedAnnotation marks a Secret whose data values the agent scrambled.
 const RedactedAnnotation = "observability-to-blobs/redacted"
+
+// ScrambledPrefix starts every Secret value the agent ships. The rest is
+// random letters and digits, a tenth of the original value's length in
+// bytes, rounded up: a reader sees that a key had a value, and roughly how
+// long it was, and nothing of the value itself. An empty value stays
+// empty: it has nothing to hide, and empty says more than a prefix would.
+const ScrambledPrefix = "k8sobs_"
 
 // Row is one line of the objects table.
 type Row struct {
@@ -98,21 +107,37 @@ func objectRow(now time.Time, kind string, gvr schema.GroupVersionResource, u *u
 
 // Sanitize is what leaves the cluster of an object: managedFields never
 // (bookkeeping of field owners, often larger than the object), and of a
-// Secret its data keys with empty values and none of the copies of the data
-// that annotations can hold. The Secret keeps its type and key names, so
-// kubectl get secrets still counts the keys. It changes u in place.
+// Secret its data keys with scrambled values (Scramble) and none of the
+// copies of the data that annotations can hold. The Secret keeps its type
+// and key names, so kubectl get secrets still counts the keys. It changes u
+// in place; the watcher calls it as objects enter the informer's store, so
+// the agent never holds a Secret's values.
 func Sanitize(gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
 	u.SetManagedFields(nil)
 	if gvr.Group != "" || gvr.Resource != "secrets" {
 		return
 	}
-	for _, field := range []string{"data", "stringData"} {
-		m, ok := u.Object[field].(map[string]interface{})
-		if !ok {
-			continue
+	// data holds base64, which the scrambled value is too, so that an API
+	// server can still read the Secret; stringData holds the plain value
+	if m, ok := u.Object["data"].(map[string]interface{}); ok {
+		for k, v := range m {
+			s, _ := v.(string)
+			n := len(s)
+			if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+				n = len(b)
+			}
+			if n == 0 {
+				m[k] = ""
+				continue
+			}
+			m[k] = base64.StdEncoding.EncodeToString([]byte(Scramble(n)))
 		}
-		for k := range m {
-			m[k] = ""
+	}
+	if m, ok := u.Object["stringData"].(map[string]interface{}); ok {
+		for k, v := range m {
+			if s, _ := v.(string); s != "" {
+				m[k] = Scramble(len(s))
+			}
 		}
 	}
 	ann := u.GetAnnotations()
@@ -123,4 +148,26 @@ func Sanitize(gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
 	delete(ann, "kubectl.kubernetes.io/last-applied-configuration")
 	ann[RedactedAnnotation] = "data"
 	u.SetAnnotations(ann)
+}
+
+const scrambleAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+// Scramble is the value shipped for a Secret value of n bytes:
+// ScrambledPrefix and ceil(n/10) random letters and digits.
+func Scramble(n int) string {
+	out := []byte(ScrambledPrefix)
+	want := len(out) + (n+9)/10
+	var buf [64]byte
+	for len(out) < want {
+		if _, err := rand.Read(buf[:]); err != nil {
+			panic(err) // crypto/rand does not fail
+		}
+		for _, b := range buf {
+			// 248 is the largest multiple of 62 in a byte: no bias
+			if b < 248 && len(out) < want {
+				out = append(out, scrambleAlphabet[b%62])
+			}
+		}
+	}
+	return string(out)
 }
