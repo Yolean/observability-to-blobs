@@ -7,5 +7,5 @@ resources:
 - ../base
 images:
 - name: ghcr.io/yolean/observability-state
-  newTag: 20261005T141733Z
-  digest: sha256:00700ea2b9ee45cbcb5f5c7570510bcb6508c633b1798159139940df7a563583
+  newTag: 20261007T134926Z
+  digest: sha256:872d0f0e11effe98837e365e75864ea1f273ee0535732b0dbfa8f0954243d080

@@ -16,11 +16,14 @@ import "k8s.io/apimachinery/pkg/runtime/schema"
 const etcdPrefix = "/registry"
 
 var specialPrefixes = map[schema.GroupResource]string{
+	// core resources under their historical names
 	{Resource: "replicationcontrollers"}:                "controllers",
 	{Resource: "endpoints"}:                             "services/endpoints",
 	{Resource: "nodes"}:                                 "minions",
 	{Resource: "services"}:                              "services/specs",
 	{Group: "networking.k8s.io", Resource: "ingresses"}: "ingress",
+
+	// built-in resources prefixed with their group
 	{Group: "apiextensions.k8s.io", Resource: "customresourcedefinitions"}: "apiextensions.k8s.io/customresourcedefinitions",
 	{Group: "apiregistration.k8s.io", Resource: "apiservices"}:             "apiregistration.k8s.io/apiservices",
 }
