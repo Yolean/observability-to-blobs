@@ -142,6 +142,12 @@ raw tier), and takes the API server's release from the kubelet version
 the cluster's Nodes reported at that time. A state loads and serves in
 about ten seconds.
 
+The release must be the cluster's minor. The first itest ran apiserver-at
+1.37 against a k3s 1.35 cluster. Its tables had columns that 1.35 does not
+print: CRDs with SCOPE and VERSIONS, a Node's kernel with `(amd64)`. And
+its RBAC bootstrap, which cannot be turned off, added 1.37's four new
+system ClusterRoles to the served state. At 1.35 all of them matched.
+
 What apiserver-at shows differently from the cluster at that time:
 
 - `kube-system/extension-apiserver-authentication` holds apiserver-at's
@@ -163,6 +169,24 @@ What apiserver-at shows differently from the cluster at that time:
 | `tools/apiserver-at` `TestObjectsAt` | `objects_at` over crafted raw rows, through `raw.sql` and `tables.sql` |
 | `tools/apiserver-at` `TestAcceptance` | a real API server as the source. The watcher's rows go through the SQL to apiserver-at. Every object of the 62 resources is equal at a past time and at the present. At the present, the server-side Tables of all of them are equal, as is `kubectl describe` of a pod, a node and a deployment. The source's etcd keys are the keys apiserver-at writes. A write is refused. About 40 s, part of `./test.sh checks` |
 | `./test.sh` itest | the cluster agent in k3s, through out_s3 and the compactor: its keys and lines, built-in and custom resources snapshotted at the scheduled interval, snapshot counts, no managedFields, no Secret data anywhere, Events of all namespaces including one about the Node, three pod incarnations, the objects tier equal to raw hourly and daily. Then kubectl through apiserver-at: a ConfigMap before its creation, at each of its two values, after its deletion, and fourteen `kubectl get`/`describe` outputs equal to the live cluster's |
+
+## Measured
+
+The itest cluster, a single k3s 1.35 node with about 650 objects, in 33
+minutes of a run with `SNAPSHOT_INTERVAL` 2m, which is 30 times the
+default:
+
+| | rows | bytes |
+|---|---|---|
+| raw, the cluster agent's 36 objects | 12,421 snapshot rows, 644 change rows, 1,121 snapshot rows | 13.5 MB of object JSON, 2.7 MB zstd |
+| raw, the node agent's 65 objects, for comparison | | 1.9 MB zstd |
+| hourly `objects` (3 hours) | the same | 0.32 MB parquet, about the size of `logs` |
+| daily `objects` | | 0.16 MB |
+
+The agent used 36 MiB and 4m of CPU while it watched 59 resources. A
+snapshot of the whole cluster is about 0.7 MB of JSON. At the default 1h
+interval, a cluster of this size costs well under a megabyte a day in the
+daily tier.
 
 ## Open
 

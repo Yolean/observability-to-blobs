@@ -25,7 +25,8 @@
 #   CONTEXT, S3_PORT     must match CLUSTER_CONFIG when overriding it
 #   IMAGE_BUILD_ARGS     extra docker buildx flags, e.g. a CI cache
 #   KUBEBUILDER_ASSETS   etcd, kube-apiserver and kubectl at ENVTEST_K8S for
-#                        tools/apiserver-at (default: setup-envtest downloads them)
+#                        tools/apiserver-at's tests (default: setup-envtest
+#                        downloads them; the itest's are the cluster's release)
 #   IMAGE_BUILDER        docker (default when docker is installed), buildkit
 #                        (buildctl against BUILDKIT_HOST) or cluster (buildctl
 #                        against a rootless BuildKit pod in the itest cluster,
@@ -75,8 +76,9 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 need() {
   command -v "$1" >/dev/null 2>&1 || fail "missing tool: $1 ($2)"
 }
-# The Kubernetes release of the binaries tools/apiserver-at runs: the itest
-# cluster's (y-cluster's k3s), whose objects it serves (K8SAGENT.md).
+# The Kubernetes release of the API servers in tools/apiserver-at's
+# acceptance test, the source and apiserver-at both. The itest's
+# apiserver-at runs the itest cluster's own release instead (at_assets).
 ENVTEST_K8S=1.37.0
 SETUP_ENVTEST=v0.25.2
 # envtest_assets: KUBEBUILDER_ASSETS, downloaded once into setup-envtest's
@@ -934,7 +936,14 @@ assert "pod 'reused': three incarnations added, the first two deleted" \
 # kubectl at a time, from the raw tier alone: apiserver-at, a stock
 # kube-apiserver at the cluster's release over etcd holding objects_at(t)
 phase "assert: kubectl at a time (tools/apiserver-at)"
-envtest_assets
+# apiserver-at at the cluster's own release: another release's API server
+# prints other columns, and its RBAC bootstrap adds its release's system
+# roles to the state (seen: 1.37 against a 1.35 cluster, 2026-10-07)
+need jq "https://jqlang.github.io/jq/"
+AT_K8S=$($KUBECTL version -o json | jq -r .serverVersion.gitVersion | sed -E 's/^v([0-9]+\.[0-9]+)\..*/\1.x/')
+AT_ASSETS=$(GOFLAGS='' go run "sigs.k8s.io/controller-runtime/tools/setup-envtest@$SETUP_ENVTEST" use "$AT_K8S" -p path) \
+  || fail "setup-envtest could not provide Kubernetes $AT_K8S"
+echo "  apiserver-at runs Kubernetes $AT_K8S: $AT_ASSETS"
 (cd tools/apiserver-at && go build -o ../../target/bin/apiserver-at .) || fail "build tools/apiserver-at"
 # at_serve <UTC time>: apiserver-at serving the raw tier's objects as they
 # were then, in the background, reached with at_kubectl
@@ -943,7 +952,7 @@ at_serve() {
   q "COPY (SELECT api_version, resource, namespace, name, object FROM objects_at(TIMESTAMP_NS '$1')) TO '$INIT.at.jsonl' (FORMAT json)" >/dev/null \
     || fail "objects_at($1)"
   rm -f "$INIT.at.kubeconfig"
-  target/bin/apiserver-at -objects "$INIT.at.jsonl" -kubeconfig "$INIT.at.kubeconfig" -label "$1" >"$INIT.at.log" 2>&1 &
+  target/bin/apiserver-at -assets "$AT_ASSETS" -objects "$INIT.at.jsonl" -kubeconfig "$INIT.at.kubeconfig" -label "$1" >"$INIT.at.log" 2>&1 &
   AT_PID=$!
   local deadline=$((SECONDS + 120))
   until grep -q '^serving ' "$INIT.at.log"; do
@@ -967,10 +976,12 @@ at_kubectl() { kubectl --kubeconfig "$INIT.at.kubeconfig" "$@"; }
 timeless() { perl -pe 's/\b(\d+d)?(\d+h)?(\d+m)?\d+[smhd]\b/<age>/g; s/[ \t]+/ /g; s/ $//'; }
 
 probe_is() { [ "$(at_kubectl get configmap k8sagent-probe -o jsonpath='{.data.v}' 2>&1)" = "$1" ]; }
-probe_gone() { at_kubectl get configmap k8sagent-probe 2>&1 | grep -q NotFound; }
+# (kubectl's output is captured first: it exits non-zero on these, which
+# pipefail would make the pipeline's status)
+probe_gone() { local out; out=$(at_kubectl get configmap k8sagent-probe 2>&1 || true); [[ $out == *NotFound* ]]; }
 at_serve "$PROBE_0"; expect "at $PROBE_0, before its creation, there is no ConfigMap k8sagent-probe" probe_gone
 at_serve "$PROBE_1"; expect "at $PROBE_1 ConfigMap k8sagent-probe has v=1" probe_is 1
-refused() { at_kubectl create namespace at-write 2>&1 | grep -q MethodNotAllowed; }
+refused() { local out; out=$(at_kubectl create namespace at-write 2>&1 || true); [[ $out == *MethodNotAllowed* ]]; }
 expect "apiserver-at refuses a write" refused
 at_serve "$PROBE_2"; expect "at $PROBE_2 ConfigMap k8sagent-probe has v=2" probe_is 2
 at_serve "$PROBE_3"; expect "at $PROBE_3, after its deletion, there is no ConfigMap k8sagent-probe" probe_gone
@@ -1206,7 +1217,7 @@ daily_rows() {
 for day in $DAYS; do
   echo "  rollup $day"
   compactor_job "[\"rollup\", \"$day\"]"
-  daily_rows "$day" "logs, metrics and podindex hold exactly the distinct rows of the day's folded raw keys"
+  daily_rows "$day" "logs, metrics, podindex and objects hold exactly the distinct rows of the day's folded raw keys"
   assert "daily $day: the sidecar lists every key of the day's hourly sidecars" \
     "SELECT (SELECT list(key ORDER BY key) FROM read_csv('s3://$BUCKET/daily/$CLUSTER/_folded/$day.csv.zst', header = true))
           = (SELECT list(DISTINCT key ORDER BY key) FROM read_csv('s3://$BUCKET/hourly/$CLUSTER/_folded/$day/*.csv', header = true))"
