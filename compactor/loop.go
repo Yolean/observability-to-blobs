@@ -150,7 +150,7 @@ func (c *compactor) foldJob(ctx context.Context, h time.Time, listed []Object, n
 	c.m.fold(r)
 	if r.wrote || len(r.deleted) > 0 {
 		c.log.Info("fold", "hour", hour, "keys", r.keys, "full", r.full, "final", r.final, "deleted", len(r.deleted),
-			"logs", r.rows["logs"], "metrics", r.rows["metrics"], "podindex", r.rows["podindex"], "pods", r.rows["pods"],
+			"logs", r.rows["logs"], "metrics", r.rows["metrics"], "podindex", r.rows["podindex"], "pods", r.rows["pods"], "objects", r.rows["objects"],
 			"seconds", time.Since(start).Seconds())
 	}
 	return r, nil
@@ -170,7 +170,7 @@ func (c *compactor) rollupJob(ctx context.Context, day time.Time, timeout time.D
 	c.m.rollup(r)
 	if len(r.hours) > 0 {
 		c.log.Info("rollup", "day", day.Format(dateLayout), "hours", len(r.hours), "namespaces", r.namespaces,
-			"logs", r.rows["logs"], "metrics", r.rows["metrics"], "podindex", r.rows["podindex"], "pods", r.rows["pods"],
+			"logs", r.rows["logs"], "metrics", r.rows["metrics"], "podindex", r.rows["podindex"], "pods", r.rows["pods"], "objects", r.rows["objects"],
 			"seconds", time.Since(start).Seconds())
 	}
 	return r, nil

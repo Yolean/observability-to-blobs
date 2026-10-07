@@ -31,16 +31,18 @@ func (w *world) wholeDay(t *testing.T, keys []string) {
 		"CREATE TEMP TABLE logs AS SELECT DISTINCT * EXCLUDE (filename) FROM logs",
 		"CREATE TEMP TABLE metrics AS SELECT DISTINCT * EXCLUDE (filename) FROM metrics",
 		"CREATE TEMP TABLE podindex AS SELECT DISTINCT * EXCLUDE (filename) FROM podindex",
+		"CREATE TEMP TABLE objects AS SELECT DISTINCT * EXCLUDE (filename) FROM objects",
 		"COPY logs TO " + sqlString(filepath.Join(w.dir, "whole-logs.parquet")) + " (FORMAT parquet)",
 		"COPY metrics TO " + sqlString(filepath.Join(w.dir, "whole-metrics.parquet")) + " (FORMAT parquet)",
 		"COPY podindex TO " + sqlString(filepath.Join(w.dir, "whole-podindex.parquet")) + " (FORMAT parquet)",
+		"COPY objects TO " + sqlString(filepath.Join(w.dir, "whole-objects.parquet")) + " (FORMAT parquet)",
 		"COPY (SELECT * FROM pods) TO " + sqlString(filepath.Join(w.dir, "whole-pods.parquet")) + " (FORMAT parquet)",
 	} {
 		if _, err := conn.ExecContext(w.ctx, s); err != nil {
 			t.Fatalf("%s: %v", s, err)
 		}
 	}
-	for _, tbl := range []string{"logs", "metrics", "podindex", "pods"} {
+	for _, tbl := range []string{"logs", "metrics", "podindex", "objects", "pods"} {
 		sameRows(t, w.c.db, "daily "+tbl, w.dailySource(tbl, day),
 			"read_parquet("+sqlString(filepath.Join(w.dir, "whole-"+tbl+".parquet"))+")")
 	}
@@ -149,7 +151,7 @@ func TestRollupOfAnHourWithoutObjects(t *testing.T) {
 	w := newWorld(t)
 	w.putA()
 	w.fold(h10, afterG)
-	for _, tbl := range []string{"logs", "metrics", "podindex", "pods"} {
+	for _, tbl := range []string{"logs", "metrics", "podindex", "objects", "pods"} {
 		w.remove(w.obj(w.c.l.hourlyStem(tbl, h10)).key)
 	}
 	if r := w.rollup(day); len(r.hours) != 1 || r.rows["logs"] != 0 {

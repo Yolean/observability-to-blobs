@@ -124,6 +124,20 @@ func exitLine(t time.Time, ns, pod, uid, container string, restart, code int) li
 		"restart": restart, "container_id": strings.Repeat("a", 64), "exit_code": code, "exit_reason": "Completed"}
 }
 
+// objectLine is a row of the cluster agent's objects table; a snapshot
+// row when name is "".
+func objectLine(kind string, t time.Time, name, rv string) line {
+	l := line{"table": "objects", "time": ts(t), "ts": ts(t), "cluster": testCluster, "kind": kind,
+		"api_version": "v1", "resource": "configmaps"}
+	if name == "" {
+		l["objects"] = 1
+		return l
+	}
+	l["namespace"], l["name"], l["object_uid"], l["resource_version"] = "ns1", name, "uid-"+name, rv
+	l["object"] = `{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"` + name + `","namespace":"ns1"}}`
+	return l
+}
+
 // logs returns n log lines of one container from start, a second apart.
 func logs(start time.Time, n int, ns, pod, uid string) []line {
 	var out []line

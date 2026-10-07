@@ -1,0 +1,58 @@
+# Cluster agent pipeline (K8SAGENT.md): one process per cluster that
+# watches the API server and ships the objects table, in the node agent's
+# blob format, under the producer segment _k8sagent where a node agent's
+# key has its node:
+#   objects   every add, change and delete of every listable resource,
+#             events of all namespaces included, and a snapshot of each
+#             resource when its watch starts and every SNAPSHOT_INTERVAL
+# Environment: CLUSTER_NAME S3_BUCKET S3_ENDPOINT S3_REGION S3_TLS
+# UPLOAD_TIMEOUT SNAPSHOT_INTERVAL, plus AWS_ACCESS_KEY_ID /
+# AWS_SECRET_ACCESS_KEY.
+service:
+  flush: 1
+  log_level: info
+  http_server: on
+  http_listen: 127.0.0.1
+  http_port: 2020
+  storage.path: /var/lib/k8sagent/storage
+  storage.sync: normal
+  storage.max_chunks_up: 128
+
+plugins:
+  - /fluent-bit/lib/in_k8s_objects.so
+
+pipeline:
+  inputs:
+    - name: k8s_objects
+      alias: objects
+      tag: blob
+      cluster: ${CLUSTER_NAME}
+      snapshot_interval: ${SNAPSHOT_INTERVAL}
+      discovery_interval: 1m
+      # events.k8s.io/events (the core events again) and leases
+      exclude: default
+      storage.type: filesystem
+
+  outputs:
+    # the node agent's output, but for the key's producer segment; see
+    # agent/fluent-bit.yaml for the buffering and retry reasoning
+    - name: s3
+      alias: blob
+      match: blob
+      bucket: ${S3_BUCKET}
+      endpoint: ${S3_ENDPOINT}
+      region: ${S3_REGION}
+      tls: ${S3_TLS}
+      tls.ca_file: /etc/ssl/certs/ca-certificates.crt
+      use_put_object: on
+      format: json_lines
+      compression: zstd
+      json_date_key: ts
+      json_date_format: iso8601
+      upload_timeout: ${UPLOAD_TIMEOUT}
+      total_file_size: 64M
+      store_dir: /var/lib/k8sagent/s3
+      store_dir_limit_size: 1G
+      storage.total_limit_size: 1G
+      retry_limit: 100000
+      s3_key_format: /raw1/${CLUSTER_NAME}/%Y-%m-%d/%H/_k8sagent/%M%S-$UUID.jsonl.zst

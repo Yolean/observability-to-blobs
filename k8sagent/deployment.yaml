@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8sagent
+spec:
+  # one watcher per cluster: two would ship every row twice (harmless,
+  # the fold's DISTINCT keeps one, but twice the bytes)
+  replicas: 1
+  # never two at once, so a rollout has a gap rather than an overlap; the
+  # new pod's first snapshot is the state after the gap
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: k8sagent
+  template:
+    metadata:
+      labels:
+        app: k8sagent
+    spec:
+      serviceAccountName: k8sagent
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: agent
+        image: ghcr.io/yolean/observability-nodeagent
+        imagePullPolicy: IfNotPresent
+        args:
+        - -c
+        - /fluent-bit/etc/config/fluent-bit.yaml
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]
+        env:
+        - name: CLUSTER_NAME
+          value: dev
+        - name: UPLOAD_TIMEOUT
+          value: 30s
+        - name: SNAPSHOT_INTERVAL
+          value: 1h
+        - name: S3_REGION
+          value: us-east-1
+        - name: S3_TLS
+          value: "on"
+        envFrom:
+        - secretRef:
+            name: node-agent-s3
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            memory: 1Gi
+        volumeMounts:
+        - name: config
+          mountPath: /fluent-bit/etc/config
+          readOnly: true
+        # the upload buffer: it survives a container restart, not a new
+        # pod; a new pod snapshots, so what a lost buffer held is only
+        # the detail between two snapshots
+        - name: state
+          mountPath: /var/lib/k8sagent
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: config
+        configMap:
+          name: k8sagent
+      - name: state
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}

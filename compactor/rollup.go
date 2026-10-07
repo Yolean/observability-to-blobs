@@ -155,6 +155,18 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 	if err := c.unionDistinct(ctx, conn, "podindex", objs, ""); err != nil {
 		return r, err
 	}
+	// objects, like podindex, is one object for the day
+	objectsObj, ok, err := c.locate(ctx, c.l.dailyStem("objects", day))
+	if err != nil {
+		return r, err
+	}
+	objs = nil
+	if ok {
+		objs = append(objs, objectsObj)
+	}
+	if err := c.unionDistinct(ctx, conn, "objects", objs, ""); err != nil {
+		return r, err
+	}
 
 	r.rows = map[string]int64{}
 	for _, t := range []string{"logs", "metrics"} {
@@ -180,6 +192,12 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 		return r, err
 	}
 	if r.rows["podindex"], err = c.count(ctx, conn, "podindex"); err != nil {
+		return r, err
+	}
+	if err := c.write(ctx, conn, "objects", "SELECT * FROM objects", objectsObj.key); err != nil {
+		return r, err
+	}
+	if r.rows["objects"], err = c.count(ctx, conn, "objects"); err != nil {
 		return r, err
 	}
 

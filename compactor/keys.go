@@ -14,8 +14,9 @@ import (
 // relative to the bucket; a store turns them into paths DuckDB reads.
 
 // The tables of the hourly tier, in the order a fold writes them; pods is
-// derived from the other three and written after them.
-var foldTables = []string{"logs", "metrics", "podindex"}
+// derived from logs, metrics and podindex and written after them. objects
+// is the cluster agent's (K8SAGENT.md), and empty without one.
+var foldTables = []string{"logs", "metrics", "podindex", "objects"}
 
 // sortOrder is each table's ORDER BY in both tiers: namespace first, so
 // row-group statistics prune a namespace or a pod to a few row groups.
@@ -24,11 +25,15 @@ var sortOrder = map[string]string{
 	"metrics":  "namespace, name, pod, pod_uid, container, restart, time",
 	"podindex": "pod_uid, time",
 	"pods":     "namespace, pod, pod_started, pod_uid, container, restart",
+	// an object's rows adjacent and in time order: the snapshots of an
+	// unchanged object repeat one string, which parquet stores once
+	"objects": "api_group, resource, namespace, name, time",
 }
 
 // rowGroups is the ROW_GROUP_SIZE of the tables that replace partitioning
 // with sorting; DuckDB rounds 20000 to 20480.
-var rowGroups = map[string]int{"logs": 20000, "metrics": 20000}
+// objects rows are whole objects, kilobytes each, so smaller groups.
+var rowGroups = map[string]int{"logs": 20000, "metrics": 20000, "objects": 5000}
 
 const dateLayout = "2006-01-02"
 
@@ -171,7 +176,8 @@ func partitionNamespace(key string) (string, bool) {
 	return ns, err == nil
 }
 
-// dailyStem is the stem of the one object of podindex or pods for a day.
+// dailyStem is the stem of the one object of podindex, pods or objects for
+// a day.
 func (l layout) dailyStem(table string, day time.Time) string {
 	return fmt.Sprintf("daily/%s/%s/%s", l.cluster, table, day.Format(dateLayout))
 }

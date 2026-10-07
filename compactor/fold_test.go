@@ -23,13 +23,14 @@ func (w *world) putA() string {
 	return w.put(rawKey(h10, "n1", "0000-a"), append(logs(h10, 5, "ns1", "p1", "u1"),
 		podLine("pod-observed", h10, "ns1", "p1", "u1"),
 		containerLine(h10, "ns1", "p1", "u1", "app", 0),
-		scrapeLine(h10.Add(10*time.Second), "ns1", "p1", "u1", "app", 0, "requests", 1))...)
+		scrapeLine(h10.Add(10*time.Second), "ns1", "p1", "u1", "app", 0, "requests", 1),
+		objectLine("object-snapshot", h10, "c1", "5"), objectLine("snapshot", h10, "", ""))...)
 }
 
 func bLines() []line {
 	t := h10.Add(30 * time.Minute)
 	return append(logs(t, 5, "ns1", "p1", "u1"), journalLine(t, "k3s up"),
-		scrapeLine(t, "ns1", "p1", "u1", "app", 0, "requests", 2))
+		scrapeLine(t, "ns1", "p1", "u1", "app", 0, "requests", 2), objectLine("object-modified", t, "c1", "6"))
 }
 
 func (w *world) putB() string { return w.put(rawKey(h10, "n1", "3000-b"), bLines()...) }
@@ -91,7 +92,7 @@ func TestIncrementalFoldEqualsFullFold(t *testing.T) {
 		t.Fatalf("full fold: %+v", r)
 	}
 
-	for _, tbl := range []string{"logs", "metrics", "podindex", "pods"} {
+	for _, tbl := range []string{"logs", "metrics", "podindex", "objects", "pods"} {
 		sameRows(t, inc.c.db, "hourly "+tbl, inc.from(inc.c.l.hourlyStem(tbl, h10)), full.from(full.c.l.hourlyStem(tbl, h10)))
 	}
 	if n := inc.hourlyRows("logs", h10); n != h10Logs {
@@ -99,6 +100,10 @@ func TestIncrementalFoldEqualsFullFold(t *testing.T) {
 	}
 	if n := inc.hourlyRows("metrics", h10); n != h10Metrics {
 		t.Fatalf("metrics rows %d, want %d", n, h10Metrics)
+	}
+	// the snapshot's two rows and the change, its retried upload folded
+	if n := inc.hourlyRows("objects", h10); n != 3 {
+		t.Fatalf("objects rows %d, want 3", n)
 	}
 	f := inc.folded(h10)
 	if len(f) != 4 {
@@ -261,7 +266,7 @@ func TestExpiredSidecar(t *testing.T) {
 	}
 	// and the hourly objects too, then a late key arrives
 	w.remove(w.c.l.hourlySidecar(h10))
-	for _, tbl := range []string{"logs", "metrics", "podindex", "pods"} {
+	for _, tbl := range []string{"logs", "metrics", "podindex", "objects", "pods"} {
 		w.remove(w.obj(w.c.l.hourlyStem(tbl, h10)).key)
 	}
 	w.putBRetry()
