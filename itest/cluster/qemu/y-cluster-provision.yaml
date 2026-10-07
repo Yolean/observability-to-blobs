@@ -11,6 +11,10 @@ context: node-agent
 sshPort: "2232"
 cpus: "4"
 memory: "6144"
+# a cold image build in the cluster's BuildKit (Fluent Bit and two Go
+# plugins, one of them client-go) needs about 12G; the default 20G disk
+# went into DiskPressure and evicted BuildKit mid-build (2026-10-07)
+diskSize: 40G
 gateway:
   skip: true
 portForwards:
