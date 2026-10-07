@@ -101,6 +101,37 @@ requests in the upstream repository only; in a fork it runs only when
 started by hand (Actions, "ci", "Run workflow"), so a push there is not
 tested unless you tested it.
 
+## kubectl against a cluster as it was
+
+From any machine with go, duckdb and kubectl, against a production bucket.
+The SQL lives in the repository, so a shallow clone of main is the install:
+
+```bash
+git clone --depth 1 https://github.com/Yolean/observability-to-blobs
+cd observability-to-blobs
+
+export S3_ENDPOINT=<host[:port]> S3_TLS=on S3_REGION=<region> S3_BUCKET=<bucket>
+export AWS_ACCESS_KEY_ID=<key id> AWS_SECRET_ACCESS_KEY=<secret>
+export PARQUET_KEYS_DIR=<dir>   # only if the compactor encrypts: one file per key id, as the compactor's
+
+local/kubectl-at.sh <cluster> '2026-10-07 10:12:00' get pods -A   # the time is UTC
+local/kubectl-at.sh <cluster> '2026-10-07 10:12:00'               # serve until ^C; export the printed KUBECONFIG
+```
+
+The credentials need read access only: GET and LIST under `hourly/` and
+`daily/` (and `raw1/` with `SOURCE=raw`). They reach DuckDB through a secret
+in a private temporary directory, never the command line. `tools/apiserver-at`
+itself takes no credentials: it serves a state file on 127.0.0.1 and writes
+a kubeconfig for that endpoint. It runs with `go run`, without a build step:
+
+```bash
+go -C tools/apiserver-at run . -objects state.jsonl -kubeconfig at.kubeconfig
+```
+
+where `state.jsonl` is `local/apiserver_at.sql`'s rows for a time, and
+`KUBEBUILDER_ASSETS` names etcd and kube-apiserver of the cluster's release
+(`local/kubectl-at.sh` does both). See [K8SAGENT.md](K8SAGENT.md), "Reading".
+
 ## What the itest verifies
 
 Against a real k3s node, from the raw objects read back with DuckDB's
