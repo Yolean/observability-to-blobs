@@ -39,6 +39,17 @@ jobs:
     steps:
     - uses: actions/checkout@v7
 
+    # The image builds, the Go caches and the k3s node share the runner's
+    # disk, and the kubelet evicts every pod below its free-space
+    # thresholds (percentages, so a large disk trips them with gigabytes
+    # left). These preinstalled toolchains are never used here.
+    - name: Free disk space
+      run: |
+        df -h /
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+          /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+        df -h /
+
     - uses: docker/setup-buildx-action@v4
 
     - uses: actions/setup-go@v7
@@ -93,7 +104,10 @@ jobs:
       if: failure()
       run: |
         export KUBECONFIG=$PWD/itest/cluster/kubeconfig
+        df -h /
         kubectl --context=node-agent get pods -A || true
+        kubectl --context=node-agent describe nodes | sed -n '/^Conditions:/,/^Addresses:/p' || true
+        kubectl --context=node-agent get events -A --field-selector reason=Evicted || true
         kubectl --context=node-agent logs ds/node-agent --tail=200 || true
 
   image:
