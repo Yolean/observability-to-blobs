@@ -51,7 +51,7 @@ func TestEncryptedTiersHoldThePlainRows(t *testing.T) {
 			t.Fatalf("rollup %+v", r)
 		}
 	}
-	for _, tbl := range []string{"logs", "metrics", "podindex", "pods"} {
+	for _, tbl := range []string{"logs", "metrics", "podindex", "apiserver", "pods"} {
 		for _, h := range []time.Time{h10, h11} {
 			if plain.hourlyRows(tbl, h) == 0 {
 				continue // hour 11 has no scrapes
@@ -105,7 +105,7 @@ func TestRotationKeepsEachObjectUnderItsFirstKey(t *testing.T) {
 	w.fold(h10, afterG) // the full read, rewriting hour 10
 	keys = append(keys, w.putE())
 	w.fold(h11, h11.Add(20*time.Minute))
-	for _, tbl := range []string{"logs", "metrics", "podindex", "pods"} {
+	for _, tbl := range []string{"logs", "metrics", "podindex", "apiserver", "pods"} {
 		if id := w.keyOf(w.c.l.hourlyStem(tbl, h10)); id != "k1" {
 			t.Fatalf("hour 10 %s under %q, want its first key k1", tbl, id)
 		}

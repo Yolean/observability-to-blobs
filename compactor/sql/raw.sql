@@ -16,7 +16,7 @@ CREATE OR REPLACE VIEW raw AS
   SELECT * FROM read_json(getvariable('raw_files'), format='newline_delimited', compression='zstd', filename=true,
     columns={
       -- every line
-      "table":'VARCHAR',            -- logs | metrics | podindex
+      "table":'VARCHAR',            -- logs | metrics | podindex | apiserver
       time:'TIMESTAMP_NS',          -- the source's own stamp, ns; absent on journal rows
       ts:'TIMESTAMP_NS',            -- event time rendered by out_s3, us, on every line
       cluster:'VARCHAR',
@@ -53,5 +53,14 @@ CREATE OR REPLACE VIEW raw AS
       cpu_shares:'BIGINT',
       exit_code:'INTEGER',          -- container-exit rows
       exit_reason:'VARCHAR',
-      exit_message:'VARCHAR'
+      exit_message:'VARCHAR',
+      -- apiserver (the cluster agent, K8SAGENT.md); kind is object-added | object-modified |
+      -- object-deleted | object-snapshot | snapshot, and namespace is absent on cluster-scoped objects
+      api_version:'VARCHAR',        -- group/version as the object carries it: v1, apps/v1
+      resource:'VARCHAR',           -- the plural resource: pods, deployments
+      name:'VARCHAR',
+      object_uid:'VARCHAR',         -- metadata.uid
+      resource_version:'VARCHAR',   -- metadata.resourceVersion, opaque but an etcd revision in practice
+      apijson:'VARCHAR',            -- the object as JSON text, managedFields and Secret data removed
+      rows:'INTEGER'                -- snapshot rows: the object-snapshot rows written before this one
     });

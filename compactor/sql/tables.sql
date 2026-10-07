@@ -28,3 +28,11 @@ CREATE OR REPLACE VIEW podindex AS
          qos_class, pod_ip, restart, image_id, container_started, memory_limit, cpu_quota, cpu_shares,
          exit_code, exit_reason, exit_message, filename
   FROM raw WHERE "table" = 'podindex';
+
+-- apiserver: object rows and the snapshot rows that close each resource's snapshot
+-- (K8SAGENT.md); api_group splits the group off for the rule that a
+-- resource's identity is (group, resource), whatever version was preferred.
+CREATE OR REPLACE VIEW apiserver AS
+  SELECT time, cluster, kind, CASE WHEN contains(api_version, '/') THEN split_part(api_version, '/', 1) ELSE '' END AS api_group,
+         api_version, resource, namespace, name, object_uid, resource_version, rows, apijson, filename
+  FROM raw WHERE "table" = 'apiserver';

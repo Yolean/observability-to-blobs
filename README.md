@@ -53,6 +53,12 @@ proves it with a 100 s outage. The buffer is bounded at about 8G per node
 (`agent/fluent-bit.yaml`); an outage that outgrows it drops the oldest
 input chunks.
 
+The cluster agent (exploration, [K8SAGENT.md](K8SAGENT.md)) is the one
+producer that does talk to the API server: one replica per cluster that
+ships a fourth table, `apiserver`, with every object and Event under the
+producer segment `_k8sagent`, so that `local/kubectl-at.sh` can run
+kubectl against the cluster as it was at a time, from the blobs alone.
+
 ## Layout
 
 | path | what |
@@ -60,6 +66,8 @@ input chunks.
 | `images/fluentbit/` | Dockerfile (Fluent Bit v5.1.2, one patch), the `cri_scrape` Go input plugin, `UPSTREAM.md` with findings to report |
 | `images/fluentbit/host/` | host mode: the pipeline, heartbeat script and systemd unit, and `build.sh`, which builds them with the same Fluent Bit into the host tarball ([HOST_MODE.md](HOST_MODE.md)) |
 | `agent/` | kustomize base: DaemonSet, `fluent-bit.yaml` pipeline (stock processors, no Lua), the `pipeline-extra.yaml` composition hook |
+| `k8sagent/`, `images/fluentbit/plugins/k8s_objects/` | the cluster agent: a one-replica Deployment of the same image with the `k8s_objects` Go input plugin ([K8SAGENT.md](K8SAGENT.md)) |
+| `tools/apiserver-at/`, `local/apiserver_at.sql`, `local/kubectl-at.sh` | a cluster at a time: the objects state SQL, and a stock kube-apiserver serving it read-only to kubectl |
 | `itest/` | y-cluster configs for a local k3s node (qemu and docker), versitygw, the workloads that exercise each path, the compactor's overlays (bucket mode, and spool mode with stock Fluent Bit as a second shipper); `itest/host/` the host phase |
 | `images/blobs-to-prometheus/`, `tools/rules-manifest/`, `local/`, `alerts-cf/` | the alerting consumer from the PoC; rewired to the new blob in phase 3 |
 | `compactor/` | `blobs-compactor` (fold, rollup and the loop that runs them, and the logs API), its design (`README.md`), its SQL (`sql/raw.sql` is the raw line contract every consumer reads), its build script and `deploy/` |
@@ -92,6 +100,37 @@ the pull request what you ran and its result. CI runs on pushes and pull
 requests in the upstream repository only; in a fork it runs only when
 started by hand (Actions, "ci", "Run workflow"), so a push there is not
 tested unless you tested it.
+
+## kubectl against a cluster as it was
+
+From any machine with go, duckdb and kubectl, against a production bucket.
+The SQL lives in the repository, so a shallow clone of main is the install:
+
+```bash
+git clone --depth 1 https://github.com/Yolean/observability-to-blobs
+cd observability-to-blobs
+
+export S3_ENDPOINT=<host[:port]> S3_TLS=on S3_REGION=<region> S3_BUCKET=<bucket>
+export AWS_ACCESS_KEY_ID=<key id> AWS_SECRET_ACCESS_KEY=<secret>
+export PARQUET_KEYS_DIR=<dir>   # only if the compactor encrypts: one file per key id, as the compactor's
+
+local/kubectl-at.sh <cluster> '2026-10-07 10:12:00' get pods -A   # the time is UTC
+local/kubectl-at.sh <cluster> '2026-10-07 10:12:00'               # serve until ^C; export the printed KUBECONFIG
+```
+
+The credentials need read access only: GET and LIST under `hourly/` and
+`daily/` (and `raw1/` with `SOURCE=raw`). They reach DuckDB through a secret
+in a private temporary directory, never the command line. `tools/apiserver-at`
+itself takes no credentials: it serves a state file on 127.0.0.1 and writes
+a kubeconfig for that endpoint. It runs with `go run`, without a build step:
+
+```bash
+go -C tools/apiserver-at run . -objects state.jsonl -kubeconfig at.kubeconfig
+```
+
+where `state.jsonl` is `local/apiserver_at.sql`'s rows for a time, and
+`KUBEBUILDER_ASSETS` names etcd and kube-apiserver of the cluster's release
+(`local/kubectl-at.sh` does both). See [K8SAGENT.md](K8SAGENT.md), "Reading".
 
 ## What the itest verifies
 

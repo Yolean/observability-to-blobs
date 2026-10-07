@@ -1,4 +1,4 @@
-module github.com/Yolean/kubernetes-node-agent-to-blobs/images/blobs-to-prometheus
+module github.com/Yolean/observability-to-blobs/images/blobs-to-prometheus
 
 go 1.26
 

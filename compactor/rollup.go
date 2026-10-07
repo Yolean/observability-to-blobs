@@ -155,6 +155,18 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 	if err := c.unionDistinct(ctx, conn, "podindex", objs, ""); err != nil {
 		return r, err
 	}
+	// apiserver, like podindex, is one object for the day
+	apiserverObj, ok, err := c.locate(ctx, c.l.dailyStem("apiserver", day))
+	if err != nil {
+		return r, err
+	}
+	objs = nil
+	if ok {
+		objs = append(objs, apiserverObj)
+	}
+	if err := c.unionDistinct(ctx, conn, "apiserver", objs, ""); err != nil {
+		return r, err
+	}
 
 	r.rows = map[string]int64{}
 	for _, t := range []string{"logs", "metrics"} {
@@ -180,6 +192,12 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 		return r, err
 	}
 	if r.rows["podindex"], err = c.count(ctx, conn, "podindex"); err != nil {
+		return r, err
+	}
+	if err := c.write(ctx, conn, "apiserver", "SELECT * FROM apiserver", apiserverObj.key); err != nil {
+		return r, err
+	}
+	if r.rows["apiserver"], err = c.count(ctx, conn, "apiserver"); err != nil {
 		return r, err
 	}
 

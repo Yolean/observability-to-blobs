@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Base of the cluster agent (K8SAGENT.md). It runs next to the node agent,
+# in its namespace and with its image and S3 secret (node-agent-s3), so
+# this base has no Namespace of its own. Overlays set the image tag,
+# CLUSTER_NAME and S3_* env as for agent/.
+namespace: observability
+
+resources:
+- rbac.yaml
+- deployment.yaml
+
+configMapGenerator:
+- name: k8sagent
+  files:
+  - fluent-bit.yaml
