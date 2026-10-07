@@ -11,15 +11,15 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// Line is one object of the state to serve: a row of local/objects_at.sql
+// Line is one object of the state to serve: a row of local/apiserver_at.sql
 // written as JSON lines (DuckDB's COPY ... (FORMAT json)).
 type Line struct {
 	APIVersion string `json:"api_version"`
 	Resource   string `json:"resource"`
 	Namespace  string `json:"namespace"`
 	Name       string `json:"name"`
-	// the object as JSON text, as the objects table has it
-	Object string `json:"object"`
+	// the object as JSON text, as the apiserver table has it
+	Object string `json:"apijson"`
 }
 
 // ReadLines reads JSON lines; objects can be large (CRDs with big schemas).

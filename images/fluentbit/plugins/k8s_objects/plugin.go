@@ -22,12 +22,12 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/Yolean/kubernetes-node-agent-to-blobs/images/fluentbit/plugins/k8s_objects/kobjects"
+	"github.com/Yolean/observability-to-blobs/images/fluentbit/plugins/k8s_objects/kobjects"
 )
 
 // k8s_objects is a Fluent Bit Go input plugin for the cluster agent
 // (K8SAGENT.md): it watches every listable resource through the API server
-// and emits the objects table's rows (kobjects). It runs in its own
+// and emits the apiserver table's rows (kobjects). It runs in its own
 // process, one per cluster, never next to cri_scrape: two Go runtimes in
 // one process are not supported.
 //

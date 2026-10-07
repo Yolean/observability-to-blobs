@@ -1,4 +1,4 @@
-module github.com/Yolean/kubernetes-node-agent-to-blobs/images/fluentbit/plugins/k8s_objects
+module github.com/Yolean/observability-to-blobs/images/fluentbit/plugins/k8s_objects
 
 go 1.26.0
 

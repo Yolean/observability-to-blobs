@@ -1,9 +1,9 @@
-module github.com/Yolean/kubernetes-node-agent-to-blobs/tools/apiserver-at
+module github.com/Yolean/observability-to-blobs/tools/apiserver-at
 
 go 1.26.0
 
 require (
-	github.com/Yolean/kubernetes-node-agent-to-blobs/images/fluentbit/plugins/k8s_objects v0.0.0-00010101000000-000000000000
+	github.com/Yolean/observability-to-blobs/images/fluentbit/plugins/k8s_objects v0.0.0-00010101000000-000000000000
 	github.com/klauspost/compress v1.19.0
 	go.etcd.io/etcd/client/v3 v3.7.2
 	k8s.io/apimachinery v0.37.1
@@ -80,4 +80,4 @@ require (
 )
 
 // the agent's watcher, for the acceptance test
-replace github.com/Yolean/kubernetes-node-agent-to-blobs/images/fluentbit/plugins/k8s_objects => ../../images/fluentbit/plugins/k8s_objects
+replace github.com/Yolean/observability-to-blobs/images/fluentbit/plugins/k8s_objects => ../../images/fluentbit/plugins/k8s_objects

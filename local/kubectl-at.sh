@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # kubectl against a cluster as it was at a time, from the bucket alone
-# (K8SAGENT.md, "Reading"): local/objects_at.sql over the cluster agent's
+# (K8SAGENT.md, "Reading"): local/apiserver_at.sql over the cluster agent's
 # objects, served read-only by tools/apiserver-at.
 #
 #   local/kubectl-at.sh itest '2026-10-07 10:12:00' get pods -A    # one command
@@ -95,27 +95,27 @@ case "${SOURCE:-tier}" in
     ;;
   (tier)
     stems=()
-    for h in $hours; do stems+=("hourly/$CLUSTER/objects/$h"); done
+    for h in $hours; do stems+=("hourly/$CLUSTER/apiserver/$h"); done
     from=$(tier "${stems[@]}")
     if [ -z "$from" ]; then
       stems=()
-      for d in $days; do stems+=("daily/$CLUSTER/objects/$d"); done
+      for d in $days; do stems+=("daily/$CLUSTER/apiserver/$d"); done
       from=$(tier "${stems[@]}")
     fi
     [ -n "$from" ] || { echo "no objects of $CLUSTER around $AT in the hourly or daily tier of s3://$BUCKET (SOURCE=raw reads raw1/)" >&2; exit 1; }
-    echo "CREATE OR REPLACE TEMP VIEW objects AS $from;" >>"$WORK/init.sql"
+    echo "CREATE OR REPLACE TEMP VIEW apiserver AS $from;" >>"$WORK/init.sql"
     ;;
   (*) echo "SOURCE: raw, or unset for the tiers" >&2; exit 2 ;;
 esac
-echo ".read $ROOT/local/objects_at.sql" >>"$WORK/init.sql"
+echo ".read $ROOT/local/apiserver_at.sql" >>"$WORK/init.sql"
 
-q "COPY (SELECT api_version, resource, namespace, name, object FROM objects_at(TIMESTAMP_NS '$AT')) TO '$WORK/state.jsonl' (FORMAT json)" >/dev/null
+q "COPY (SELECT api_version, resource, namespace, name, apijson FROM apiserver_at(TIMESTAMP_NS '$AT')) TO '$WORK/state.jsonl' (FORMAT json)" >/dev/null
 [ -s "$WORK/state.jsonl" ] || { echo "no complete snapshot of $CLUSTER at or before $AT" >&2; exit 1; }
 
 if [ -z "${KUBEBUILDER_ASSETS:-}" ]; then
   # the release the cluster's kubelets reported at that time: v1.37.0+k3s1 -> 1.37.x
-  minor=$(q "SELECT regexp_extract(max(json_extract_string(object, '\$.status.nodeInfo.kubeletVersion')), '^v([0-9]+\.[0-9]+)', 1)
-             FROM objects_at(TIMESTAMP_NS '$AT') WHERE api_version = 'v1' AND resource = 'nodes'")
+  minor=$(q "SELECT regexp_extract(max(json_extract_string(apijson, '\$.status.nodeInfo.kubeletVersion')), '^v([0-9]+\.[0-9]+)', 1)
+             FROM apiserver_at(TIMESTAMP_NS '$AT') WHERE api_version = 'v1' AND resource = 'nodes'")
   [ -n "$minor" ] || { echo "no Node with a kubelet version at $AT; set KUBEBUILDER_ASSETS" >&2; exit 1; }
   KUBEBUILDER_ASSETS=$(GOFLAGS='' go run "sigs.k8s.io/controller-runtime/tools/setup-envtest@$SETUP_ENVTEST" use "$minor.x" -p path)
   export KUBEBUILDER_ASSETS

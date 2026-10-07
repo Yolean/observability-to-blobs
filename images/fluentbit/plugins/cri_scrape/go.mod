@@ -1,4 +1,4 @@
-module github.com/Yolean/kubernetes-node-agent-to-blobs/images/fluentbit/plugins/cri_scrape
+module github.com/Yolean/observability-to-blobs/images/fluentbit/plugins/cri_scrape
 
 go 1.26.0
 

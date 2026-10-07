@@ -14,9 +14,9 @@ import (
 // relative to the bucket; a store turns them into paths DuckDB reads.
 
 // The tables of the hourly tier, in the order a fold writes them; pods is
-// derived from logs, metrics and podindex and written after them. objects
+// derived from logs, metrics and podindex and written after them. apiserver
 // is the cluster agent's (K8SAGENT.md), and empty without one.
-var foldTables = []string{"logs", "metrics", "podindex", "objects"}
+var foldTables = []string{"logs", "metrics", "podindex", "apiserver"}
 
 // sortOrder is each table's ORDER BY in both tiers: namespace first, so
 // row-group statistics prune a namespace or a pod to a few row groups.
@@ -27,13 +27,13 @@ var sortOrder = map[string]string{
 	"pods":     "namespace, pod, pod_started, pod_uid, container, restart",
 	// an object's rows adjacent and in time order: the snapshots of an
 	// unchanged object repeat one string, which parquet stores once
-	"objects": "api_group, resource, namespace, name, time",
+	"apiserver": "api_group, resource, namespace, name, time",
 }
 
 // rowGroups is the ROW_GROUP_SIZE of the tables that replace partitioning
 // with sorting; DuckDB rounds 20000 to 20480.
-// objects rows are whole objects, kilobytes each, so smaller groups.
-var rowGroups = map[string]int{"logs": 20000, "metrics": 20000, "objects": 5000}
+// apiserver rows are whole objects, kilobytes each, so smaller groups.
+var rowGroups = map[string]int{"logs": 20000, "metrics": 20000, "apiserver": 5000}
 
 const dateLayout = "2006-01-02"
 

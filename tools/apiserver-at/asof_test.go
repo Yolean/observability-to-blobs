@@ -14,21 +14,21 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// local/objects_at.sql on crafted raw rows: the cases a short-lived source
+// local/apiserver_at.sql on crafted raw rows: the cases a short-lived source
 // cluster cannot produce on demand.
 
 func row(at, kind, apiVersion, resource, ns, name, uid, rv string) map[string]interface{} {
-	r := map[string]interface{}{"table": "objects", "time": "2026-10-07T" + at + ":00.000000000Z", "cluster": "c",
+	r := map[string]interface{}{"table": "apiserver", "time": "2026-10-07T" + at + ":00.000000000Z", "cluster": "c",
 		"kind": kind, "api_version": apiVersion, "resource": resource}
 	if kind == "snapshot" {
-		r["objects"] = 0
+		r["rows"] = 0
 		return r
 	}
 	if ns != "" {
 		r["namespace"] = ns
 	}
 	r["name"], r["object_uid"], r["resource_version"] = name, uid, rv
-	r["object"] = `{"metadata":{"name":"` + name + `","uid":"` + uid + `"}}`
+	r["apijson"] = `{"metadata":{"name":"` + name + `","uid":"` + uid + `"}}`
 	return r
 }
 
@@ -120,8 +120,8 @@ func queryAt(t *testing.T, duckdb, rawFile, at string) []string {
 		"-c", "SET VARIABLE raw_files = '"+rawFile+"'",
 		"-c", ".read "+root+"/compactor/sql/raw.sql",
 		"-c", ".read "+root+"/compactor/sql/tables.sql",
-		"-c", ".read "+root+"/local/objects_at.sql",
-		"-c", "SELECT resource || ' ' || coalesce(namespace, '') || '/' || name || ' ' || resource_version FROM objects_at(TIMESTAMP '2026-10-07 "+at+":00')")
+		"-c", ".read "+root+"/local/apiserver_at.sql",
+		"-c", "SELECT resource || ' ' || coalesce(namespace, '') || '/' || name || ' ' || resource_version FROM apiserver_at(TIMESTAMP '2026-10-07 "+at+":00')")
 	b, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("duckdb: %v\n%s", err, b)

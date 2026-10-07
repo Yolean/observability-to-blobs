@@ -1,5 +1,5 @@
 # Cluster agent pipeline (K8SAGENT.md): one process per cluster that
-# watches the API server and ships the objects table, in the node agent's
+# watches the API server and ships the apiserver table, in the node agent's
 # blob format, under the producer segment _k8sagent where a node agent's
 # key has its node:
 #   objects   every add, change and delete of every listable resource,
