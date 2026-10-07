@@ -184,8 +184,14 @@ func readOnly(admin *rest.Config, label string) (http.Handler, error) {
 	msg += "; it is read-only"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {
-			// the proxy authenticates; a client's own credentials do not pass
+			// the proxy authenticates as admin; a client's own credentials
+			// and impersonation do not pass
 			r.Header.Del("Authorization")
+			for k := range r.Header {
+				if strings.HasPrefix(k, "Impersonate-") {
+					r.Header.Del(k)
+				}
+			}
 			p.ServeHTTP(w, r)
 			return
 		}

@@ -204,5 +204,14 @@ daily tier.
 - **Data handling**: the bucket now holds every ConfigMap and the env of every pod,
   as the API server does. Secrets are redacted, but values that
   workloads put elsewhere are not.
+- **Backpressure**: while Fluent Bit does not drain, every dropped row
+  asks for a snapshot, and a snapshot's rows can be dropped too. That
+  holds the state right at the cost of repeated full passes over the
+  stores. A backoff between the requested snapshots would make it cheaper.
+- **Snapshot size**: one resource's snapshot is one callback's data, a
+  single chunk. At about 0.7 MB for the whole itest cluster that is
+  nothing, but a cluster with tens of thousands of pods would want the
+  snapshot split across callbacks, with the snapshot row last.
 - **Pin**: the compactor's code moved, so `compactor/build.sh bump` is due
-  before this merges (CLAUDE.md).
+  before this merges (CLAUDE.md). It builds both platforms with docker,
+  which the host this was explored on does not have.
