@@ -1,5 +1,5 @@
 // Package kobjects watches every listable resource of a cluster and turns
-// what it sees into the rows of the raw tier's objects table (K8SAGENT.md):
+// what it sees into the rows of the raw tier's apiserver table (K8SAGENT.md):
 // one row per add, change and delete, a full snapshot of each resource at
 // every snapshot interval and when its watch starts, and a snapshot row per
 // resource that says the snapshot before it is complete.
@@ -21,7 +21,7 @@ import (
 // TimeFormat is the raw tier's time: ISO 8601 UTC with nanoseconds.
 const TimeFormat = "2006-01-02T15:04:05.000000000Z"
 
-// The kinds of objects rows.
+// The kinds of apiserver rows.
 const (
 	// a watch event after the resource's initial list
 	KindAdded    = "object-added"
@@ -44,7 +44,7 @@ const RedactedAnnotation = "observability-to-blobs/redacted"
 // empty: it has nothing to hide, and empty says more than a prefix would.
 const ScrambledPrefix = "k8sobs_"
 
-// Row is one line of the objects table.
+// Row is one line of the apiserver table.
 type Row struct {
 	Time            time.Time
 	Kind            string
@@ -55,8 +55,8 @@ type Row struct {
 	ResourceVersion string
 	// Object is the sanitized object as JSON; nil on snapshot rows
 	Object []byte
-	// Objects is the snapshot's row count, on snapshot rows only
-	Objects int
+	// Rows is the snapshot's count of object-snapshot rows, on snapshot rows only
+	Rows int
 }
 
 // APIVersion is the row's group/version as objects carry it: "v1", "apps/v1".
@@ -66,7 +66,7 @@ func (r Row) APIVersion() string { return r.GVR.GroupVersion().String() }
 // the row's kind are absent, not empty.
 func (r Row) Record(cluster string) map[string]interface{} {
 	rec := map[string]interface{}{
-		"table":       "objects",
+		"table":       "apiserver",
 		"time":        r.Time.UTC().Format(TimeFormat),
 		"cluster":     cluster,
 		"kind":        r.Kind,
@@ -74,7 +74,7 @@ func (r Row) Record(cluster string) map[string]interface{} {
 		"resource":    r.GVR.Resource,
 	}
 	if r.Kind == KindSnapshot {
-		rec["objects"] = r.Objects
+		rec["rows"] = r.Rows
 		return rec
 	}
 	if r.Namespace != "" {
@@ -83,7 +83,7 @@ func (r Row) Record(cluster string) map[string]interface{} {
 	rec["name"] = r.Name
 	rec["object_uid"] = r.UID
 	rec["resource_version"] = r.ResourceVersion
-	rec["object"] = string(r.Object)
+	rec["apijson"] = string(r.Object)
 	return rec
 }
 

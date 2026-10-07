@@ -27,7 +27,7 @@ import (
 
 // k8s_objects is a Fluent Bit Go input plugin for the cluster agent
 // (K8SAGENT.md): it watches every listable resource through the API server
-// and emits the objects table's rows (kobjects). It runs in its own
+// and emits the apiserver table's rows (kobjects). It runs in its own
 // process, one per cluster, never next to cri_scrape: two Go runtimes in
 // one process are not supported.
 //

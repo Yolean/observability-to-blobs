@@ -336,7 +336,7 @@ func (w *Watcher) snapshot(ri *resourceInformer, at time.Time) {
 		}
 		rows = append(rows, r)
 	}
-	rows = append(rows, Row{Time: at, Kind: KindSnapshot, GVR: ri.gvr, Objects: len(rows)})
+	rows = append(rows, Row{Time: at, Kind: KindSnapshot, GVR: ri.gvr, Rows: len(rows)})
 	w.emit(rows)
 }
 

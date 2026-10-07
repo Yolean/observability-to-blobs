@@ -155,16 +155,16 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 	if err := c.unionDistinct(ctx, conn, "podindex", objs, ""); err != nil {
 		return r, err
 	}
-	// objects, like podindex, is one object for the day
-	objectsObj, ok, err := c.locate(ctx, c.l.dailyStem("objects", day))
+	// apiserver, like podindex, is one object for the day
+	apiserverObj, ok, err := c.locate(ctx, c.l.dailyStem("apiserver", day))
 	if err != nil {
 		return r, err
 	}
 	objs = nil
 	if ok {
-		objs = append(objs, objectsObj)
+		objs = append(objs, apiserverObj)
 	}
-	if err := c.unionDistinct(ctx, conn, "objects", objs, ""); err != nil {
+	if err := c.unionDistinct(ctx, conn, "apiserver", objs, ""); err != nil {
 		return r, err
 	}
 
@@ -194,10 +194,10 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 	if r.rows["podindex"], err = c.count(ctx, conn, "podindex"); err != nil {
 		return r, err
 	}
-	if err := c.write(ctx, conn, "objects", "SELECT * FROM objects", objectsObj.key); err != nil {
+	if err := c.write(ctx, conn, "apiserver", "SELECT * FROM apiserver", apiserverObj.key); err != nil {
 		return r, err
 	}
-	if r.rows["objects"], err = c.count(ctx, conn, "objects"); err != nil {
+	if r.rows["apiserver"], err = c.count(ctx, conn, "apiserver"); err != nil {
 		return r, err
 	}
 

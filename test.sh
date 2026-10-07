@@ -591,7 +591,7 @@ cat >"$INIT" <<SQL
 SET VARIABLE raw_files = 's3://$BUCKET/raw1/$CLUSTER/*/*/*/*.jsonl.zst';
 .read $PWD/compactor/sql/raw.sql
 .read $PWD/compactor/sql/tables.sql
-.read $PWD/local/objects_at.sql
+.read $PWD/local/apiserver_at.sql
 .output
 SQL
 RAW_OBJECTS="read_json_objects('s3://$BUCKET/raw1/$CLUSTER/*/*/*/*.jsonl.zst', format='newline_delimited', compression='zstd')"
@@ -768,9 +768,9 @@ assert "a sample carries exactly name, type, labels and value" \
   "SELECT list_sort(list_distinct(flatten(list(json_keys(json_extract(json, '\$.samples[0]')))))) = ['labels', 'name', 'type', 'value']
    FROM $RAW_OBJECTS WHERE json_extract_string(json, 'table') = 'metrics'"
 assert "cluster is on every line, node on every line but the cluster agent's" \
-  "SELECT bool_and(cluster = '$CLUSTER' AND (\"table\" = 'objects' OR (node IS NOT NULL AND node <> ''))) FROM raw"
+  "SELECT bool_and(cluster = '$CLUSTER' AND (\"table\" = 'apiserver' OR (node IS NOT NULL AND node <> ''))) FROM raw"
 assert "no line is of an unknown table" \
-  "SELECT bool_and(\"table\" IN ('logs', 'metrics', 'podindex', 'objects')) FROM raw"
+  "SELECT bool_and(\"table\" IN ('logs', 'metrics', 'podindex', 'apiserver')) FROM raw"
 
 # Container logs
 assert "log-generator lines present with namespace/pod/container from the path" \
@@ -897,31 +897,31 @@ assert "healthy targets are scraped about every 15s" \
 # -------------------------------------------------------------- compactor --
 
 phase "assert: cluster objects (K8SAGENT.md)"
-assert "the cluster agent's keys hold objects lines, and only they do" \
-  "SELECT bool_and((\"table\" = 'objects') = (filename LIKE '%/_k8sagent/%')) FROM raw"
+assert "the cluster agent's keys hold apiserver lines, and only they do" \
+  "SELECT bool_and((\"table\" = 'apiserver') = (filename LIKE '%/_k8sagent/%')) FROM raw"
 assert "built-in and custom resources are snapshotted, k3s's Addons included" \
-  "SELECT count(DISTINCT api_version || ' ' || resource) = 15 FROM objects WHERE kind = 'snapshot' AND (api_version, resource) IN (
+  "SELECT count(DISTINCT api_version || ' ' || resource) = 15 FROM apiserver WHERE kind = 'snapshot' AND (api_version, resource) IN (
      ('v1', 'pods'), ('v1', 'events'), ('v1', 'configmaps'), ('v1', 'secrets'), ('v1', 'nodes'), ('v1', 'namespaces'),
      ('v1', 'services'), ('apps/v1', 'deployments'), ('apps/v1', 'daemonsets'), ('apps/v1', 'statefulsets'), ('batch/v1', 'jobs'),
      ('apiextensions.k8s.io/v1', 'customresourcedefinitions'), ('rbac.authorization.k8s.io/v1', 'clusterroles'),
      ('storage.k8s.io/v1', 'storageclasses'), ('k3s.cattle.io/v1', 'addons'))"
 assert "leases and events.k8s.io's copy of the events are not watched" \
-  "SELECT count(*) = 0 FROM objects WHERE resource = 'leases' OR api_version LIKE 'events.k8s.io/%'"
+  "SELECT count(*) = 0 FROM apiserver WHERE resource = 'leases' OR api_version LIKE 'events.k8s.io/%'"
 assert "every snapshot row counts the object rows of its snapshot" \
   "WITH n AS (SELECT api_version, resource, time, count(DISTINCT coalesce(namespace, '') || '/' || name) AS c
-              FROM objects WHERE kind = 'object-snapshot' GROUP BY ALL)
-   SELECT count(*) > 0 AND bool_and(coalesce(n.c, 0) = s.objects) FROM objects s LEFT JOIN n USING (api_version, resource, time) WHERE s.kind = 'snapshot'"
+              FROM apiserver WHERE kind = 'object-snapshot' GROUP BY ALL)
+   SELECT count(*) > 0 AND bool_and(coalesce(n.c, 0) = s.rows) FROM apiserver s LEFT JOIN n USING (api_version, resource, time) WHERE s.kind = 'snapshot'"
 assert "configmaps are snapshotted at least twice at multiples of SNAPSHOT_INTERVAL (2m)" \
-  "SELECT count(DISTINCT time) >= 2 FROM objects WHERE kind = 'snapshot' AND api_version = 'v1' AND resource = 'configmaps'
+  "SELECT count(DISTINCT time) >= 2 FROM apiserver WHERE kind = 'snapshot' AND api_version = 'v1' AND resource = 'configmaps'
      AND minute(time) % 2 = 0 AND second(time) < 5 AND time > $SINCE"
 assert "no object carries managedFields" \
-  "SELECT count(*) > 0 AND bool_and(NOT contains(object, '\"managedFields\"')) FROM objects WHERE object IS NOT NULL"
+  "SELECT count(*) > 0 AND bool_and(NOT contains(apijson, '\"managedFields\"')) FROM apiserver WHERE apijson IS NOT NULL"
 # every value of every Secret row, as (key, value) structs
-SECRET_VALUES="(SELECT namespace, name, unnest(map_entries(json_transform(json_extract(object, '\$.data'), '\"MAP(VARCHAR, VARCHAR)\"'))) AS e
-  FROM objects WHERE api_version = 'v1' AND resource = 'secrets' AND object IS NOT NULL)"
+SECRET_VALUES="(SELECT namespace, name, unnest(map_entries(json_transform(json_extract(apijson, '\$.data'), '\"MAP(VARCHAR, VARCHAR)\"'))) AS e
+  FROM apiserver WHERE api_version = 'v1' AND resource = 'secrets' AND apijson IS NOT NULL)"
 assert "Secrets carry the redaction mark" \
-  "SELECT count(*) > 0 AND bool_and(json_extract_string(object, '\$.metadata.annotations.\"observability-to-blobs/redacted\"') = 'data')
-   FROM objects WHERE api_version = 'v1' AND resource = 'secrets' AND object IS NOT NULL"
+  "SELECT count(*) > 0 AND bool_and(json_extract_string(apijson, '\$.metadata.annotations.\"observability-to-blobs/redacted\"') = 'data')
+   FROM apiserver WHERE api_version = 'v1' AND resource = 'secrets' AND apijson IS NOT NULL"
 assert "Secret values are k8sobs_ and random letters and digits, empty ones empty" \
   "SELECT count(*) > 0 AND bool_and(e.value = '' OR regexp_full_match(decode(from_base64(e.value)), 'k8sobs_[A-Za-z0-9]+')) FROM $SECRET_VALUES"
 # demoaccess and demosecret, 10 bytes each
@@ -931,17 +931,17 @@ assert "a scrambled value has a tenth of the original's length, rounded up (node
 # node-agent-s3, created by kubectl apply -k: its data and the applied
 # manifest annotation both hold the base64 of the secret key
 assert "no row holds the S3 secret's data, base64 or applied" \
-  "SELECT count(*) = 0 FROM objects WHERE contains(object, '$(printf demosecret | base64)')"
+  "SELECT count(*) = 0 FROM apiserver WHERE contains(apijson, '$(printf demosecret | base64)')"
 assert "events of all namespaces, the node's own (namespace default) included" \
   "SELECT count(DISTINCT namespace) >= 2
-      AND count(*) FILTER (WHERE name = '$NODE_EVENT' AND namespace = 'default' AND json_extract_string(object, '\$.involvedObject.kind') = 'Node') >= 1
-   FROM objects WHERE api_version = 'v1' AND resource = 'events'"
+      AND count(*) FILTER (WHERE name = '$NODE_EVENT' AND namespace = 'default' AND json_extract_string(apijson, '\$.involvedObject.kind') = 'Node') >= 1
+   FROM apiserver WHERE api_version = 'v1' AND resource = 'events'"
 assert "pod 'reused': three incarnations added, the first two deleted" \
   "SELECT count(DISTINCT object_uid) FILTER (WHERE kind = 'object-added') = 3 AND count(DISTINCT object_uid) FILTER (WHERE kind = 'object-deleted') >= 2
-   FROM objects WHERE api_version = 'v1' AND resource = 'pods' AND namespace = 'default' AND name = 'reused' AND time > $SINCE"
+   FROM apiserver WHERE api_version = 'v1' AND resource = 'pods' AND namespace = 'default' AND name = 'reused' AND time > $SINCE"
 
 # kubectl at a time, from the raw tier alone: apiserver-at, a stock
-# kube-apiserver at the cluster's release over etcd holding objects_at(t)
+# kube-apiserver at the cluster's release over etcd holding apiserver_at(t)
 phase "assert: kubectl at a time (tools/apiserver-at)"
 # apiserver-at at the cluster's own release: another release's API server
 # prints other columns, and its RBAC bootstrap adds its release's system
@@ -956,8 +956,8 @@ echo "  apiserver-at runs Kubernetes $AT_K8S: $AT_ASSETS"
 # were then, in the background, reached with at_kubectl
 at_serve() {
   at_stop
-  q "COPY (SELECT api_version, resource, namespace, name, object FROM objects_at(TIMESTAMP_NS '$1')) TO '$INIT.at.jsonl' (FORMAT json)" >/dev/null \
-    || fail "objects_at($1)"
+  q "COPY (SELECT api_version, resource, namespace, name, apijson FROM apiserver_at(TIMESTAMP_NS '$1')) TO '$INIT.at.jsonl' (FORMAT json)" >/dev/null \
+    || fail "apiserver_at($1)"
   rm -f "$INIT.at.kubeconfig"
   target/bin/apiserver-at -assets "$AT_ASSETS" -objects "$INIT.at.jsonl" -kubeconfig "$INIT.at.kubeconfig" -label "$1" >"$INIT.at.log" 2>&1 &
   AT_PID=$!
@@ -1020,7 +1020,7 @@ for a in "${LIVE_ARGS[@]}"; do
 done
 PRESENT=$(utc_now)
 deadline=$((SECONDS + 120))
-until [ "$(q "SELECT max(time) > TIMESTAMP_NS '$PRESENT' + INTERVAL 1 SECOND FROM objects" | tr -d '[:space:]')" = true ]; do
+until [ "$(q "SELECT max(time) > TIMESTAMP_NS '$PRESENT' + INTERVAL 1 SECOND FROM apiserver" | tr -d '[:space:]')" = true ]; do
   [ $SECONDS -lt $deadline ] || fail "no cluster agent rows after $PRESENT in the bucket within 120s"
   sleep 5
 done
@@ -1168,9 +1168,9 @@ daily() {
 }
 for hour in $(q "SELECT regexp_extract(file, '_folded/(.*)\\.csv\$', 1) FROM glob('s3://$BUCKET/hourly/$CLUSTER/_folded/*/*.csv') ORDER BY 1"); do
   scoped "$hour.csv"
-  QINIT=$SCOPED assert "hourly $hour: logs, metrics, podindex and objects hold exactly the distinct rows of the raw keys its sidecar lists" \
+  QINIT=$SCOPED assert "hourly $hour: logs, metrics, podindex and apiserver hold exactly the distinct rows of the raw keys its sidecar lists" \
     "SELECT $(same_rows logs "$(hourly logs "$hour")") AND $(same_rows metrics "$(hourly metrics "$hour")")
-        AND $(same_rows podindex "$(hourly podindex "$hour")") AND $(same_rows objects "$(hourly objects "$hour")")
+        AND $(same_rows podindex "$(hourly podindex "$hour")") AND $(same_rows apiserver "$(hourly apiserver "$hour")")
         AND (SELECT count(*) FROM logs) > 0"
 done
 assert "hourly pods: the three incarnations of 'reused', each its own row" \
@@ -1218,13 +1218,13 @@ daily_rows() {
   scoped "$1/*.csv"
   QINIT=$SCOPED assert "daily $1: $2" \
     "SELECT $(same_rows logs "$(daily logs "$1")") AND $(same_rows metrics "$(daily metrics "$1")")
-        AND $(same_rows podindex "$(daily podindex "$1")") AND $(same_rows objects "$(daily objects "$1")")
+        AND $(same_rows podindex "$(daily podindex "$1")") AND $(same_rows apiserver "$(daily apiserver "$1")")
         AND (SELECT count(*) FROM logs) > 0"
 }
 for day in $DAYS; do
   echo "  rollup $day"
   compactor_job "[\"rollup\", \"$day\"]"
-  daily_rows "$day" "logs, metrics, podindex and objects hold exactly the distinct rows of the day's folded raw keys"
+  daily_rows "$day" "logs, metrics, podindex and apiserver hold exactly the distinct rows of the day's folded raw keys"
   assert "daily $day: the sidecar lists every key of the day's hourly sidecars" \
     "SELECT (SELECT list(key ORDER BY key) FROM read_csv('s3://$BUCKET/daily/$CLUSTER/_folded/$day.csv.zst', header = true))
           = (SELECT list(DISTINCT key ORDER BY key) FROM read_csv('s3://$BUCKET/hourly/$CLUSTER/_folded/$day/*.csv', header = true))"

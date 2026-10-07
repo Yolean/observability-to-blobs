@@ -39,7 +39,7 @@ import (
 // The acceptance test of the objects path without a cluster: a real API
 // server is the source; the agent's watcher writes the raw lines; DuckDB
 // reads them through compactor/sql/raw.sql, tables.sql and
-// local/objects_at.sql; apiserver-at serves the result. What kubectl reads
+// local/apiserver_at.sql; apiserver-at serves the result. What kubectl reads
 // from apiserver-at must be what it read from the source at that time.
 //
 // Needs KUBEBUILDER_ASSETS (etcd, kube-apiserver and kubectl, from
@@ -290,17 +290,17 @@ func (l *lines) write(t *testing.T, path string) {
 	}
 }
 
-// objectsAt runs local/objects_at.sql over raw objects with the CLI and
+// apiserverAt runs local/apiserver_at.sql over raw objects with the CLI and
 // returns the state file apiserver-at reads.
-func objectsAt(t *testing.T, duckdb, rawFiles string, at time.Time, out string) {
+func apiserverAt(t *testing.T, duckdb, rawFiles string, at time.Time, out string) {
 	t.Helper()
 	root, _ := filepath.Abs(repoRoot)
 	script := fmt.Sprintf(`SET TimeZone = 'UTC';
 SET VARIABLE raw_files = '%s';
 .read %s/compactor/sql/raw.sql
 .read %s/compactor/sql/tables.sql
-.read %s/local/objects_at.sql
-COPY (SELECT api_version, resource, namespace, name, object FROM objects_at(TIMESTAMP_NS '%s')) TO '%s' (FORMAT json);
+.read %s/local/apiserver_at.sql
+COPY (SELECT api_version, resource, namespace, name, apijson FROM apiserver_at(TIMESTAMP_NS '%s')) TO '%s' (FORMAT json);
 `, rawFiles, root, root, root, at.UTC().Format("2006-01-02 15:04:05.000000000"), out)
 	sf := out + ".sql"
 	if err := os.WriteFile(sf, []byte(script), 0o644); err != nil {
@@ -498,7 +498,7 @@ func TestAcceptance(t *testing.T) {
 	}{{"t1", t1, at1}, {"t2", t2, at2}} {
 		t.Run(c.name, func(t *testing.T) {
 			stateFile := filepath.Join(dir, c.name+".jsonl")
-			objectsAt(t, duckdb, rawFile, c.at, stateFile)
+			apiserverAt(t, duckdb, rawFile, c.at, stateFile)
 			f, err := os.Open(stateFile)
 			if err != nil {
 				t.Fatal(err)

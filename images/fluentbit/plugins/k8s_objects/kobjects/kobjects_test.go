@@ -144,7 +144,7 @@ func TestRecordFieldsByKind(t *testing.T) {
 	}
 	rec := r.Record("c1")
 	for k, v := range map[string]interface{}{
-		"table": "objects", "time": "2026-10-07T10:00:00.123456789Z", "cluster": "c1", "kind": KindModified,
+		"table": "apiserver", "time": "2026-10-07T10:00:00.123456789Z", "cluster": "c1", "kind": KindModified,
 		"api_version": "apps/v1", "resource": "deployments", "namespace": "app", "name": "web",
 		"object_uid": "uid-web", "resource_version": "42",
 	} {
@@ -153,11 +153,11 @@ func TestRecordFieldsByKind(t *testing.T) {
 		}
 	}
 	var back map[string]interface{}
-	if err := json.Unmarshal([]byte(rec["object"].(string)), &back); err != nil || back["kind"] != "Deployment" {
-		t.Errorf("object %v %v", rec["object"], err)
+	if err := json.Unmarshal([]byte(rec["apijson"].(string)), &back); err != nil || back["kind"] != "Deployment" {
+		t.Errorf("apijson %v %v", rec["apijson"], err)
 	}
-	if _, ok := rec["objects"]; ok {
-		t.Error("objects on an object row")
+	if _, ok := rec["rows"]; ok {
+		t.Error("rows on an object row")
 	}
 
 	cluster := schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterroles"}
@@ -166,9 +166,9 @@ func TestRecordFieldsByKind(t *testing.T) {
 		t.Error("namespace on a cluster-scoped object")
 	}
 
-	snap := Row{Time: at, Kind: KindSnapshot, GVR: configmaps, Objects: 3}.Record("c1")
-	want := map[string]interface{}{"table": "objects", "time": "2026-10-07T10:00:00.123456789Z", "cluster": "c1",
-		"kind": KindSnapshot, "api_version": "v1", "resource": "configmaps", "objects": 3}
+	snap := Row{Time: at, Kind: KindSnapshot, GVR: configmaps, Rows: 3}.Record("c1")
+	want := map[string]interface{}{"table": "apiserver", "time": "2026-10-07T10:00:00.123456789Z", "cluster": "c1",
+		"kind": KindSnapshot, "api_version": "v1", "resource": "configmaps", "rows": 3}
 	if !reflect.DeepEqual(snap, want) {
 		t.Errorf("snapshot row %v", snap)
 	}
@@ -318,8 +318,8 @@ func TestWatcherSnapshotsThenEvents(t *testing.T) {
 			continue
 		}
 		want := map[string]int{"configmaps": 1, "secrets": 1, "events": 0}[r.GVR.Resource]
-		if r.Objects != want {
-			t.Errorf("snapshot of %s: %d objects, want %d", r.GVR.Resource, r.Objects, want)
+		if r.Rows != want {
+			t.Errorf("snapshot of %s: %d rows, want %d", r.GVR.Resource, r.Rows, want)
 		}
 		if want == 1 && (i == 0 || rows[i-1].Kind != KindSnapshotObject || rows[i-1].GVR != r.GVR || !rows[i-1].Time.Equal(r.Time)) {
 			t.Errorf("snapshot row of %s does not follow its object at its time", r.GVR.Resource)

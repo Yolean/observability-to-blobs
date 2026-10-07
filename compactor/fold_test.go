@@ -92,7 +92,7 @@ func TestIncrementalFoldEqualsFullFold(t *testing.T) {
 		t.Fatalf("full fold: %+v", r)
 	}
 
-	for _, tbl := range []string{"logs", "metrics", "podindex", "objects", "pods"} {
+	for _, tbl := range []string{"logs", "metrics", "podindex", "apiserver", "pods"} {
 		sameRows(t, inc.c.db, "hourly "+tbl, inc.from(inc.c.l.hourlyStem(tbl, h10)), full.from(full.c.l.hourlyStem(tbl, h10)))
 	}
 	if n := inc.hourlyRows("logs", h10); n != h10Logs {
@@ -102,8 +102,8 @@ func TestIncrementalFoldEqualsFullFold(t *testing.T) {
 		t.Fatalf("metrics rows %d, want %d", n, h10Metrics)
 	}
 	// the snapshot's two rows and the change, its retried upload folded
-	if n := inc.hourlyRows("objects", h10); n != 3 {
-		t.Fatalf("objects rows %d, want 3", n)
+	if n := inc.hourlyRows("apiserver", h10); n != 3 {
+		t.Fatalf("apiserver rows %d, want 3", n)
 	}
 	f := inc.folded(h10)
 	if len(f) != 4 {
@@ -266,7 +266,7 @@ func TestExpiredSidecar(t *testing.T) {
 	}
 	// and the hourly objects too, then a late key arrives
 	w.remove(w.c.l.hourlySidecar(h10))
-	for _, tbl := range []string{"logs", "metrics", "podindex", "objects", "pods"} {
+	for _, tbl := range []string{"logs", "metrics", "podindex", "apiserver", "pods"} {
 		w.remove(w.obj(w.c.l.hourlyStem(tbl, h10)).key)
 	}
 	w.putBRetry()

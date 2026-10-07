@@ -1,9 +1,9 @@
 // apiserver-at serves a cluster as it was at a time, read-only, to kubectl
 // and anything else that speaks the Kubernetes API: a stock kube-apiserver
-// over an etcd that holds the objects of local/objects_at.sql and nothing
+// over an etcd that holds the objects of local/apiserver_at.sql and nothing
 // else (K8SAGENT.md, "Reading").
 //
-//	duckdb ... -c "COPY (SELECT * FROM objects_at(TIMESTAMP '...')) TO 'state.jsonl' (FORMAT json)"
+//	duckdb ... -c "COPY (SELECT * FROM apiserver_at(TIMESTAMP '...')) TO 'state.jsonl' (FORMAT json)"
 //	apiserver-at -objects state.jsonl -kubeconfig at.kubeconfig
 //	kubectl --kubeconfig at.kubeconfig get pods -A
 //
@@ -25,7 +25,7 @@ func main() {
 	// a FlagSet of its own: controller-runtime registers -kubeconfig on the
 	// default one
 	fs := flag.NewFlagSet("apiserver-at", flag.ExitOnError)
-	objects := fs.String("objects", "-", "the state: JSON lines of objects_at rows, - for stdin")
+	objects := fs.String("objects", "-", "the state: JSON lines of apiserver_at rows, - for stdin")
 	assets := fs.String("assets", os.Getenv("KUBEBUILDER_ASSETS"), "directory with etcd and kube-apiserver (setup-envtest use -p path)")
 	listen := fs.String("listen", "127.0.0.1:0", "read-only endpoint address")
 	kubeconfig := fs.String("kubeconfig", "", "write a kubeconfig for the endpoint here")

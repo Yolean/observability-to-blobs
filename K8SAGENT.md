@@ -11,7 +11,7 @@ the blobs cover.
 It is the API-side producer DESIGN.md ("Enrichment") anticipated, widened
 from a pod enricher to every resource. The node agent keeps zero API
 access, and the consumers that must survive the loss of a cluster still
-need nothing but the node agent's tables. The objects table adds what
+need nothing but the node agent's tables. The apiserver table adds what
 only the API server knows: owner references, eviction reasons,
 ConfigMap and Secret references, Events, and the state of everything that
 is not a pod.
@@ -28,16 +28,16 @@ agent's key has its node:
 ```
 
 so the compactor's hour LIST and fold take them with no change. Every line
-is `table = 'objects'`:
+is `table = 'apiserver'`:
 
 | kind | when | fields |
 |---|---|---|
 | `object-snapshot` | for every object, when the resource's watch has listed, and at every multiple of `snapshot_interval` (default 1h) on the wall clock | `time` (the snapshot's, the same on every row of it), `api_version`, `resource`, `namespace` (absent when cluster-scoped), `name`, `object_uid`, `resource_version`, `object` |
-| `snapshot` | after the rows of one resource's snapshot | `api_version`, `resource`, `objects` (the row count) |
+| `snapshot` | after the rows of one resource's snapshot | `api_version`, `resource`, `rows` (the count of its `object-snapshot` rows) |
 | `object-added`, `object-modified`, `object-deleted` | a watch event after the initial list | as `object-snapshot`, `time` when it was seen |
 
-`object` is the object's JSON as text. The rows' columns are in
-`compactor/sql/raw.sql`, and `compactor/sql/tables.sql` has the `objects`
+`apijson` is the object's JSON as text. The rows' columns are in
+`compactor/sql/raw.sql`, and `compactor/sql/tables.sql` has the `apiserver`
 view, which adds `api_group`.
 
 - **What is watched**: discovery's preferred version of every resource
@@ -85,11 +85,11 @@ blobs is then empty.
 
 ## Compaction
 
-`objects` is a fourth folded table:
+`apiserver` is a fourth folded table:
 
 ```
-/hourly/{cluster}/objects/{date}/{HH}.parquet
-/daily/{cluster}/objects/{date}.parquet
+/hourly/{cluster}/apiserver/{date}/{HH}.parquet
+/daily/{cluster}/apiserver/{date}.parquet
 ```
 
 Each is folded as podindex is: `DISTINCT` rows, one object per hour and
@@ -100,8 +100,8 @@ string, which parquet's dictionary encoding stores once. Row groups are
 
 ## Reading: the state at a time
 
-`local/objects_at.sql` is the macro `objects_at(t)` over any table or
-view named `objects`: the raw view, an hourly object with the hour before
+`local/apiserver_at.sql` is the macro `apiserver_at(t)` over any table or
+view named `apiserver`: the raw view, an hourly object with the hour before
 it, or a daily object with the day before it. For each resource
 (`api_group`, `resource`), the base is that resource's latest complete
 snapshot at or before `t`. Complete means its `snapshot` row exists. A
@@ -175,9 +175,9 @@ What apiserver-at shows differently from the cluster at that time:
 | test | what |
 |---|---|
 | `kobjects` units (fake clients) | snapshot rows then the snapshot row, no initial-list events, changes in all namespaces, a requested snapshot, Secret values scrambled on every row (empty ones kept empty), discovery filtering, snapshot alignment |
-| `tools/apiserver-at` `TestObjectsAt` | `objects_at` over crafted raw rows, through `raw.sql` and `tables.sql` |
+| `tools/apiserver-at` `TestObjectsAt` | `apiserver_at` over crafted raw rows, through `raw.sql` and `tables.sql` |
 | `tools/apiserver-at` `TestAcceptance` | a real API server as the source. The watcher's rows go through the SQL to apiserver-at. Every object of the 62 resources is equal at a past time and at the present. At the present, the server-side Tables of all of them are equal, as is `kubectl describe` of a pod, a node and a deployment. The source's etcd keys are the keys apiserver-at writes. A write is refused. About 40 s, part of `./test.sh checks` |
-| `./test.sh` itest | the cluster agent in k3s, through out_s3 and the compactor: its keys and lines, built-in and custom resources snapshotted at the scheduled interval, snapshot counts, no managedFields, Secret values scrambled to a tenth of their length and no Secret data anywhere, Events of all namespaces including one about the Node, three pod incarnations, the objects tier equal to raw hourly and daily. Then kubectl through apiserver-at: a ConfigMap before its creation, at each of its two values, after its deletion, and fourteen `kubectl get`/`describe` outputs equal to the live cluster's |
+| `./test.sh` itest | the cluster agent in k3s, through out_s3 and the compactor: its keys and lines, built-in and custom resources snapshotted at the scheduled interval, snapshot counts, no managedFields, Secret values scrambled to a tenth of their length and no Secret data anywhere, Events of all namespaces including one about the Node, three pod incarnations, the apiserver tier equal to raw hourly and daily. Then kubectl through apiserver-at: a ConfigMap before its creation, at each of its two values, after its deletion, and fourteen `kubectl get`/`describe` outputs equal to the live cluster's |
 
 ## Measured
 
@@ -189,8 +189,8 @@ default:
 |---|---|---|
 | raw, the cluster agent's 36 objects | 12,421 snapshot rows, 644 change rows, 1,121 snapshot rows | 13.5 MB of object JSON, 2.7 MB zstd |
 | raw, the node agent's 65 objects, for comparison | | 1.9 MB zstd |
-| hourly `objects` (3 hours) | the same | 0.32 MB parquet, about the size of `logs` |
-| daily `objects` | | 0.16 MB |
+| hourly `apiserver` (3 hours) | the same | 0.32 MB parquet, about the size of `logs` |
+| daily `apiserver` | | 0.16 MB |
 
 The agent used 36 MiB and 4m of CPU while it watched 59 resources. A
 snapshot of the whole cluster is about 0.7 MB of JSON. At the default 1h
