@@ -3,11 +3,13 @@ package kobjects
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"sync"
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -325,5 +327,34 @@ func TestWatcherSnapshotsThenEvents(t *testing.T) {
 	}
 	if got := w.Watching(); len(got) != 3 {
 		t.Fatalf("watching %v", got)
+	}
+}
+
+func TestWatcherSkipsWhatItMayNotList(t *testing.T) {
+	rw := []string{"get", "list", "watch"}
+	d := fakeDiscovery(&metav1.APIResourceList{GroupVersion: "v1", APIResources: []metav1.APIResource{
+		{Name: "configmaps", Namespaced: true, Verbs: rw},
+		{Name: "secrets", Namespaced: true, Verbs: rw},
+	}})
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		configmaps: "ConfigMapList", secrets: "SecretList",
+	}, obj("v1", "ConfigMap", "app", "conf", "1", nil))
+	dyn.PrependReactor("list", "secrets", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "", errors.New("RBAC"))
+	})
+	c := &collector{}
+	w := NewWatcher(Config{SnapshotInterval: time.Hour, DiscoveryInterval: time.Hour}, d, dyn, c.emit)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+	c.await(t, "the configmaps snapshot", func(rows []Row) bool { return count(rows, KindSnapshot, "configmaps", "") == 1 })
+	time.Sleep(100 * time.Millisecond)
+	if got := w.Watching(); !reflect.DeepEqual(got, []schema.GroupVersionResource{configmaps}) {
+		t.Fatalf("watching %v", got)
+	}
+	for _, r := range c.rows {
+		if r.GVR == secrets {
+			t.Fatalf("a row of a resource it may not list: %v", summarize(c.rows))
+		}
 	}
 }

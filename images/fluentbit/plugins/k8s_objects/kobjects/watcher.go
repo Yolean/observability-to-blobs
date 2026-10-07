@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -70,6 +71,8 @@ type Watcher struct {
 
 	mu      sync.Mutex
 	running map[schema.GroupVersionResource]*resourceInformer
+	// forbidden is the resources the agent may not list, logged once
+	forbidden map[schema.GroupVersionResource]bool
 	// snapshotNow asks the loop for a snapshot of everything, now
 	snapshotNow chan struct{}
 }
@@ -95,7 +98,8 @@ func NewWatcher(cfg Config, disc discovery.DiscoveryInterface, dyn dynamic.Inter
 		cfg.Exclude = DefaultExclude()
 	}
 	return &Watcher{cfg: cfg, disc: disc, dyn: dyn, emit: emit, now: time.Now,
-		running: map[schema.GroupVersionResource]*resourceInformer{}, snapshotNow: make(chan struct{}, 1)}
+		running: map[schema.GroupVersionResource]*resourceInformer{}, forbidden: map[schema.GroupVersionResource]bool{},
+		snapshotNow: make(chan struct{}, 1)}
 }
 
 // RequestSnapshot asks for a snapshot of every resource as soon as
@@ -211,10 +215,32 @@ func (w *Watcher) reconcile(ctx context.Context) {
 		}
 	}
 	for _, g := range gvrs {
-		if _, ok := w.running[g]; !ok {
-			w.running[g] = w.start(ctx, g)
+		if _, ok := w.running[g]; ok {
+			continue
 		}
+		if w.mayNotList(ctx, g) {
+			continue
+		}
+		w.running[g] = w.start(ctx, g)
 	}
+}
+
+// mayNotList tells whether RBAC refuses listing the resource, with a list
+// of one object. Such a resource is left out until a later discovery run
+// finds it allowed: its informer would retry, and log, forever, and it
+// would never be snapshotted anyway. Any other error starts the informer,
+// which retries.
+func (w *Watcher) mayNotList(ctx context.Context, g schema.GroupVersionResource) bool {
+	_, err := w.dyn.Resource(g).List(ctx, metav1.ListOptions{Limit: 1})
+	if apierrors.IsForbidden(err) {
+		if !w.forbidden[g] {
+			log.Printf("[k8s_objects] not watching %s: %v", g, err)
+			w.forbidden[g] = true
+		}
+		return true
+	}
+	delete(w.forbidden, g)
+	return false
 }
 
 func (w *Watcher) stopAll() {
