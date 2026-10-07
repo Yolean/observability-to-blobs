@@ -22,7 +22,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/Yolean/kubernetes-node-agent-to-blobs/images/fluentbit/plugins/k8s_objects/kobjects"
+	"github.com/Yolean/observability-to-blobs/images/fluentbit/plugins/k8s_objects/kobjects"
 )
 
 // k8s_objects is a Fluent Bit Go input plugin for the cluster agent

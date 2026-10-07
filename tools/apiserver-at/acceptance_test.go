@@ -33,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/yaml"
 
-	"github.com/Yolean/kubernetes-node-agent-to-blobs/images/fluentbit/plugins/k8s_objects/kobjects"
+	"github.com/Yolean/observability-to-blobs/images/fluentbit/plugins/k8s_objects/kobjects"
 )
 
 // The acceptance test of the objects path without a cluster: a real API

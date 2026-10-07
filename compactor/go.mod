@@ -1,4 +1,4 @@
-module github.com/Yolean/kubernetes-node-agent-to-blobs/compactor
+module github.com/Yolean/observability-to-blobs/compactor
 
 go 1.27.0
 

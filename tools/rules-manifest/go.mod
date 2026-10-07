@@ -1,4 +1,4 @@
-module github.com/Yolean/kubernetes-node-agent-to-blobs/tools/rules-manifest
+module github.com/Yolean/observability-to-blobs/tools/rules-manifest
 
 go 1.26
 
