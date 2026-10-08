@@ -67,6 +67,10 @@ spec:
           value: 1h
         - name: JOURNAL_PATH
           value: /var/log/journal
+        # cri_scrape's static targets; an overlay may add the host agent
+        # as host@$(NODE_IP):2023/metrics, NODE_IP being set above
+        - name: STATIC_TARGETS
+          value: node@127.0.0.1:2021/metrics
         - name: S3_REGION
           value: us-east-1
         - name: S3_TLS
