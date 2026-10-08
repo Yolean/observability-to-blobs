@@ -1,52 +1,57 @@
-// blobs-to-prometheus tails the metrics table of the node agent's bucket
-// into a Prometheus remote-write receiver. Run it as a sidecar of a
-// Prometheus started with --web.enable-remote-write-receiver and
-// --storage.tsdb.out_of_order_time_window covering the backfill window:
-// on start it replays the last BACKFILL of windows (so an ephemeral
-// Prometheus volume comes back with recent history), then keeps pushing
-// each new window about a minute behind real time, with the original
-// scrape timestamps.
+// blobs-to-prometheus tails the metrics lines of the raw tier into a
+// Prometheus remote-write receiver. Run it next to a Prometheus started
+// with --web.enable-remote-write-receiver and an out_of_order_time_window
+// that covers LOOKBACK: the samples keep their scrape times, and objects
+// arrive per node, not in global time order.
 //
-// It reads the PoC agent's key layout, {cluster}/{node}/{date}/{HH}/{MM}/
-// metrics-N.parquet: for every node and minute window it GETs
-// metrics-0.parquet, metrics-1.parquet, ... and a 404 ends the window.
-// Nodes are discovered by listing the cluster prefix once per
-// NODES_REFRESH. The PoC fluent-bit patch that numbered those keys
-// ($SEQ, patch 0006) is gone, and the agent now writes
-// raw1/{cluster}/{date}/{HH}/{node}/{MMSS}-{uuid}.jsonl.zst, so against a
-// current bucket this finds no nodes and pushes nothing. Rewiring it to
-// raw1 is still to do (README.md, "Known gaps").
+// It reads raw1/{cluster}/{date}/{HH}/{producer}/{MMSS}-{uuid}.jsonl.zst
+// (README.md, "What the agent ships"). Every POLL it LISTs the hour
+// prefixes from LOOKBACK ago to now, and pushes every key it has not
+// pushed yet, oldest first per producer: the metrics lines' samples, with
+// the line's cluster, node, job, instance, namespace, pod and container
+// as labels. So a new Prometheus, or one whose volume was lost, comes back
+// with the history the raw tier still holds, which with the compactor's
+// RAW_DELETE=after-final is the last one to two hours. Producers whose
+// name starts with '_' are cluster-level producers that ship no metrics
+// (K8SAGENT.md) and are not read.
+//
+// With SELECTORS_FILE, the JSON manifest of tools/rules-manifest, only the
+// samples that some selector of the rules matches are pushed.
+//
+// A key counts as done once Prometheus answered 2xx for it, or refused it
+// with a 4xx (then its series are sent one by one, so only the refused
+// ones are lost), or it vanished between LIST and GET. A failed LIST, GET
+// or a remote write that failed otherwise ends the pass, and the next
+// pass tries the same keys again, so an outage of the bucket or of
+// Prometheus shorter than LOOKBACK loses nothing.
 package main
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
-	"github.com/golang/snappy"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
-	"github.com/parquet-go/parquet-go"
 )
 
 type config struct {
-	endpoint     string
-	useSSL       bool
-	bucket       string
-	prefix       string // cluster name, the first key segment
-	remoteWrite  string
-	backfill     time.Duration
-	poll         time.Duration
-	nodesRefresh time.Duration
-	windowSize   time.Duration
-	grace        time.Duration // how long past a window's end new objects may appear
+	cluster     string
+	remoteWrite string
+	lookback    time.Duration
+	poll        time.Duration
+	timeout     time.Duration
+	metricsAddr string
 }
 
 func envDefault(k, def string) string {
@@ -58,88 +63,142 @@ func envDefault(k, def string) string {
 
 func envDuration(k, def string) time.Duration {
 	d, err := time.ParseDuration(envDefault(k, def))
-	if err != nil {
-		log.Fatalf("%s: %v", k, err)
+	if err != nil || d <= 0 {
+		log.Fatalf("%s %q: want a positive duration", k, os.Getenv(k))
 	}
 	return d
 }
 
 func main() {
 	log.SetFlags(0)
-	var selectors *selectorSet
+	var keep *selectorSet
 	if f := envDefault("SELECTORS_FILE", ""); f != "" {
 		var err error
-		selectors, err = loadSelectors(f)
+		keep, err = loadSelectors(f)
 		if err != nil {
 			log.Fatalf("SELECTORS_FILE: %v", err)
 		}
-		log.Printf("filtering to %d selectors from %s", selectors.len(), f)
+		log.Printf("filtering to %d selectors from %s", keep.len(), f)
 	}
 	cfg := config{
-		endpoint:     envDefault("S3_ENDPOINT", ""),
-		useSSL:       envDefault("S3_TLS", "off") == "on",
-		bucket:       envDefault("S3_BUCKET", ""),
-		prefix:       envDefault("CLUSTER_NAME", ""),
-		remoteWrite:  envDefault("REMOTE_WRITE_URL", "http://127.0.0.1:9090/api/v1/write"),
-		backfill:     envDuration("BACKFILL", "1h"),
-		poll:         envDuration("POLL", "15s"),
-		nodesRefresh: envDuration("NODES_REFRESH", "2m"),
-		windowSize:   envDuration("UPLOAD_WINDOW", "1m"),
-		grace:        envDuration("WINDOW_GRACE", "30s"),
+		cluster:     envDefault("CLUSTER_NAME", ""),
+		remoteWrite: envDefault("REMOTE_WRITE_URL", "http://127.0.0.1:9090/api/v1/write"),
+		lookback:    envDuration("LOOKBACK", "3h"),
+		poll:        envDuration("POLL", "15s"),
+		timeout:     envDuration("REMOTE_WRITE_TIMEOUT", "30s"),
+		metricsAddr: envDefault("METRICS_ADDR", ":9091"),
 	}
-	if cfg.endpoint == "" || cfg.bucket == "" || cfg.prefix == "" {
+	endpoint := envDefault("S3_ENDPOINT", "")
+	bucket := envDefault("S3_BUCKET", "")
+	if endpoint == "" || bucket == "" || cfg.cluster == "" {
 		log.Fatal("S3_ENDPOINT, S3_BUCKET and CLUSTER_NAME are required")
 	}
-	endpoint := strings.TrimPrefix(strings.TrimPrefix(cfg.endpoint, "https://"), "http://")
+	endpoint = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(endpoint, "https://"), "http://"), "/")
 	mc, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(os.Getenv("AWS_ACCESS_KEY_ID"), os.Getenv("AWS_SECRET_ACCESS_KEY"), ""),
-		Secure: cfg.useSSL,
+		Secure: envDefault("S3_TLS", "off") == "on",
 		Region: envDefault("S3_REGION", "us-east-1"),
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	t := &tailer{cfg: cfg, mc: mc, done: map[string]int{}, selectors: selectors}
-	t.run(context.Background())
+	t := newTailer(cfg, &minioStore{mc: mc, bucket: bucket, timeout: cfg.timeout},
+		&remoteWriter{url: cfg.remoteWrite, client: &http.Client{Timeout: cfg.timeout}}, keep)
+	if cfg.metricsAddr != "off" {
+		go func() {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/metrics", t.serveMetrics)
+			log.Fatal(http.ListenAndServe(cfg.metricsAddr, mux))
+		}()
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	log.Printf("tailing raw1/%s/ from %s back, every %s", cfg.cluster, cfg.lookback, cfg.poll)
+	t.run(ctx)
+}
+
+// store is the bucket as the tailer uses it.
+type store interface {
+	// list returns every key under prefix
+	list(ctx context.Context, prefix string) ([]string, error)
+	// get returns an object's body; errNotFound when it is gone
+	get(ctx context.Context, key string) ([]byte, error)
+}
+
+var errNotFound = errors.New("not found")
+
+type minioStore struct {
+	mc      *minio.Client
+	bucket  string
+	timeout time.Duration
+}
+
+func (s *minioStore) list(ctx context.Context, prefix string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	var keys []string
+	for obj := range s.mc.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+		if obj.Err != nil {
+			return nil, obj.Err
+		}
+		keys = append(keys, obj.Key)
+	}
+	return keys, nil
+}
+
+func (s *minioStore) get(ctx context.Context, key string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	obj, err := s.mc.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, notFound(err)
+	}
+	defer obj.Close()
+	data, err := io.ReadAll(obj)
+	if err != nil {
+		return nil, notFound(err)
+	}
+	return data, nil
+}
+
+func notFound(err error) error {
+	resp := minio.ToErrorResponse(err)
+	if resp.Code == "NoSuchKey" || resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("%w: %v", errNotFound, err)
+	}
+	return err
 }
 
 type tailer struct {
-	cfg   config
-	mc    *minio.Client
-	nodes []string
-	// done[node+window] = number of objects already pushed for that window
-	done      map[string]int
-	selectors *selectorSet
+	cfg  config
+	st   store
+	rw   *remoteWriter
+	keep *selectorSet
+	// keys done, by their hour prefix, so that hours past LOOKBACK go at once
+	done map[string]map[string]bool
+
+	mu sync.Mutex
+	m  tailerMetrics
+}
+
+type tailerMetrics struct {
+	objects               map[string]int64 // by result
+	samples, dropped      int64
+	skippedLines          int64
+	lastPass, lastFailure float64 // unix seconds
+	newestSample          float64
+	keysPending           int
+}
+
+func newTailer(cfg config, st store, rw *remoteWriter, keep *selectorSet) *tailer {
+	return &tailer{cfg: cfg, st: st, rw: rw, keep: keep, done: map[string]map[string]bool{},
+		m: tailerMetrics{objects: map[string]int64{}}}
 }
 
 func (t *tailer) run(ctx context.Context) {
-	lastNodes := time.Time{}
-	start := time.Now().Add(-t.cfg.backfill).Truncate(t.cfg.windowSize)
-	log.Printf("backfilling from %s", start.UTC().Format(time.RFC3339))
 	for {
-		if time.Since(lastNodes) > t.cfg.nodesRefresh {
-			if err := t.refreshNodes(ctx); err != nil {
-				log.Printf("node discovery: %v", err)
-			}
-			lastNodes = time.Now()
-		}
-		// windows from `start` (backfill edge, advanced as windows complete)
-		// up to and including the current one
-		now := time.Now()
-		for w := start; !w.After(now); w = w.Add(t.cfg.windowSize) {
-			complete := now.After(w.Add(t.cfg.windowSize + t.cfg.grace))
-			for _, node := range t.nodes {
-				if err := t.pushWindow(ctx, node, w); err != nil {
-					log.Printf("%s %s: %v", node, w.UTC().Format("15:04"), err)
-				}
-			}
-			if complete && w.Equal(start) {
-				// nothing more can arrive for the oldest tracked window
-				for _, node := range t.nodes {
-					delete(t.done, node+w.UTC().Format(time.RFC3339))
-				}
-				start = w.Add(t.cfg.windowSize)
-			}
+		if err := t.pass(ctx, time.Now()); err != nil && ctx.Err() == nil {
+			log.Printf("pass: %v", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -149,257 +208,176 @@ func (t *tailer) run(ctx context.Context) {
 	}
 }
 
-func (t *tailer) refreshNodes(ctx context.Context) error {
-	seen := map[string]bool{}
-	for obj := range t.mc.ListObjects(ctx, t.cfg.bucket, minio.ListObjectsOptions{
-		Prefix: t.cfg.prefix + "/",
-	}) {
-		if obj.Err != nil {
-			return obj.Err
-		}
-		// non-recursive listing yields "prefix/node/" entries
-		parts := strings.Split(strings.TrimPrefix(obj.Key, t.cfg.prefix+"/"), "/")
-		if len(parts) > 0 && parts[0] != "" && !seen[parts[0]] {
-			seen[parts[0]] = true
-		}
-	}
-	nodes := make([]string, 0, len(seen))
-	for n := range seen {
-		nodes = append(nodes, n)
-	}
-	sort.Strings(nodes)
-	if len(nodes) > 0 && strings.Join(nodes, ",") != strings.Join(t.nodes, ",") {
-		log.Printf("nodes: %v", nodes)
-	}
-	t.nodes = nodes
-	return nil
-}
-
-// pushWindow fetches any not-yet-pushed objects of one node's window, using
-// the predictable keys: metrics-0.parquet upward until 404.
-func (t *tailer) pushWindow(ctx context.Context, node string, w time.Time) error {
-	key := node + w.UTC().Format(time.RFC3339)
-	seq := t.done[key]
-	for {
-		object := fmt.Sprintf("%s/%s/%s/metrics-%d.parquet",
-			t.cfg.prefix, node, w.UTC().Format("2006-01-02/15/04"), seq)
-		data, err := t.get(ctx, object)
-		if err != nil {
-			if isNotFound(err) {
-				return nil
-			}
-			return fmt.Errorf("get %s: %w", object, err)
-		}
-		series, samples, err := toRemoteWrite(data, t.selectors)
-		if err != nil {
-			return fmt.Errorf("decode %s: %w", object, err)
-		}
-		if err := t.send(ctx, series); err != nil {
-			return fmt.Errorf("remote write %s: %w", object, err)
-		}
-		log.Printf("pushed %s (%d samples)", object, samples)
-		seq++
-		t.done[key] = seq
-	}
-}
-
-func (t *tailer) get(ctx context.Context, object string) ([]byte, error) {
-	obj, err := t.mc.GetObject(ctx, t.cfg.bucket, object, minio.GetObjectOptions{})
-	if err != nil {
-		return nil, err
-	}
-	defer obj.Close()
-	data, err := io.ReadAll(obj)
-	if err != nil {
-		return nil, err
-	}
-	return data, nil
-}
-
-func isNotFound(err error) bool {
-	resp := minio.ToErrorResponse(err)
-	return resp.Code == "NoSuchKey" || resp.StatusCode == 404
-}
-
-func (t *tailer) send(ctx context.Context, wr []byte) error {
-	if len(wr) == 0 {
-		return nil
-	}
-	body := snappy.Encode(nil, wr)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.cfg.remoteWrite, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/x-protobuf")
-	req.Header.Set("Content-Encoding", "snappy")
-	req.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
-	}
-	return nil
-}
-
-// row matches the metrics table schema (CONSUMING.md).
-type row struct {
-	Time      int64             `parquet:"time,timestamp(nanosecond)"`
-	Cluster   string            `parquet:"cluster"`
-	Node      string            `parquet:"node"`
-	Job       string            `parquet:"job"`
-	Instance  string            `parquet:"instance"`
-	Namespace string            `parquet:"namespace"`
-	Pod       string            `parquet:"pod"`
-	Container string            `parquet:"container"`
-	Name      string            `parquet:"name"`
-	Type      string            `parquet:"type"`
-	Labels    map[string]string `parquet:"labels"`
-	Value     float64           `parquet:"value"`
-}
-
-// toRemoteWrite turns one blob into an encoded prometheus.WriteRequest.
-// Samples are grouped per series and kept in blob order, which is time
-// order per origin scrape.
-func toRemoteWrite(data []byte, keep *selectorSet) ([]byte, int, error) {
-	pf, err := parquet.OpenFile(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return nil, 0, err
-	}
-	reader := parquet.NewGenericReader[row](pf)
-	defer reader.Close()
-
-	type sample struct {
-		ts    int64 // milliseconds
-		value float64
-	}
-	series := map[string][]sample{}
-	order := []string{}
-	total := 0
-	buf := make([]row, 256)
-	for {
-		n, err := reader.Read(buf)
-		for i := 0; i < n; i++ {
-			r := buf[i]
-			if keep != nil && !keep.matches(r) {
-				continue
-			}
-			key := seriesKey(r)
-			if _, ok := series[key]; !ok {
-				order = append(order, key)
-			}
-			series[key] = append(series[key], sample{ts: r.Time / 1e6, value: r.Value})
-			total++
-		}
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, 0, err
-		}
-	}
-
-	var wr protoBuf
-	for _, key := range order {
-		var ts protoBuf
-		for _, l := range decodeSeriesKey(key) {
-			var lbl protoBuf
-			lbl.tagBytes(1, []byte(l[0]))
-			lbl.tagBytes(2, []byte(l[1]))
-			ts.tagMessage(1, lbl.Bytes())
-		}
-		for _, s := range series[key] {
-			var smp protoBuf
-			smp.tagDouble(1, s.value)
-			smp.tagVarint(2, uint64(s.ts))
-			ts.tagMessage(2, smp.Bytes())
-		}
-		wr.tagMessage(1, ts.Bytes())
-	}
-	return wr.Bytes(), total, nil
-}
-
-// seriesKey encodes the sorted label set; \xff separates entries since it
-// cannot appear in UTF-8 label data at these positions.
-func seriesKey(r row) string {
-	labels := [][2]string{{"__name__", r.Name}}
-	add := func(k, v string) {
-		if v != "" {
-			labels = append(labels, [2]string{k, v})
-		}
-	}
-	add("cluster", r.Cluster)
-	add("node", r.Node)
-	add("job", r.Job)
-	add("instance", r.Instance)
-	add("namespace", r.Namespace)
-	add("pod", r.Pod)
-	add("container", r.Container)
-	for k, v := range r.Labels {
-		add(k, v)
-	}
-	sort.Slice(labels[1:], func(i, j int) bool { return labels[i+1][0] < labels[j+1][0] })
-	var b strings.Builder
-	for _, l := range labels {
-		b.WriteString(l[0])
-		b.WriteByte('\xfe')
-		b.WriteString(l[1])
-		b.WriteByte('\xff')
-	}
-	return b.String()
-}
-
-func decodeSeriesKey(key string) [][2]string {
-	var out [][2]string
-	for _, entry := range strings.Split(strings.TrimSuffix(key, "\xff"), "\xff") {
-		kv := strings.SplitN(entry, "\xfe", 2)
-		if len(kv) == 2 {
-			out = append(out, [2]string{kv[0], kv[1]})
-		}
+// hourPrefixes are the raw1 hour prefixes from now-LOOKBACK to now, oldest first.
+func (t *tailer) hourPrefixes(now time.Time) []string {
+	var out []string
+	for h := now.Add(-t.cfg.lookback).UTC().Truncate(time.Hour); !h.After(now); h = h.Add(time.Hour) {
+		out = append(out, fmt.Sprintf("raw1/%s/%s/", t.cfg.cluster, h.Format("2006-01-02/15")))
 	}
 	return out
 }
 
-// protoBuf is a minimal protobuf wire-format writer, enough for
-// prometheus.WriteRequest: message fields (length-delimited), bytes,
-// varints and doubles. Field numbers follow prompb/remote.proto and
-// prompb/types.proto.
-type protoBuf struct {
-	bytes.Buffer
-}
-
-func (p *protoBuf) varint(v uint64) {
-	for v >= 0x80 {
-		p.WriteByte(byte(v) | 0x80)
-		v >>= 7
+// pass pushes every new key of the hours in LOOKBACK. It stops at the
+// first failure that a later pass may not have, so that per producer the
+// keys go in order.
+func (t *tailer) pass(ctx context.Context, now time.Time) error {
+	hours := t.hourPrefixes(now)
+	keepHours := map[string]bool{}
+	for _, h := range hours {
+		keepHours[h] = true
 	}
-	p.WriteByte(byte(v))
-}
-
-func (p *protoBuf) tagVarint(field int, v uint64) {
-	p.varint(uint64(field)<<3 | 0)
-	p.varint(v)
-}
-
-func (p *protoBuf) tagDouble(field int, v float64) {
-	p.varint(uint64(field)<<3 | 1)
-	var raw [8]byte
-	bits := mathFloat64bits(v)
-	for i := 0; i < 8; i++ {
-		raw[i] = byte(bits >> (8 * i))
+	for h := range t.done {
+		if !keepHours[h] {
+			delete(t.done, h)
+		}
 	}
-	p.Write(raw[:])
+	err := t.passHours(ctx, hours)
+	t.mu.Lock()
+	if err != nil {
+		t.m.lastFailure = float64(now.Unix())
+	} else {
+		t.m.lastPass = float64(now.Unix())
+	}
+	t.mu.Unlock()
+	return err
 }
 
-func (p *protoBuf) tagBytes(field int, b []byte) {
-	p.varint(uint64(field)<<3 | 2)
-	p.varint(uint64(len(b)))
-	p.Write(b)
+func (t *tailer) passHours(ctx context.Context, hours []string) error {
+	var pending []string
+	for _, h := range hours {
+		keys, err := t.st.list(ctx, h)
+		if err != nil {
+			return fmt.Errorf("list %s: %w", h, err)
+		}
+		if t.done[h] == nil {
+			t.done[h] = map[string]bool{}
+		}
+		for _, k := range keys {
+			if t.done[h][k] {
+				continue
+			}
+			if !strings.HasSuffix(k, ".jsonl.zst") || strings.HasPrefix(producer(h, k), "_") {
+				t.done[h][k] = true
+				continue
+			}
+			pending = append(pending, k)
+		}
+	}
+	// key order is hour, producer, MMSS: time order per producer
+	sort.Strings(pending)
+	t.mu.Lock()
+	t.m.keysPending = len(pending)
+	t.mu.Unlock()
+	for i, k := range pending {
+		result, err := t.pushKey(ctx, k)
+		t.mu.Lock()
+		t.m.objects[result]++
+		if result != "retry" {
+			t.m.keysPending = len(pending) - i - 1
+		}
+		t.mu.Unlock()
+		if result == "retry" {
+			return fmt.Errorf("%s: %w", k, err)
+		}
+		if err != nil {
+			log.Printf("%s: %v", k, err)
+		}
+		t.done[hourOf(t.cfg.cluster, k)][k] = true
+	}
+	return nil
 }
 
-func (p *protoBuf) tagMessage(field int, b []byte) {
-	p.tagBytes(field, b)
+// pushKey reads and pushes one object. The result is pushed, empty (no
+// sample kept), gone (deleted before the GET), undecodable, refused
+// (some series refused by the receiver) or retry (try the key again in
+// the next pass).
+func (t *tailer) pushKey(ctx context.Context, key string) (string, error) {
+	body, err := t.st.get(ctx, key)
+	if errors.Is(err, errNotFound) {
+		return "gone", nil
+	}
+	if err != nil {
+		return "retry", err
+	}
+	b, err := decodeObject(body, t.keep)
+	t.mu.Lock()
+	t.m.skippedLines += int64(b.skipped)
+	t.mu.Unlock()
+	if err != nil {
+		return "undecodable", err
+	}
+	if b.samples == 0 {
+		return "empty", nil
+	}
+	dropped, err := t.rw.push(ctx, b)
+	t.mu.Lock()
+	t.m.dropped += int64(dropped)
+	if err == nil || dropped > 0 {
+		t.m.samples += int64(b.samples)
+		if s := float64(b.newest) / 1000; s > t.m.newestSample {
+			t.m.newestSample = s
+		}
+	}
+	t.mu.Unlock()
+	switch {
+	case err == nil:
+		return "pushed", nil
+	case errors.Is(err, errRejected) || dropped > 0:
+		return "refused", err
+	default:
+		return "retry", err
+	}
+}
+
+// hourOf is the hour prefix raw1/{cluster}/{date}/{HH}/ of a key.
+func hourOf(cluster, key string) string {
+	root := "raw1/" + cluster + "/"
+	rest := strings.TrimPrefix(key, root)
+	parts := strings.SplitN(rest, "/", 3)
+	if len(parts) < 3 {
+		return root + rest
+	}
+	return root + parts[0] + "/" + parts[1] + "/"
+}
+
+// producer is the key's segment after the hour: a node name, or a
+// cluster-level producer such as _k8sagent.
+func producer(hour, key string) string {
+	rest := strings.TrimPrefix(key, hour)
+	if i := strings.Index(rest, "/"); i >= 0 {
+		return rest[:i]
+	}
+	return ""
+}
+
+func (t *tailer) serveMetrics(w http.ResponseWriter, _ *http.Request) {
+	t.mu.Lock()
+	m := t.m
+	objects := map[string]int64{}
+	for k, v := range t.m.objects {
+		objects[k] = v
+	}
+	t.mu.Unlock()
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	fmt.Fprintln(w, "# HELP blobs_to_prometheus_objects_total Raw objects handled, by result.")
+	fmt.Fprintln(w, "# TYPE blobs_to_prometheus_objects_total counter")
+	results := []string{"pushed", "empty", "gone", "undecodable", "refused", "retry"}
+	for _, r := range results {
+		fmt.Fprintf(w, "blobs_to_prometheus_objects_total{result=%q} %d\n", r, objects[r])
+	}
+	gauges := []struct {
+		name, help, typ string
+		v               float64
+	}{
+		{"blobs_to_prometheus_samples_total", "Samples sent to the receiver.", "counter", float64(m.samples)},
+		{"blobs_to_prometheus_dropped_series_total", "Series the receiver refused.", "counter", float64(m.dropped)},
+		{"blobs_to_prometheus_skipped_lines_total", "Metrics lines or samples that could not be decoded.", "counter", float64(m.skippedLines)},
+		{"blobs_to_prometheus_last_pass_success_timestamp_seconds", "End of the last pass that completed.", "gauge", m.lastPass},
+		{"blobs_to_prometheus_last_pass_failure_timestamp_seconds", "End of the last pass that failed.", "gauge", m.lastFailure},
+		{"blobs_to_prometheus_newest_sample_timestamp_seconds", "Time of the newest sample sent.", "gauge", m.newestSample},
+		{"blobs_to_prometheus_keys_pending", "Keys listed and not yet done in the current pass.", "gauge", float64(m.keysPending)},
+	}
+	for _, g := range gauges {
+		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %g\n", g.name, g.help, g.name, g.typ, g.name, g.v)
+	}
 }

@@ -59,8 +59,8 @@ func loadSelectors(path string) (*selectorSet, error) {
 			switch mm.Type {
 			case "=", "!=":
 			case "=~", "!~":
-				// PromQL regex matchers are fully anchored
-				re, err := regexp.Compile("^(?:" + mm.Value + ")$")
+				// PromQL regex matchers are fully anchored, and . matches a newline
+				re, err := regexp.Compile("^(?s:" + mm.Value + ")$")
 				if err != nil {
 					return nil, fmt.Errorf("selector %q label %q: %w", s.Name, mm.Label, err)
 				}
@@ -77,17 +77,19 @@ func loadSelectors(path string) (*selectorSet, error) {
 
 func (s *selectorSet) len() int { return len(s.selectors) }
 
-// matches reports whether any selector accepts the row. Labels are looked
-// up across the row's meta columns and its labels map, the same view the
-// series gets in Prometheus.
-func (s *selectorSet) matches(r row) bool {
+// matches reports whether any selector accepts the label set: the
+// series' labels as Prometheus stores them (seriesLabels), so a selector
+// written for a rule matches what the rule would see. A label that is
+// absent matches as the empty string, as in PromQL.
+func (s *selectorSet) matches(ls []label) bool {
+	name := labelValue(ls, "__name__")
 	for _, sel := range s.selectors {
-		if sel.name != "" && sel.name != r.Name {
+		if sel.name != "" && sel.name != name {
 			continue
 		}
 		ok := true
 		for _, m := range sel.matchers {
-			v := rowLabel(r, m.label)
+			v := labelValue(ls, m.label)
 			switch m.typ {
 			case "=":
 				ok = v == m.value
@@ -107,26 +109,4 @@ func (s *selectorSet) matches(r row) bool {
 		}
 	}
 	return false
-}
-
-func rowLabel(r row, name string) string {
-	switch name {
-	case "__name__":
-		return r.Name
-	case "cluster":
-		return r.Cluster
-	case "node":
-		return r.Node
-	case "job":
-		return r.Job
-	case "instance":
-		return r.Instance
-	case "namespace":
-		return r.Namespace
-	case "pod":
-		return r.Pod
-	case "container":
-		return r.Container
-	}
-	return r.Labels[name]
 }
