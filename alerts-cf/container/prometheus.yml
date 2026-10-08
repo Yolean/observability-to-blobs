@@ -1,9 +1,9 @@
 # Receiver mode like local/prometheus.yml: every sample arrives via remote
 # write from the tailer with its original timestamp; the out-of-order
-# window must cover the tailer's BACKFILL.
+# window must cover the tailer's LOOKBACK (3h) plus an hour.
 storage:
   tsdb:
-    out_of_order_time_window: 2h
+    out_of_order_time_window: 4h
 rule_files:
 - /etc/alerts/rules/*.yml
 alerting:

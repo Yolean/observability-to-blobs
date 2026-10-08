@@ -12,12 +12,9 @@ export KUBECONFIG=$PWD/itest/cluster/kubeconfig   # from the repo root
 kubectl --context=node-agent apply -k itest/k8s-r2  # itest/k8s-docker-r2 on the docker backend
 ```
 
-The tailer is not wired to the current bucket layout yet (README.md,
-"Known gaps"): it reads the PoC `{cluster}/{node}/.../metrics-N.parquet` keys,
-and the agent now writes `raw1/{cluster}/...jsonl.zst`, so against a
-bucket the current agent ships to it pushes nothing and no rule fires.
-Everything below that mentions backfill or firing alerts holds only for
-a PoC-era bucket.
+The tailer reads the raw tier, `raw1/{cluster}/...jsonl.zst`, for the
+hours of its LOOKBACK (3h), so a cold start backfills what the raw tier
+still holds.
 
 ## One-time setup
 
@@ -61,8 +58,7 @@ Cloudflare Access fronts it.
 
 Local smoke test, no tokens needed (from the repo root, against the
 versitygw NodePort of a running `./test.sh up` cluster). Against such a
-bucket it shows only that the container comes up: the tailer finds no PoC
-keys there, so Prometheus gets no data and no alert fires:
+bucket the tailer pushes what the agents wrote there:
 
 ```
 docker build -f alerts-cf/container/Dockerfile -t alerts-cf:dev .

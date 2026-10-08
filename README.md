@@ -13,7 +13,8 @@ in [compactor/README.md](compactor/README.md)) are built and tested; the
 agents can also upload to the compactor's S3 put endpoint instead of the
 bucket, so that raw objects never reach object storage (spool mode); the
 compactor serves container logs by URL, for clients of an existing logs
-API; the alerting tailer follows. The PoC-era `CONSUMING.md` and `COMPACTING.md` keep measurements
+API; the alerting tailer (`images/blobs-to-prometheus`) feeds a
+Prometheus from the raw tier. The PoC-era `CONSUMING.md` and `COMPACTING.md` keep measurements
 from the first iteration and are superseded where they differ.
 
 ## What the agent ships
@@ -69,7 +70,7 @@ kubectl against the cluster as it was at a time, from the blobs alone.
 | `k8sagent/`, `images/fluentbit/plugins/k8s_objects/` | the cluster agent: a one-replica Deployment of the same image with the `k8s_objects` Go input plugin ([K8SAGENT.md](K8SAGENT.md)) |
 | `tools/apiserver-at/`, `local/apiserver_at.sql`, `local/kubectl-at.sh` | a cluster at a time: the objects state SQL, and a stock kube-apiserver serving it read-only to kubectl |
 | `itest/` | y-cluster configs for a local k3s node (qemu and docker), versitygw, the workloads that exercise each path, the compactor's overlays (bucket mode, and spool mode with stock Fluent Bit as a second shipper); `itest/host/` the host phase |
-| `images/blobs-to-prometheus/`, `tools/rules-manifest/`, `local/`, `alerts-cf/` | the alerting consumer from the PoC; rewired to the new blob in phase 3 |
+| `images/blobs-to-prometheus/`, `tools/rules-manifest/`, `local/`, `alerts-cf/` | the alerting consumer: the tailer from `raw1/` into a Prometheus remote-write receiver, the selectors manifest of a rule set, the local stacks and the Cloudflare container |
 | `compactor/` | `blobs-compactor` (fold, rollup and the loop that runs them, and the logs API), its design (`README.md`), its SQL (`sql/raw.sql` is the raw line contract every consumer reads), its build script and `deploy/` |
 | `examples/gke/` | sketch of a production overlay |
 | `test.sh` | the one command |
@@ -323,28 +324,26 @@ The compactor:
   than a column it reads; `local/blobs.sh`'s hourly views have this gap,
   the compactor does not (`compactor/README.md`, "Encryption").
 
-The alerting tailer, as requirements for its rewrite onto `raw1/`:
+The alerting tailer (`images/blobs-to-prometheus`, reading `raw1/`):
 
-- Windows advance even when the node list is empty or a remote write
-  failed, so an early S3 or DNS failure, a new node, or a remote-write
-  outage longer than the grace loses whole windows for good.
-- Exposed labels named like a meta column (`namespace`, `pod`,
-  `container`, `job`, `instance`, `node`) give a series duplicate label
-  names, which Prometheus drops while answering 2xx, and selectors match
-  them against the scraping pod's namespace.
-- No HTTP timeouts: a Prometheus that accepts and never answers blocks
-  the tailer.
-- One remote-write request per object, so one out-of-order or too-old
-  sample rejects the whole object.
-- No staleness markers, and regex matchers lack PromQL's `(?s)`.
+- It writes no staleness markers: a series that ends (a pod deleted, a
+  target gone) stays in instant queries for Prometheus' lookback delta,
+  5 minutes, after its last sample.
+- What it can backfill is what the raw tier holds: with the compactor's
+  RAW_DELETE=after-final, one to two hours. A Prometheus that needs a
+  longer history after losing its volume (a rule over a day's average)
+  reads it nowhere; the hourly tier would have to be a second source.
+- A key that appears after its hour has left LOOKBACK (an agent's
+  backlog after a longer outage) is never read.
+- A series Prometheus refuses (out of order, too old) is lost; the
+  tailer counts it in `blobs_to_prometheus_dropped_series_total`.
 - In spool mode (`RAW_SOURCE=spool`, `compactor/deploy/spool`) `raw1/`
-  never reaches the bucket, so a tailer of `raw1/` has nothing to read
-  there. Such a deployment's alerting reads the `hourly/` tier, which the
-  rolling pass rewrites every `ROLLING_INTERVAL`: samples arrive that much
-  later (plus the upload interval), which rules' ranges and `for:` have to
-  allow for, and the reader needs the Parquet keys.
-- The compactor's own label `job` (rolling, past, rollup) is such a meta
-  column name: the rules its README names
-  (`blobs_compactor_last_success_timestamp_seconds{job="rolling"}`) depend
-  on how the tailer resolves the collision. Resolved as a Prometheus scrape
-  does (`honor_labels: false`), the selector is `{exported_job="rolling"}`.
+  never reaches the bucket, so the tailer has nothing to read there. Such a
+  deployment's alerting reads the `hourly/` tier, which the rolling pass
+  rewrites every `ROLLING_INTERVAL`: samples arrive that much later (plus
+  the upload interval), which rules' ranges and `for:` have to allow for,
+  and the reader needs the Parquet keys.
+- The compactor's own label `job` (rolling, past, rollup) collides with the
+  meta label `job`; the tailer stores it as `exported_job`, as a scrape with
+  `honor_labels: false` does, so the rule its README names selects
+  `blobs_compactor_last_success_timestamp_seconds{exported_job="rolling"}`.

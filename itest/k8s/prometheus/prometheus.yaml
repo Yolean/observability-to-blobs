@@ -18,7 +18,7 @@ data:
     # No scrape_configs: every sample arrives via remote write from the
     # blobs-to-prometheus sidecar, carrying its original scrape timestamp.
     # The out-of-order window (a config setting, not a flag) is what makes
-    # the sidecar's backfill acceptable; it must cover BACKFILL.
+    # the sidecar's backfill acceptable; it must cover LOOKBACK plus an hour.
     global: {}
     storage:
       tsdb:
@@ -64,7 +64,7 @@ spec:
           value: node-agent
         - name: CLUSTER_NAME
           value: itest
-        - name: BACKFILL
+        - name: LOOKBACK
           value: 1h
         - name: POLL
           value: 15s
