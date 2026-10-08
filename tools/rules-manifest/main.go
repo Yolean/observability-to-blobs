@@ -6,7 +6,8 @@
 // visible. Parsing uses Prometheus's own PromQL parser, so
 // whatever an expr means to Prometheus it means here.
 //
-// Accepted inputs (files or directories, recursively for .yml/.yaml),
+// Accepted inputs (files or directories, recursively for .yml/.yaml, a
+// directory's kustomization.yaml left out),
 // every document of a multi-document file read:
 //   - PrometheusRule objects (spec.groups)
 //   - plain {groups: [...]} rule files
@@ -104,6 +105,13 @@ func fatal(err error) {
 	os.Exit(1)
 }
 
+// kustomizeFile are the names kustomize reads as a kustomization. A rules
+// directory deployed with kustomize has one beside the rule files, and it is
+// never a rule document, so a directory walk leaves it out; named as an
+// argument it is read, and refused, like any other file.
+var kustomizeFile = map[string]bool{"kustomization.yaml": true, "kustomization.yml": true, "Kustomization": true}
+
+// collect lists path, or the .yml and .yaml files under it but kustomizeFile.
 func collect(path string) ([]string, error) {
 	st, err := os.Stat(path)
 	if err != nil {
@@ -117,7 +125,7 @@ func collect(path string) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() && (strings.HasSuffix(p, ".yml") || strings.HasSuffix(p, ".yaml")) {
+		if !d.IsDir() && (strings.HasSuffix(p, ".yml") || strings.HasSuffix(p, ".yaml")) && !kustomizeFile[d.Name()] {
 			out = append(out, p)
 		}
 		return nil

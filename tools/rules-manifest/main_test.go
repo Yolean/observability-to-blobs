@@ -147,3 +147,20 @@ func TestNoSelectorsIsAnEmptyList(t *testing.T) {
 		t.Fatalf("got %s", out)
 	}
 }
+
+func TestDirectoryWalkLeavesOutTheKustomization(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "kustomization.yaml", "resources:\n- rules.yaml\n")
+	rules := write(t, dir, "rules.yaml", prometheusRule)
+	files, err := collect(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0] != rules {
+		t.Fatalf("collect(%s) = %v, want only %s", dir, files, rules)
+	}
+	named := filepath.Join(dir, "kustomization.yaml")
+	if files, err := collect(named); err != nil || len(files) != 1 || files[0] != named {
+		t.Fatalf("collect(%s) = %v, %v: a file named as an argument is read", named, files, err)
+	}
+}
