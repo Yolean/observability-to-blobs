@@ -337,3 +337,14 @@ The alerting tailer, as requirements for its rewrite onto `raw1/`:
 - One remote-write request per object, so one out-of-order or too-old
   sample rejects the whole object.
 - No staleness markers, and regex matchers lack PromQL's `(?s)`.
+- In spool mode (`RAW_SOURCE=spool`, `compactor/deploy/spool`) `raw1/`
+  never reaches the bucket, so a tailer of `raw1/` has nothing to read
+  there. Such a deployment's alerting reads the `hourly/` tier, which the
+  rolling pass rewrites every `ROLLING_INTERVAL`: samples arrive that much
+  later (plus the upload interval), which rules' ranges and `for:` have to
+  allow for, and the reader needs the Parquet keys.
+- The compactor's own label `job` (rolling, past, rollup) is such a meta
+  column name: the rules its README names
+  (`blobs_compactor_last_success_timestamp_seconds{job="rolling"}`) depend
+  on how the tailer resolves the collision. Resolved as a Prometheus scrape
+  does (`honor_labels: false`), the selector is `{exported_job="rolling"}`.
