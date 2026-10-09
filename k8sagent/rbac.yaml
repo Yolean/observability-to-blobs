@@ -4,10 +4,11 @@ metadata:
   name: k8sagent
 ---
 # Read everything the API server serves: the agent ships what kubectl get
-# can show. Secrets are read too and leave the agent with scrambled values
-# (K8SAGENT.md, "Secrets"); an overlay that must not grant even that
-# replaces this rule with an explicit list without secrets, and the agent
-# skips what it is not allowed to list.
+# can show. The wildcard includes Secrets, which the agent reads only with
+# secrets_mode scrambled (K8SAGENT.md, "Secrets"; the default skip never
+# lists them); an overlay that must not grant even the right replaces this
+# rule with an explicit list without secrets, and the agent skips what it
+# is not allowed to list.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

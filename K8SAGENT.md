@@ -55,7 +55,11 @@ view, which adds `api_group`.
 - **managedFields** are removed from every object: they record field
   ownership, are often larger than the object, and no `kubectl get` shows
   them.
-- **Secrets** keep their type and key names, and the annotation
+- **Secrets** are not watched at all by default: the input's
+  `secrets_mode` (env `SECRETS_MODE` in `k8sagent/`) is `skip`, so no
+  Secret value ever reaches the agent and `kubectl get secrets` from the
+  blobs is empty. With `secrets_mode: scrambled` they are watched, and
+  keep their type and key names, and the annotation
   `observability-to-blobs/redacted: data`. Every value is scrambled:
   `k8sobs_` and random letters and digits, a tenth of the original
   value's length in bytes, rounded up. A 10-byte password becomes
@@ -78,10 +82,11 @@ view, which adds `api_group`.
   situation. Here, losing a change would leave the state wrong until the
   object changed again.
 
-RBAC is `get, list, watch` on everything (`k8sagent/rbac.yaml`). An overlay
-that must not grant reading Secrets lists the resources it grants instead.
-The agent skips what it may not list, and `kubectl get secrets` from the
-blobs is then empty.
+RBAC is `get, list, watch` on everything (`k8sagent/rbac.yaml`), Secrets
+included, since RBAC cannot grant everything but one resource. With the
+default `secrets_mode: skip` the agent never uses that right. An overlay
+that must not grant it lists the resources it grants instead; the agent
+skips what it may not list.
 
 ## Compaction
 
@@ -174,7 +179,7 @@ What apiserver-at shows differently from the cluster at that time:
 
 | test | what |
 |---|---|
-| `kobjects` units (fake clients) | snapshot rows then the snapshot row, no initial-list events, changes in all namespaces, a requested snapshot, Secret values scrambled on every row (empty ones kept empty), discovery filtering, snapshot alignment |
+| `kobjects` units (fake clients) | snapshot rows then the snapshot row, no initial-list events, changes in all namespaces, a requested snapshot, Secret values scrambled on every row (empty ones kept empty), Secrets not watched unless secrets_mode is scrambled, discovery filtering, snapshot alignment |
 | `tools/apiserver-at` `TestObjectsAt` | `apiserver_at` over crafted raw rows, through `raw.sql` and `tables.sql` |
 | `tools/apiserver-at` `TestAcceptance` | a real API server as the source. The watcher's rows go through the SQL to apiserver-at. Every object of the 62 resources is equal at a past time and at the present. At the present, the server-side Tables of all of them are equal, as is `kubectl describe` of a pod, a node and a deployment. The source's etcd keys are the keys apiserver-at writes. A write is refused. About 40 s, part of `./test.sh checks` |
 | `./test.sh` itest | the cluster agent in k3s, through out_s3 and the compactor: its keys and lines, built-in and custom resources snapshotted at the scheduled interval, snapshot counts, no managedFields, Secret values scrambled to a tenth of their length and no Secret data anywhere, Events of all namespaces including one about the Node, three pod incarnations, the apiserver tier equal to raw hourly and daily. Then kubectl through apiserver-at: a ConfigMap before its creation, at each of its two values, after its deletion, and fourteen `kubectl get`/`describe` outputs equal to the live cluster's |

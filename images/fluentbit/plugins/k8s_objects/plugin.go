@@ -82,6 +82,11 @@ func parseConfig(get func(key, def string) string) (config, error) {
 	} else {
 		c.watcher.Exclude = kobjects.ParseExclude(ex)
 	}
+	sm, err := kobjects.ParseSecretsMode(get("secrets_mode", string(kobjects.SecretsSkip)))
+	if err != nil {
+		return config{}, err
+	}
+	c.watcher.SecretsMode = sm
 	n, err := strconv.Atoi(get("queue_max_records", "200000"))
 	if err != nil || n <= 0 {
 		return config{}, fmt.Errorf("queue_max_records: %q is not a positive integer", get("queue_max_records", ""))
