@@ -428,7 +428,8 @@ func TestAcceptance(t *testing.T) {
 	}
 
 	raw := &lines{}
-	w := kobjects.NewWatcher(kobjects.Config{SnapshotInterval: time.Hour, DiscoveryInterval: time.Second}, src.disc, src.dyn, raw.emit)
+	// scrambled, not the default skip: the test asserts what scrambling ships
+	w := kobjects.NewWatcher(kobjects.Config{SnapshotInterval: time.Hour, DiscoveryInterval: time.Second, SecretsMode: kobjects.SecretsScrambled}, src.disc, src.dyn, raw.emit)
 	wctx, stopWatcher := context.WithCancel(ctx)
 	defer stopWatcher()
 	go w.Run(wctx)
