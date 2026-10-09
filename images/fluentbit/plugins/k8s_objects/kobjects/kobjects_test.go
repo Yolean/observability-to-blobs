@@ -298,7 +298,7 @@ func TestWatcherSnapshotsThenEvents(t *testing.T) {
 		obj("v1", "Secret", "app", "creds", "2", map[string]interface{}{"data": map[string]interface{}{"password": "aHVudGVyMg=="}}),
 	)
 	c := &collector{}
-	w := NewWatcher(Config{SnapshotInterval: time.Hour, DiscoveryInterval: time.Hour}, d, dyn, c.emit)
+	w := NewWatcher(Config{SnapshotInterval: time.Hour, DiscoveryInterval: time.Hour, SecretsMode: SecretsScrambled}, d, dyn, c.emit)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go w.Run(ctx)
@@ -410,5 +410,53 @@ func TestWatcherSkipsWhatItMayNotList(t *testing.T) {
 		if r.GVR == secrets {
 			t.Fatalf("a row of a resource it may not list: %v", summarize(c.rows))
 		}
+	}
+}
+
+func TestParseSecretsMode(t *testing.T) {
+	for in, want := range map[string]SecretsMode{"": SecretsSkip, "skip": SecretsSkip, " scrambled ": SecretsScrambled} {
+		got, err := ParseSecretsMode(in)
+		if err != nil || got != want {
+			t.Errorf("ParseSecretsMode(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"Skip", "raw", "plain", "on"} {
+		if _, err := ParseSecretsMode(in); err == nil {
+			t.Errorf("ParseSecretsMode(%q) accepted", in)
+		}
+	}
+}
+
+// Secrets are watched only when scrambled is asked for; skip is the default,
+// and the caller's exclusions are kept and not modified.
+func TestSecretsModeExcludesSecrets(t *testing.T) {
+	rw := []string{"get", "list", "watch"}
+	d := fakeDiscovery(&metav1.APIResourceList{GroupVersion: "v1", APIResources: []metav1.APIResource{
+		{Name: "configmaps", Namespaced: true, Verbs: rw},
+		{Name: "secrets", Namespaced: true, Verbs: rw},
+	}})
+	secrets := schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
+	watched := func(mode SecretsMode) bool {
+		given := DefaultExclude()
+		w := NewWatcher(Config{Exclude: given, SecretsMode: mode}, d, nil, nil)
+		if given[secretsResource] {
+			t.Fatalf("mode %q modified the caller's exclusions", mode)
+		}
+		got, err := Resources(d, w.cfg.Exclude)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, gvr := range got {
+			if gvr == secrets {
+				return true
+			}
+		}
+		return false
+	}
+	if watched("") || watched(SecretsSkip) {
+		t.Error("Secrets watched without secrets_mode scrambled")
+	}
+	if !watched(SecretsScrambled) {
+		t.Error("Secrets not watched with secrets_mode scrambled")
 	}
 }

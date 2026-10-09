@@ -11,7 +11,7 @@
 # record_modifier processors below.
 # Environment: CLUSTER_NAME NODE_NAME NODE_IP POD_NAMESPACE POD_NAME POD_UID
 # CONTAINER_NAME S3_BUCKET S3_ENDPOINT S3_REGION S3_TLS UPLOAD_TIMEOUT
-# PODINDEX_CHECKPOINT JOURNAL_PATH, plus AWS_ACCESS_KEY_ID /
+# PODINDEX_CHECKPOINT JOURNAL_PATH STATIC_TARGETS, plus AWS_ACCESS_KEY_ID /
 # AWS_SECRET_ACCESS_KEY.
 service:
   flush: 1
@@ -152,7 +152,10 @@ pipeline:
       scrape_interval: 15s
       scrape_timeout: 10s
       discovery_interval: 10s
-      static_targets: node@127.0.0.1:2021/metrics
+      # job@host:port/path, comma-separated: the agent's own exporter by
+      # default (agent/daemonset.yaml); an overlay adds, for example, a host
+      # agent on the node (HOST_MODE.md)
+      static_targets: ${STATIC_TARGETS}
       podindex_checkpoint: ${PODINDEX_CHECKPOINT}
       storage.type: filesystem
 

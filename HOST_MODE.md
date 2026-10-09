@@ -175,7 +175,13 @@ output records, errors, retries, buffer use). Where to:
   `HOST_METRICS_LISTEN` (the node's address) as a static target of `cri_scrape`: they reach the node
   data bucket and the DaemonSet's re-serving endpoint like any other target, and no key crosses
   between the two buckets. The static target is not part of `agent/`, which does not know whether
-  a host agent runs beside it.
+  a host agent runs beside it: an overlay sets the DaemonSet's `STATIC_TARGETS` to
+  `node@127.0.0.1:2021/metrics,host@$(NODE_IP):2023/metrics` (Kubernetes expands `$(NODE_IP)`,
+  the node's address from the downward API, but only from an env entry above it: a strategic merge
+  patch puts its own entries first, so it repeats `NODE_IP` ahead of `STATIC_TARGETS`), and the
+  host's series arrive with `job="host"`.
+  The host agent must then listen on the node's address, not 127.0.0.1, and the host's firewall
+  must admit the port from the pods only.
 - **On a host without Kubernetes** nothing else exports them. The host agent serves all of them for
   a local Prometheus. Shipping them to the bucket as the `metrics` table (the DaemonSet's schema)
   under its own root is **not built yet**: it needs a scraper in the host build, and `cri_scrape`,

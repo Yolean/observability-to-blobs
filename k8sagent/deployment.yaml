@@ -46,6 +46,8 @@ spec:
           value: 30s
         - name: SNAPSHOT_INTERVAL
           value: 1h
+        - name: SECRETS_MODE
+          value: skip
         - name: S3_REGION
           value: us-east-1
         - name: S3_TLS

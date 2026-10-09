@@ -6,12 +6,11 @@ run on this machine, outside the cluster: a receiver-mode Prometheus in
 plain docker (published port, no host networking, so macOS works) plus
 the tailer as a host process. Commands assume the repo root as cwd.
 
-**The tailer is not wired to the current bucket layout yet** (README.md,
-"Known gaps"). It reads the PoC keys `{cluster}/{node}/{date}/{HH}/{MM}/metrics-N.parquet`
-and discovers nodes by listing `{cluster}/`; today's agent writes
-`raw1/{cluster}/...jsonl.zst`, so against a current `./test.sh up` bucket
-it finds no nodes and pushes nothing, and Prometheus stays empty. The two
-stacks below work only against a PoC-era bucket.
+The tailer reads the raw tier, `raw1/{cluster}/{date}/{HH}/{node}/*.jsonl.zst`
+(images/blobs-to-prometheus/main.go), so it sees what the raw tier still
+holds: everything of a `./test.sh up` bucket, whose compactor keeps raw
+objects, and the last one to two hours where the compactor runs with
+RAW_DELETE=after-final.
 
 ## Ad-hoc (everything the agents ship)
 
@@ -23,10 +22,10 @@ stacks below work only against a PoC-era bucket.
       S3_TLS=off S3_BUCKET=node-agent CLUSTER_NAME=itest \
       AWS_ACCESS_KEY_ID=demoaccess AWS_SECRET_ACCESS_KEY=demosecret go run .)
 
-Against a PoC-era bucket, http://localhost:9090/graph then has the last
-hour backfilled (BACKFILL, default 1h; prometheus.yml's
-out_of_order_time_window must cover it) and new windows arriving every
-POLL=15s, autocomplete included. Every query
+http://localhost:9090/graph then has the raw objects of the last
+hours backfilled (LOOKBACK, default 3h, from the start of its first hour;
+prometheus.yml's out_of_order_time_window must cover it plus that hour)
+and new objects arriving every POLL=15s, autocomplete included. Every query
 is logged (prometheus.yml `query_log_file`) -- a trace of what each
 chart evaluated:
 
@@ -35,9 +34,8 @@ chart evaluated:
 ## Alerts (only what rules need)
 
 rules/demo.yml is written against the sample workloads and is already
-loaded by prometheus.yml above. With a PoC-era bucket, ScrapeTargetDown
-shows up firing on http://localhost:9090/alerts once the backfill lands;
-with a current one there is no data, so nothing fires.
+loaded by prometheus.yml above. ScrapeTargetDown shows up firing on
+http://localhost:9090/alerts once the backfill lands.
 
 The alerts stack differs from ad-hoc in ONE input: the tailer gets a
 manifest of the selectors those rules evaluate, and pushes nothing else:

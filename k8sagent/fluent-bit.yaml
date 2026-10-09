@@ -31,6 +31,8 @@ pipeline:
       discovery_interval: 1m
       # events.k8s.io/events (the core events again) and leases
       exclude: default
+      # skip (no Secret is watched) or scrambled (K8SAGENT.md, "Secrets")
+      secrets_mode: ${SECRETS_MODE}
       storage.type: filesystem
 
   outputs:

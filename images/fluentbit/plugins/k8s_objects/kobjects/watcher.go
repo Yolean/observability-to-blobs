@@ -31,7 +31,37 @@ type Config struct {
 	DiscoveryInterval time.Duration
 	// Exclude: resources not watched, as group/resource
 	Exclude map[schema.GroupResource]bool
+	// SecretsMode: whether Secrets are watched at all (SecretsSkip, the
+	// default) or watched and shipped with scrambled values (SecretsScrambled)
+	SecretsMode SecretsMode
 }
+
+// SecretsMode says what the watcher does with core Secrets.
+type SecretsMode string
+
+const (
+	// SecretsSkip: Secrets are not listed or watched, so no Secret value
+	// ever reaches the agent; the default.
+	SecretsSkip SecretsMode = "skip"
+	// SecretsScrambled: Secrets are watched and ship with their values
+	// scrambled (Scramble), keeping their type and key names.
+	SecretsScrambled SecretsMode = "scrambled"
+)
+
+// ParseSecretsMode reads skip or scrambled; empty is skip.
+func ParseSecretsMode(s string) (SecretsMode, error) {
+	switch m := SecretsMode(strings.TrimSpace(s)); m {
+	case "":
+		return SecretsSkip, nil
+	case SecretsSkip, SecretsScrambled:
+		return m, nil
+	default:
+		return "", fmt.Errorf("secrets_mode: %q is neither %q nor %q", s, SecretsSkip, SecretsScrambled)
+	}
+}
+
+// secretsResource is the core Secrets' group/resource.
+var secretsResource = schema.GroupResource{Resource: "secrets"}
 
 // DefaultExclude is the resources a watcher skips unless told otherwise:
 // events.k8s.io's events are the core events' storage seen through another
@@ -96,6 +126,18 @@ func NewWatcher(cfg Config, disc discovery.DiscoveryInterface, dyn dynamic.Inter
 	}
 	if cfg.Exclude == nil {
 		cfg.Exclude = DefaultExclude()
+	}
+	if cfg.SecretsMode == "" {
+		cfg.SecretsMode = SecretsSkip
+	}
+	if cfg.SecretsMode == SecretsSkip {
+		// a copy: the caller's map stays as given
+		ex := make(map[schema.GroupResource]bool, len(cfg.Exclude)+1)
+		for gr, v := range cfg.Exclude {
+			ex[gr] = v
+		}
+		ex[secretsResource] = true
+		cfg.Exclude = ex
 	}
 	return &Watcher{cfg: cfg, disc: disc, dyn: dyn, emit: emit, now: time.Now,
 		running: map[schema.GroupVersionResource]*resourceInformer{}, forbidden: map[schema.GroupVersionResource]bool{},
@@ -382,5 +424,5 @@ func (c Config) String() string {
 		ex = append(ex, gr.String())
 	}
 	sort.Strings(ex)
-	return fmt.Sprintf("snapshot_interval=%s discovery_interval=%s exclude=%s", c.SnapshotInterval, c.DiscoveryInterval, strings.Join(ex, ","))
+	return fmt.Sprintf("snapshot_interval=%s discovery_interval=%s exclude=%s secrets_mode=%s", c.SnapshotInterval, c.DiscoveryInterval, strings.Join(ex, ","), c.SecretsMode)
 }

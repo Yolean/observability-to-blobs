@@ -25,22 +25,40 @@ func TestSelectorMatching(t *testing.T) {
 		{"name":"up"},
 		{"name":"","matchers":[{"label":"__name__","type":"=~","value":"live_.*"},{"label":"namespace","type":"!=","value":"dev3"}]}
 	]}`)
+	meta := func(ns string) map[string]string { return map[string]string{"namespace": ns} }
 	cases := []struct {
-		r    row
+		ls   []label
 		want bool
 	}{
-		{row{Name: "app_requests_total", Labels: map[string]string{"code": "500"}}, true},
-		{row{Name: "app_requests_total", Labels: map[string]string{"code": "200"}}, false},
-		{row{Name: "up", Namespace: "anywhere"}, true},
-		{row{Name: "live_operations_total", Namespace: "live"}, true},
-		{row{Name: "live_operations_total", Namespace: "dev3"}, false},
-		{row{Name: "liveish", Namespace: "live"}, false}, // regex is anchored
-		{row{Name: "node_cpu_seconds_total"}, false},
+		{seriesLabels("app_requests_total", nil, map[string]string{"code": "500"}), true},
+		{seriesLabels("app_requests_total", nil, map[string]string{"code": "200"}), false},
+		{seriesLabels("up", meta("anywhere"), nil), true},
+		{seriesLabels("live_operations_total", meta("live"), nil), true},
+		{seriesLabels("live_operations_total", meta("dev3"), nil), false},
+		{seriesLabels("liveish", meta("live"), nil), false}, // regex is anchored
+		{seriesLabels("node_cpu_seconds_total", nil, nil), false},
 	}
 	for i, c := range cases {
-		if got := s.matches(c.r); got != c.want {
-			t.Fatalf("case %d (%s): got %v", i, c.r.Name, got)
+		if got := s.matches(c.ls); got != c.want {
+			t.Fatalf("case %d (%v): got %v", i, c.ls, got)
 		}
+	}
+}
+
+// A selector sees the labels as stored: an exposed label named like a
+// set meta label is exported_<name>, and . matches a newline as in PromQL.
+func TestSelectorSeesStoredLabels(t *testing.T) {
+	s := loadFrom(t, `{"selectors":[
+		{"name":"blobs_compactor_last_success_timestamp_seconds","matchers":[{"label":"exported_job","type":"=","value":"rolling"}]},
+		{"name":"msg","matchers":[{"label":"text","type":"=~","value":"a.b"}]}
+	]}`)
+	ls := seriesLabels("blobs_compactor_last_success_timestamp_seconds",
+		map[string]string{"job": "pod"}, map[string]string{"job": "rolling"})
+	if !s.matches(ls) {
+		t.Fatalf("exported_job: %v", ls)
+	}
+	if !s.matches(seriesLabels("msg", nil, map[string]string{"text": "a\nb"})) {
+		t.Fatal("(?s): a newline is not matched by .")
 	}
 }
 
