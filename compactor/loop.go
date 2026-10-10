@@ -144,6 +144,7 @@ func (c *compactor) foldJob(ctx context.Context, h time.Time, listed []Object, n
 	r, err := c.fold(ctx, h, listed, now)
 	hour := h.Format(dateLayout + "T15")
 	if err != nil {
+		c.guardLog(err)
 		c.log.Error("fold", "hour", hour, "err", err)
 		return r, err
 	}
@@ -164,6 +165,7 @@ func (c *compactor) rollupJob(ctx context.Context, day time.Time, timeout time.D
 	r, err := c.rollup(ctx, day)
 	c.m.job("rollup", start, err)
 	if err != nil {
+		c.guardLog(err)
 		c.log.Error("rollup", "day", day.Format(dateLayout), "err", err)
 		return r, err
 	}
@@ -174,6 +176,17 @@ func (c *compactor) rollupJob(ctx context.Context, day time.Time, timeout time.D
 			"runs", r.runs, "seconds", time.Since(start).Seconds())
 	}
 	return r, nil
+}
+
+// guardLog counts a refusal (guard.go) and logs it with its parts as
+// attributes: the job, the hour or day, the count and a key that has one.
+func (c *compactor) guardLog(err error) {
+	var e *unaccountedError
+	if !errors.As(err, &e) {
+		return
+	}
+	c.m.refused(e)
+	c.log.Error("unaccounted", "job", e.job, "period", e.period, "count", e.n, "sample_key", e.sample)
 }
 
 // keysJob is checkKeys with a deadline; it logs and sets the refusal.

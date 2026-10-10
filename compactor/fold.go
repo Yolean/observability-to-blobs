@@ -432,6 +432,10 @@ func (c *compactor) foldKeys(ctx context.Context, conn *sql.Conn, h time.Time, k
 	if err := c.exec(ctx, conn, "CREATE TEMP TABLE raw AS SELECT * FROM raw"); err != nil {
 		return nil, err
 	}
+	// every line in a table the fold writes, before anything is written
+	if err := guardTables(ctx, conn, h, keys, urls); err != nil {
+		return nil, err
+	}
 	// The hour's objects, each under the key it was first written with.
 	objs := map[string]tierObject{}
 	exists := map[string]bool{}
