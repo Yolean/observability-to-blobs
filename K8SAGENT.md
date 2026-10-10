@@ -55,6 +55,41 @@ view, which adds `api_group`.
 - **managedFields** are removed from every object: they record field
   ownership, are often larger than the object, and no `kubectl get` shows
   them.
+- **CRDs** ship without their schemas by default: the input's `crd_mode`
+  (env `CRD_MODE` in `k8sagent/`) is `redacted`. Every version's
+  `openAPIV3Schema` is replaced by a placeholder that accepts any object
+  (`type: object`, `x-kubernetes-preserve-unknown-fields: true`, and a
+  description saying it was removed), the conversion webhook's `caBundle`
+  and the `kubectl.kubernetes.io/last-applied-configuration` annotation
+  (the whole CRD again) are removed, and the CRD gets the annotation
+  `observability-to-blobs/redacted: schemas`. Everything else is kept: the
+  names, group, scope, every version's name, `served`, `storage`,
+  deprecation, `additionalPrinterColumns`, subresources and
+  `selectableFields`, the conversion strategy and webhook service, and
+  the status (stored versions, accepted names, conditions). So the CRDs
+  say what existed, at which versions, and an API server serves their
+  custom resources from them as they were stored, with their printer
+  columns: `kubectl get`, `-o wide`, `describe`, any served version (with
+  conversion strategy `None`). What is lost: `kubectl explain` of a custom
+  resource, and the schema's defaults and validation, which a read-only
+  server does not need since the stored objects were defaulted and
+  validated when written. `storage-schema` keeps the storage version's
+  schema (annotation `schemas-except-storage`), `full` ships CRDs as
+  served. Schemas are most of a CRD and of a snapshot: on a single-node
+  cluster with 46 CRDs (gateway API, envoy-gateway, cilium, cert-manager)
+  and about 1,400 objects:
+
+  | per snapshot / per hour | `full` | `storage-schema` | `redacted` |
+  |---|---|---|---|
+  | the 46 CRDs, JSON | 3.47 MB | 2.95 MB | 0.08 MB |
+  | the 46 CRDs, zstd | 226 KB | 217 KB | 7 KB |
+  | the whole snapshot, JSON | 6.9 MB | 6.4 MB | 3.2 MB |
+  | the whole snapshot, zstd (raw) | 554 KB | | 301 KB |
+  | an hourly `apiserver` object | 535-584 KB | 525-574 KB | 291-340 KB |
+  | the daily object, 18 hours | 1,024 KB | 1,014 KB | 803 KB |
+
+  The storage versions' schemas are 85 % of the CRDs' bytes, so
+  `storage-schema` saves almost nothing over `full`.
 - **Secrets** are not watched at all by default: the input's
   `secrets_mode` (env `SECRETS_MODE` in `k8sagent/`) is `skip`, so no
   Secret value ever reaches the agent and `kubectl get secrets` from the
@@ -191,11 +226,11 @@ What apiserver-at shows differently from the cluster at that time:
 
 | test | what |
 |---|---|
-| `kobjects` units (fake clients) | snapshot rows then the snapshot row, no initial-list events, changes in all namespaces, a requested snapshot, Secret values scrambled on every row (empty ones kept empty), Secrets not watched unless secrets_mode is scrambled, discovery filtering, snapshot alignment |
+| `kobjects` units (fake clients) | snapshot rows then the snapshot row, no initial-list events, changes in all namespaces, a requested snapshot, Secret values scrambled on every row (empty ones kept empty), Secrets not watched unless secrets_mode is scrambled, CRD schemas, caBundle and applied manifest removed in each crd_mode and nothing else changed, CRD rows redacted by default, discovery filtering, snapshot alignment |
 | `tools/apiserver-at` `TestLoadLargeObjects` | objects of 1.2 MiB among small ones load into etcd |
 | `tools/apiserver-at` `TestObjectsAt` | `apiserver_at` over crafted raw rows, through `raw.sql` and `tables.sql` |
-| `tools/apiserver-at` `TestAcceptance` | a real API server as the source. The watcher's rows go through the SQL to apiserver-at. Every object of the 62 resources is equal at a past time and at the present. At the present, the server-side Tables of all of them are equal, as is `kubectl describe` of a pod, a node and a deployment. The source's etcd keys are the keys apiserver-at writes. A write is refused. A NodePort Service gets no `PortNotAllocated` Event. About 40 s, part of `./test.sh checks` |
-| `./test.sh` itest | the cluster agent in k3s, through out_s3 and the compactor: its keys and lines, built-in and custom resources snapshotted at the scheduled interval, snapshot counts, no managedFields, Secret values scrambled to a tenth of their length and no Secret data anywhere, Events of all namespaces including one about the Node, three pod incarnations, the apiserver tier equal to raw hourly and daily. Then kubectl through apiserver-at: a ConfigMap before its creation, at each of its two values, after its deletion, and fourteen `kubectl get`/`describe` outputs equal to the live cluster's |
+| `tools/apiserver-at` `TestAcceptance` | a real API server as the source. The watcher's rows go through the SQL to apiserver-at. Every object of the 62 resources is equal at a past time and at the present, the CRD with its schemas redacted. At the present, the server-side Tables of all of them are equal, as is `kubectl describe` of a pod, a node, a deployment and a custom resource, and `kubectl get` of the custom resources at the version that is not stored. The source's etcd keys are the keys apiserver-at writes. A write is refused. A NodePort Service gets no `PortNotAllocated` Event. About 40 s, part of `./test.sh checks` |
+| `./test.sh` itest | the cluster agent in k3s, through out_s3 and the compactor: its keys and lines, built-in and custom resources snapshotted at the scheduled interval, snapshot counts, no managedFields, Secret values scrambled to a tenth of their length and no Secret data anywhere, Events of all namespaces including one about the Node, three pod incarnations, the apiserver tier equal to raw hourly and daily, CRDs without schemas (a two-version CRD with 300 KB of schemas in under 4 KB, printer columns kept). Then kubectl through apiserver-at: a ConfigMap before its creation, at each of its two values, after its deletion, and seventeen `kubectl get`/`describe` outputs equal to the live cluster's, three of them of that CRD's custom resources |
 
 ## Measured
 

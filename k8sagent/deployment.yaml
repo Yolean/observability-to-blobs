@@ -48,6 +48,8 @@ spec:
           value: 1h
         - name: SECRETS_MODE
           value: skip
+        - name: CRD_MODE
+          value: redacted
         - name: S3_REGION
           value: us-east-1
         - name: S3_TLS

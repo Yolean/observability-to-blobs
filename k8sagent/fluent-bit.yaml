@@ -33,6 +33,8 @@ pipeline:
       exclude: default
       # skip (no Secret is watched) or scrambled (K8SAGENT.md, "Secrets")
       secrets_mode: ${SECRETS_MODE}
+      # redacted (no schemas), storage-schema or full (K8SAGENT.md, "CRDs")
+      crd_mode: ${CRD_MODE}
       storage.type: filesystem
 
   outputs:

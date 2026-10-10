@@ -87,6 +87,11 @@ func parseConfig(get func(key, def string) string) (config, error) {
 		return config{}, err
 	}
 	c.watcher.SecretsMode = sm
+	cm, err := kobjects.ParseCRDMode(get("crd_mode", string(kobjects.CRDRedacted)))
+	if err != nil {
+		return config{}, err
+	}
+	c.watcher.CRDMode = cm
 	n, err := strconv.Atoi(get("queue_max_records", "200000"))
 	if err != nil || n <= 0 {
 		return config{}, fmt.Errorf("queue_max_records: %q is not a positive integer", get("queue_max_records", ""))
