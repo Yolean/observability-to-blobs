@@ -978,8 +978,11 @@ assert "built-in and custom resources are snapshotted, k3s's Addons included" \
      ('v1', 'services'), ('apps/v1', 'deployments'), ('apps/v1', 'daemonsets'), ('apps/v1', 'statefulsets'), ('batch/v1', 'jobs'),
      ('apiextensions.k8s.io/v1', 'customresourcedefinitions'), ('rbac.authorization.k8s.io/v1', 'clusterroles'),
      ('storage.k8s.io/v1', 'storageclasses'), ('k3s.cattle.io/v1', 'addons'))"
-assert "leases and events.k8s.io's copy of the events are not watched" \
-  "SELECT count(*) = 0 FROM apiserver WHERE resource = 'leases' OR api_version LIKE 'events.k8s.io/%'"
+assert "leases, events.k8s.io's copy of the events and the deprecated v1 endpoints are not watched" \
+  "SELECT count(*) = 0 FROM apiserver WHERE resource = 'leases' OR api_version LIKE 'events.k8s.io/%' OR (api_version = 'v1' AND resource = 'endpoints')"
+assert "EndpointSlices are watched, versitygw's among them" \
+  "SELECT count(*) > 0 FROM apiserver WHERE api_version = 'discovery.k8s.io/v1' AND resource = 'endpointslices' AND kind = 'object-snapshot'
+     AND json_extract_string(apijson, '\$.metadata.labels.\"kubernetes.io/service-name\"') = 'versitygw'"
 assert "every snapshot row counts the object rows of its snapshot" \
   "WITH n AS (SELECT api_version, resource, time, count(DISTINCT coalesce(namespace, '') || '/' || name) AS c
               FROM apiserver WHERE kind = 'object-snapshot' GROUP BY ALL)
@@ -1097,6 +1100,7 @@ LIVE_ARGS=(
   "describe gadget -n default g1"
   "get pods -l app=log-generator -o wide"
   "describe deployment log-generator"
+  "describe service versitygw"
 )
 i=0
 for a in "${LIVE_ARGS[@]}"; do

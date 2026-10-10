@@ -29,7 +29,8 @@ pipeline:
       cluster: ${CLUSTER_NAME}
       snapshot_interval: ${SNAPSHOT_INTERVAL}
       discovery_interval: 1m
-      # events.k8s.io/events (the core events again) and leases
+      # events.k8s.io/events (the core events again), leases and the
+      # deprecated v1 endpoints (EndpointSlices are watched)
       exclude: default
       # skip (no Secret is watched) or scrambled (K8SAGENT.md, "Secrets")
       secrets_mode: ${SECRETS_MODE}

@@ -188,6 +188,10 @@ func TestResources(t *testing.T) {
 			{Name: "events", Namespaced: true, Verbs: rw},
 			{Name: "bindings", Namespaced: true, Verbs: []string{"create"}},
 			{Name: "componentstatuses", Verbs: []string{"get", "list"}},
+			{Name: "endpoints", Namespaced: true, Verbs: rw},
+		}},
+		&metav1.APIResourceList{GroupVersion: "discovery.k8s.io/v1", APIResources: []metav1.APIResource{
+			{Name: "endpointslices", Namespaced: true, Verbs: rw},
 		}},
 		&metav1.APIResourceList{GroupVersion: "events.k8s.io/v1", APIResources: []metav1.APIResource{
 			{Name: "events", Namespaced: true, Verbs: rw},
@@ -206,6 +210,7 @@ func TestResources(t *testing.T) {
 	want := []schema.GroupVersionResource{
 		{Version: "v1", Resource: "events"},
 		{Version: "v1", Resource: "pods"},
+		{Group: "discovery.k8s.io", Version: "v1", Resource: "endpointslices"},
 		{Group: "example.com", Version: "v1", Resource: "widgets"},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -213,8 +218,10 @@ func TestResources(t *testing.T) {
 	}
 	got, _ = Resources(d, ParseExclude("pods, widgets.example.com"))
 	want = []schema.GroupVersionResource{
+		{Version: "v1", Resource: "endpoints"},
 		{Version: "v1", Resource: "events"},
 		{Group: "coordination.k8s.io", Version: "v1", Resource: "leases"},
+		{Group: "discovery.k8s.io", Version: "v1", Resource: "endpointslices"},
 		{Group: "events.k8s.io", Version: "v1", Resource: "events"},
 	}
 	if !reflect.DeepEqual(got, want) {

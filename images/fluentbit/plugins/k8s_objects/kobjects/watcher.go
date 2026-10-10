@@ -97,11 +97,15 @@ var secretsResource = schema.GroupResource{Resource: "secrets"}
 // events.k8s.io's events are the core events' storage seen through another
 // group, so they would be every Event twice; leases are renewed every few
 // seconds by every controller and node, and nothing a person asks of a past
-// cluster needs them.
+// cluster needs them; core v1 Endpoints are deprecated since Kubernetes
+// 1.33 (the API server warns at every request), and the EndpointSlices,
+// which are watched, carry the same addresses: kubectl describe service
+// reads those.
 func DefaultExclude() map[schema.GroupResource]bool {
 	return map[schema.GroupResource]bool{
 		{Group: "events.k8s.io", Resource: "events"}:       true,
 		{Group: "coordination.k8s.io", Resource: "leases"}: true,
+		{Resource: "endpoints"}:                            true,
 	}
 }
 

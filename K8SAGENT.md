@@ -50,8 +50,26 @@ view, which adds `api_group`.
   `default`, so they are included too. `events.k8s.io` is the same storage
   seen through another group, so it is excluded, as are `leases`: every
   controller and node renews one every few seconds, and nothing a person
-  asks of a past cluster needs them. `exclude` (comma-separated
-  `resource.group`) replaces that list.
+  asks of a past cluster needs them.
+- **Endpoints**: core `v1` `endpoints` are excluded too. They are
+  deprecated since Kubernetes 1.33 in favour of `discovery.k8s.io/v1`
+  EndpointSlices ([the announcement](https://kubernetes.io/blog/2025/04/24/endpoints-deprecation/)),
+  the API server answers every request for them with a deprecation
+  warning (the agent's log had one at every re-watch), and the
+  EndpointSlices, which are watched, carry the same addresses:
+  `kubectl describe service` reads its `Endpoints:` line from them. From
+  the blobs, `kubectl get endpoints` is empty; `kubectl get
+  endpointslices` answers instead. `exclude` (comma-separated
+  `resource.group`) replaces the whole list, so `exclude:
+  events.events.k8s.io,leases.coordination.k8s.io` watches Endpoints
+  again.
+- **API versions**: the agent watches the version discovery prefers, so
+  it follows the cluster. Every manifest in this repository uses a
+  current version (`v1`, `apps/v1`, `batch/v1`,
+  `rbac.authorization.k8s.io/v1`, `networking.k8s.io/v1`,
+  `apiextensions.k8s.io/v1`), none of those the
+  [deprecation guide](https://kubernetes.io/docs/reference/using-api/deprecation-guide/)
+  lists as removed.
 - **managedFields** are removed from every object: they record field
   ownership, are often larger than the object, and no `kubectl get` shows
   them.
@@ -216,7 +234,8 @@ What apiserver-at shows differently from the cluster at that time:
 - `resourceVersion` is apiserver-at's etcd revision, not the cluster's.
   The cluster's is kept in the rows
 - ages are relative to now, not to the time served
-- `kubectl get leases` shows only apiserver-at's own lease
+- `kubectl get leases` shows only apiserver-at's own lease, and `kubectl
+  get endpoints` nothing (EndpointSlices are there)
 - whatever a request does past the API server's storage is not there:
   `logs`, `exec`, `port-forward`, `top`, the proxy subresources, and
   aggregated APIs. Neither are reads of a custom resource at a version
