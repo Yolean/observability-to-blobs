@@ -46,16 +46,70 @@ func (w *world) wholeDay(t *testing.T, keys []string) {
 		sameRows(t, w.c.db, "daily "+tbl, w.dailySource(tbl, day),
 			"read_parquet("+sqlString(filepath.Join(w.dir, "whole-"+tbl+".parquet"))+")")
 	}
+	w.dailyInOrder(t)
+}
+
+// dailyInOrder fails unless each of the day's daily objects has its rows
+// in its table's sort order (keys.go, sortOrder).
+func (w *world) dailyInOrder(t *testing.T) {
+	t.Helper()
+	for _, tbl := range []string{"logs", "metrics", "podindex", "apiserver", "pods"} {
+		var objs []tierObject
+		if tbl == "logs" || tbl == "metrics" {
+			parts, err := w.c.partitions(w.ctx, tbl, day)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, o := range parts {
+				objs = append(objs, o)
+			}
+		} else {
+			objs = append(objs, w.obj(w.c.l.dailyStem(tbl, day)))
+		}
+		for _, o := range objs {
+			// file order against the sort order, ties kept in file order
+			if n := w.q("SELECT count(*) FROM (SELECT file_row_number AS n, row_number() OVER (ORDER BY " + sortOrder[tbl] +
+				", file_row_number) - 1 AS m FROM (" + w.c.readTier([]tierObject{o}, "hive_partitioning = false, file_row_number = true, ") +
+				")) WHERE n <> m"); n != 0 {
+				t.Fatalf("%s: %d rows out of order", o.key, n)
+			}
+		}
+	}
 }
 
 func TestRollupEqualsFoldingTheWholeDay(t *testing.T) {
-	w := newWorld(t)
+	rollupEqualsFoldingTheWholeDay(t, newWorld(t))
+}
+
+// TestRollupInSortedRuns is the same with a sort of one row at a time:
+// every write with more than one row sorts in runs, one runColumn value
+// each, and the runs' NULL comes last.
+func TestRollupInSortedRuns(t *testing.T) {
+	for _, keyed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "plain", true: "encrypted"}[keyed], func(t *testing.T) {
+			w := newWorld(t)
+			if keyed {
+				w.encrypt("k1")
+			}
+			w.c.sortRows = 1
+			rollupEqualsFoldingTheWholeDay(t, w)
+			if left, err := filepath.Glob(filepath.Join(w.c.scratch, "rollup-*")); err != nil || len(left) > 0 {
+				t.Fatalf("files left in scratch: %v %v", left, err)
+			}
+		})
+	}
+}
+
+func rollupEqualsFoldingTheWholeDay(t *testing.T, w *world) {
 	keys := []string{w.putA(), w.putB(), w.putBRetry(), w.putC(), w.putE()}
 	w.fold(h10, afterG)
 	w.fold(h11, h11.Add(20*time.Minute))
 	r := w.rollup(day)
 	if len(r.hours) != 2 || r.namespaces != 3 {
 		t.Fatalf("first rollup: %+v, want 2 hours and namespaces ns1, ns2, _node", r)
+	}
+	if (r.runs > 0) != (w.c.sortRows > 0) {
+		t.Fatalf("first rollup: %d writes in runs with sortRows %d", r.runs, w.c.sortRows)
 	}
 	w.wholeDay(t, keys)
 	w.obj(w.c.l.dailyPartitionStem("logs", day, "_node"))

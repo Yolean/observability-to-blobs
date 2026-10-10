@@ -362,18 +362,39 @@ The same pattern at day scale, with hourly objects as input instead of
 raw, so it uses `pods.sql` but not `raw.sql` or `tables.sql` (except for
 their empty views, which give every table its schema when an input is
 missing). The changed hours are those whose sidecar has keys the daily
-sidecar lacks. Their `logs`, `metrics` and `podindex` objects, united
-with the day's existing objects of the namespaces they hold (and the
-day's whole `podindex`), `DISTINCT`, become the temp tables. Each of
-those namespaces' `logs` and `metrics` objects is rewritten; the other
-namespaces' objects are not touched. `pods` is recomputed for those
-namespaces from the day's tables, an aggregate per `pod_uid`, `container`,
-`restart` over the whole day, never a concatenation of hourly rows; the
-other namespaces' `pods` rows are kept. The daily sidecar, the union of
-the day's keys, is written last. Hourly objects are not clean time
-partitions (an object keyed by its first record carries records past the
-hour), which is why the rollup unions rows and never replaces an hour by
-a `time` filter.
+sidecar lacks. The namespaces their `logs`, `metrics` and `podindex`
+objects hold are the changed namespaces. Each of those namespaces'
+`logs` and `metrics` objects is rewritten, one namespace at a time: the
+changed hours' rows of the namespace, united with its existing daily
+object, `DISTINCT`, sorted, to the object. The other
+namespaces' objects are not touched. `podindex` and `apiserver` are the
+changed hours' rows united with the day's whole object the same way.
+`pods` is recomputed for the changed namespaces from the objects just
+written, an aggregate per `pod_uid`, `container`, `restart` over the
+whole day, never a concatenation of hourly rows; the other namespaces'
+`pods` rows are kept. The daily sidecar, the union of the day's keys, is
+written last. Hourly objects are not clean time partitions (an object
+keyed by its first record carries records past the hour), which is why
+the rollup unions rows and never replaces an hour by a `time` filter.
+
+**What a rollup holds at once.** Nothing of the whole day: the hourly
+objects are sorted by namespace, so one namespace's read skips the
+others' row groups, and a namespace's write holds only its own rows.
+Each write reads its inputs once, into a Parquet file in scratch, which
+the rest of the write reads, so the bucket sees one read of each input
+per write. A write of more rows than `DUCKDB_MEMORY_LIMIT`'s fold share
+in KiB (2M rows with the logs API on a 4Gi limit) is sorted in runs:
+consecutive ranges of the sort order's column after `namespace` (`name`
+for `metrics`, `pod` for `logs`; the first column for `podindex` and
+`apiserver`), each `DISTINCT` and sorted on its own into another file in
+scratch, and the runs are then copied to the object in order. Two rows
+in different runs differ in that column, so the runs' `DISTINCT` and
+their order are the whole object's. A run is one value at least, so one
+metric name with more rows than that is a run of its own. The files in
+scratch are encrypted with the object's key. Without
+`DUCKDB_MEMORY_LIMIT` every write is sorted whole, from the bucket. The
+rollup's log line says how many writes were sorted in runs (`runs`), and
+a line `rollup start`, with the changed hours, comes before the work.
 
 Further rules:
 
@@ -882,7 +903,15 @@ Service from everyone else.
   DuckDB given 75% of it (with the logs API on, 50% to the fold and 25%
   to the API's engine). `/scratch` is an emptyDir for `temp_directory`
   (`DUCKDB_TEMP_DIRECTORY`), `/tmp` a small one. Starting values:
-  requests 250m/1Gi, limit 4Gi, scratch 10Gi.
+  requests 250m/1Gi, limit 4Gi, scratch 10Gi. What they hold, measured
+  on a single node's day of 35M `metrics` rows (16k series every 15 s,
+  1.5M rows an hour, 3 MB of Parquet an hour) with the logs API on: the
+  rollup peaks at about 100 MB of scratch, one namespace's input and its
+  runs, and the process at 2.5-2.9 GB resident, the fold engine's 2 GiB
+  share at its limit, in about 80 s; a fold of one of its hours holds
+  that hour. The scratch a rollup needs grows with its largest
+  namespace's compressed rows, not with the day in the engine's format,
+  and the memory share sets the run size.
 - `prometheus.io/scrape` and `prometheus.io/port: "9090"` for `/metrics`,
   written with stdlib text exposition:
   `blobs_compactor_last_success_timestamp_seconds{job}` and

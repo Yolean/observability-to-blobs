@@ -299,7 +299,7 @@ func interruptWrite(t *testing.T, c *compactor, key string, after time.Duration)
 	ctx, cancel := context.WithTimeout(context.Background(), after)
 	defer cancel()
 	start := time.Now()
-	err = c.put(ctx, conn, key, slowCopy, readParquet)
+	_, err = c.put(ctx, conn, key, slowCopy, readParquet)
 	if err == nil || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		t.Fatalf("an interrupted write: err %v after %s", err, time.Since(start))
 	}

@@ -50,6 +50,12 @@ type compactor struct {
 	keyID   string
 	keys    parquetKeys
 	refusal error
+
+	// scratch is the local directory for the engine's spill and the
+	// rollup's sorted runs; sortRows is how many rows the rollup sorts at
+	// once (rollup.go, writeSorted), 0 for no limit
+	scratch  string
+	sortRows int64
 }
 
 func newCompactor(c config, log *slog.Logger) (*compactor, error) {
@@ -68,7 +74,7 @@ func newCompactor(c config, log *slog.Logger) (*compactor, error) {
 	}
 	cp := &compactor{l: layout{c.cluster}, raw: raw, tiers: tiers, db: db, grace: c.grace,
 		rawDelete: c.rawDelete, threads: c.threads, retries: retries, log: log, m: newMetrics(),
-		keysDir: c.parquetKeysDir, keyID: c.parquetKeyID}
+		keysDir: c.parquetKeysDir, keyID: c.parquetKeyID, sortRows: sortRows(c.memoryLimit)}
 	if sp, ok := raw.(*spool); ok {
 		cp.m.spool = sp.stats
 	}
@@ -92,6 +98,7 @@ func (c *compactor) init(ctx context.Context, scratch string) error {
 	if err := os.MkdirAll(scratch, 0o755); err != nil {
 		return err
 	}
+	c.scratch = scratch
 	c.empty = filepath.Join(scratch, "blobs-compactor-empty.jsonl.zst")
 	if _, err := c.db.ExecContext(ctx, `COPY (SELECT 'logs' AS "table" WHERE false) TO `+sqlString(c.empty)+
 		` (FORMAT json, COMPRESSION zstd)`); err != nil {
@@ -152,8 +159,13 @@ func firstLine(q string) string {
 }
 
 // write COPYs query, sorted the table's way, to key, encrypted with the
-// parquet key its name carries, if any.
-func (c *compactor) write(ctx context.Context, conn *sql.Conn, table, query, key string) error {
+// parquet key its name carries, if any, and returns the rows written.
+func (c *compactor) write(ctx context.Context, conn *sql.Conn, table, query, key string) (int64, error) {
+	return c.writeOrdered(ctx, conn, table, "SELECT * FROM ("+query+") ORDER BY "+sortOrder[table], key)
+}
+
+// writeOrdered is write of a query whose rows are in the table's order.
+func (c *compactor) writeOrdered(ctx context.Context, conn *sql.Conn, table, query, key string) (int64, error) {
 	opts := "FORMAT parquet, COMPRESSION zstd"
 	if n := rowGroups[table]; n > 0 {
 		opts += fmt.Sprintf(", ROW_GROUP_SIZE %d", n)
@@ -166,7 +178,7 @@ func (c *compactor) write(ctx context.Context, conn *sql.Conn, table, query, key
 		}
 	}
 	return c.put(ctx, conn, key, func(to string) string {
-		return fmt.Sprintf("COPY (SELECT * FROM (%s) ORDER BY %s) TO %s (%s)", query, sortOrder[table], to, opts)
+		return fmt.Sprintf("COPY (%s) TO %s (%s)", query, to, opts)
 	}, read)
 }
 
@@ -179,9 +191,9 @@ func readParquet(path string) string { return "read_parquet(" + path + ")" }
 // to key. A COPY that a deadline interrupts can still complete its upload,
 // unreadable, which at a tier's key would fail every later read of it;
 // here it lands at a temporary key that is deleted.
-func (c *compactor) put(ctx context.Context, conn *sql.Conn, key string, copySQL, read func(path string) string) error {
+func (c *compactor) put(ctx context.Context, conn *sql.Conn, key string, copySQL, read func(path string) string) (int64, error) {
 	tmp := c.l.tmp(key)
-	err := c.putTmp(ctx, conn, tmp, copySQL, read)
+	wrote, err := c.putTmp(ctx, conn, tmp, copySQL, read)
 	if err == nil {
 		err = c.tiers.Move(ctx, tmp, key)
 	}
@@ -193,36 +205,36 @@ func (c *compactor) put(ctx context.Context, conn *sql.Conn, key string, copySQL
 		if derr := c.tiers.Delete(dctx, []string{tmp}); derr != nil {
 			c.log.Warn("delete temporary object", "key", tmp, "err", derr)
 		}
-		return fmt.Errorf("write %s: %w", key, err)
+		return 0, fmt.Errorf("write %s: %w", key, err)
 	}
-	return nil
+	return wrote, nil
 }
 
-func (c *compactor) putTmp(ctx context.Context, conn *sql.Conn, tmp string, copySQL, read func(path string) string) error {
+func (c *compactor) putTmp(ctx context.Context, conn *sql.Conn, tmp string, copySQL, read func(path string) string) (int64, error) {
 	if err := c.tiers.Prepare(tmp); err != nil {
-		return err
+		return 0, err
 	}
 	path := sqlString(c.tiers.URL(tmp))
 	q := copySQL(path)
 	res, err := conn.ExecContext(ctx, q)
 	if err != nil {
-		return fmt.Errorf("%s: %w", firstLine(q), err)
+		return 0, fmt.Errorf("%s: %w", firstLine(q), err)
 	}
 	wrote, err := res.RowsAffected()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if c.copied != nil {
 		c.copied(tmp)
 	}
 	var n int64
 	if err := conn.QueryRowContext(ctx, "SELECT count(*) FROM "+read(path)).Scan(&n); err != nil {
-		return fmt.Errorf("read back %s: %w", tmp, err)
+		return 0, fmt.Errorf("read back %s: %w", tmp, err)
 	}
 	if n != wrote {
-		return fmt.Errorf("read back %s: %d rows, the COPY wrote %d", tmp, n, wrote)
+		return 0, fmt.Errorf("read back %s: %d rows, the COPY wrote %d", tmp, n, wrote)
 	}
-	return nil
+	return wrote, nil
 }
 
 // sweep deletes the tiers' temporary objects uploaded more than age before
@@ -446,10 +458,7 @@ func (c *compactor) foldKeys(ctx context.Context, conn *sql.Conn, h time.Time, k
 	}
 	rows := map[string]int64{}
 	for _, t := range append(foldTables, "pods") {
-		if err := c.write(ctx, conn, t, "SELECT * FROM "+t, objs[t].key); err != nil {
-			return nil, err
-		}
-		n, err := c.count(ctx, conn, t)
+		n, err := c.write(ctx, conn, t, "SELECT * FROM "+t, objs[t].key)
 		if err != nil {
 			return nil, err
 		}
@@ -506,10 +515,11 @@ func (c *compactor) writeFolded(ctx context.Context, conn *sql.Conn, key string,
 	if err := c.exec(ctx, conn, "SET VARIABLE folded_final = ["+strings.Join(finals, ", ")+"]::BOOLEAN[]"); err != nil {
 		return err
 	}
-	return c.put(ctx, conn, key, func(to string) string {
+	_, err := c.put(ctx, conn, key, func(to string) string {
 		return "COPY (SELECT * FROM (SELECT unnest(getvariable('folded_keys')) AS key, " +
 			"unnest(getvariable('folded_final')) AS final) ORDER BY key) TO " + to + " (FORMAT csv, HEADER true)"
 	}, func(path string) string {
 		return "read_csv(" + path + ", header = true, columns = {'key': 'VARCHAR', 'final': 'BOOLEAN'})"
 	})
+	return err
 }
