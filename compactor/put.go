@@ -201,9 +201,10 @@ var sha256HexRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // spoolKeyRE is a raw key the spool takes: raw1/{cluster}/{date}/{HH}/
 // {node}/{name}.jsonl.zst, the node and the name of the characters a node
-// name and out_s3's $UUID have, each starting with a letter or a digit, so
-// no segment is "." or "..".
-var spoolKeyRE = regexp.MustCompile(`^raw1/([^/]+)/(\d{4}-\d{2}-\d{2})/(\d{2})/[A-Za-z0-9][A-Za-z0-9._-]{0,252}/[A-Za-z0-9][A-Za-z0-9._-]{0,200}\.jsonl\.zst$`)
+// name and out_s3's $UUID have, the node starting with a letter, a digit
+// or "_" (the cluster agent's producer segment is _k8sagent), the name
+// with a letter or a digit, so no segment is "." or "..".
+var spoolKeyRE = regexp.MustCompile(`^raw1/([^/]+)/(\d{4}-\d{2}-\d{2})/(\d{2})/[A-Za-z0-9_][A-Za-z0-9._-]{0,252}/[A-Za-z0-9][A-Za-z0-9._-]{0,200}\.jsonl\.zst$`)
 
 // key returns the raw key of a path-style request path, /{bucket}/{key}:
 // the bucket must be S3_BUCKET, and the key one of this cluster's raw

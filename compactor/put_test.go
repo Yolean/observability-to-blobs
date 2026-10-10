@@ -326,6 +326,7 @@ func TestPutKeys(t *testing.T) {
 	for _, k := range []string{
 		"raw1/capture/2026-10-04/07/node-1/3650-8BCzE9qE.jsonl.zst",
 		"raw1/capture/2026-10-04/23/ip-10-0-0-1.eu-north-1.compute.internal/0000-a_b.jsonl.zst",
+		"raw1/capture/2026-10-04/07/_k8sagent/0000-a.jsonl.zst",
 	} {
 		if got, err := tp.p.key("/node-agent/" + k); err != nil || got != k {
 			t.Errorf("%s: %s %v", k, got, err)
@@ -335,6 +336,7 @@ func TestPutKeys(t *testing.T) {
 		"raw1/capture/2026-10-04/07/../0000-a.jsonl.zst",
 		"raw1/capture/2026-10-04/07/./0000-a.jsonl.zst",
 		"raw1/capture/2026-10-04/07/n/..jsonl.zst",
+		"raw1/capture/2026-10-04/07/n/_0000-a.jsonl.zst",
 		"raw1/capture/2026-10-04/24/n/0000-a.jsonl.zst",
 		"raw1/capture/2026-13-04/07/n/0000-a.jsonl.zst",
 		"raw1/capture/2026-10-04/07/n/0000-a.json",

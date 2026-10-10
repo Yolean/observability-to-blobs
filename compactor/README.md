@@ -599,7 +599,7 @@ clock; the log line says which check failed:
 | `host`, `x-amz-date` or `x-amz-content-sha256` not signed, or any other `x-amz-*` header present and not signed | 403 `AccessDenied` |
 | `x-amz-content-sha256` not a SHA-256 (`UNSIGNED-PAYLOAD`, the streaming forms: `out_s3` sends neither) | 403 `AccessDenied` |
 | a bucket other than `S3_BUCKET` | 404 `NoSuchBucket` |
-| a key that is not `raw1/{CLUSTER_NAME}/{date}/{HH}/{node}/{name}.jsonl.zst`, node and name of `[A-Za-z0-9._-]` starting with a letter or a digit | 403 `AccessDenied` |
+| a key that is not `raw1/{CLUSTER_NAME}/{date}/{HH}/{node}/{name}.jsonl.zst`, node and name of `[A-Za-z0-9._-]`, the node starting with a letter, a digit or `_` (the cluster agent's `_k8sagent`), the name with a letter or a digit | 403 `AccessDenied` |
 | no `Content-Length` | 411 `MissingContentLength` |
 | more than `PUT_MAX_BYTES` (128 MiB), with a message that names it and `total_file_size` | 400 `EntityTooLarge` |
 | a `Content-MD5` that is not 16 bytes | 400 `InvalidDigest` |
