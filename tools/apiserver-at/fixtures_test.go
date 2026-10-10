@@ -68,8 +68,9 @@ apiVersion: v1
 kind: Service
 metadata: {name: web, namespace: app}
 spec:
+  type: NodePort
   selector: {app: web}
-  ports: [{port: 80, targetPort: 8080}]
+  ports: [{port: 80, targetPort: 8080, nodePort: 30080}]
 ---
 apiVersion: v1
 kind: Node

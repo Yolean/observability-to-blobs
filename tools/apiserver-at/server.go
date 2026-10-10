@@ -108,6 +108,7 @@ func Start(ctx context.Context, o Options) (*Server, error) {
 	}
 	args := s.api.Configure()
 	args.Set("service-cluster-ip-range", cidr)
+	args.Set("service-node-port-range", NodePortRange)
 	args.Set("storage-media-type", "application/json")
 	args.Set("endpoint-reconciler-type", "none")
 	args.Set("enable-priority-and-fairness", "false")
@@ -141,19 +142,27 @@ func Start(ctx context.Context, o Options) (*Server, error) {
 	return s, nil
 }
 
-// load writes the entries in transactions of etcd's default maximum size.
+// load writes the entries in transactions within etcd's default limits:
+// at most 128 operations (--max-txn-ops) and a request of at most 1.5 MiB
+// (--max-request-bytes). A batch is closed at 1 MiB, so an object up to
+// about half a MiB more still fits; a larger one goes alone.
 func load(ctx context.Context, endpoint string, kvs []KV) error {
 	c, err := clientv3.New(clientv3.Config{Endpoints: []string{endpoint}, DialTimeout: 10 * time.Second})
 	if err != nil {
 		return err
 	}
 	defer c.Close()
-	const batch = 128
-	for i := 0; i < len(kvs); i += batch {
-		end := min(i+batch, len(kvs))
-		ops := make([]clientv3.Op, 0, end-i)
-		for _, kv := range kvs[i:end] {
-			ops = append(ops, clientv3.OpPut(kv.Key, string(kv.Value)))
+	const maxOps, maxBytes = 128, 1 << 20
+	for i := 0; i < len(kvs); {
+		ops := make([]clientv3.Op, 0, maxOps)
+		size := 0
+		for ; i < len(kvs) && len(ops) < maxOps; i++ {
+			n := len(kvs[i].Key) + len(kvs[i].Value)
+			if len(ops) > 0 && size+n > maxBytes {
+				break
+			}
+			ops = append(ops, clientv3.OpPut(kvs[i].Key, string(kvs[i].Value)))
+			size += n
 		}
 		if _, err := c.Txn(ctx).Then(ops...).Commit(); err != nil {
 			return err

@@ -123,8 +123,13 @@ in `tools/apiserver-at/asof_test.go`:
 - a resource with no complete snapshot at or before `t` has no rows: at
   `t` it is unknown, not empty
 
-With hourly snapshots, the hour of `t` and the hour before it always hold
-the base, so a read of a time is two hourly objects.
+With hourly snapshots, the hour of `t` and the two before it always hold
+the base, so a read of a time is three hourly objects. Two would be
+enough if rows were filed by their own time, but an object is filed by
+its key's hour, the time out_s3 opened it: a full hour's snapshot rows
+can sit in the object opened a few seconds before that hour. So a time
+just after a full hour, whose base is the previous full hour's snapshot,
+may find it two hours back.
 
 `tools/apiserver-at` serves such a state to kubectl. It loads the objects
 into a new etcd under kube-apiserver's own key layout (`registry.go`,
@@ -142,6 +147,12 @@ pieces that would rewrite the state are turned off:
 - the priority-and-fairness bootstrap
 - admission webhooks, whose services are not there
 
+and the NodePort allocation is written with the objects, from the
+Services' ports, so the API server's repair loop finds every NodePort
+allocated instead of recording a `PortNotAllocated` Warning Event that
+the cluster never had. Objects go into etcd in transactions within its
+request limit, so CRDs with schemas of hundreds of KB load too.
+
 APIServices of aggregated APIs are left out, so discovery does not warn
 about every group whose backend is missing.
 
@@ -152,7 +163,8 @@ local/kubectl-at.sh itest '2026-10-07 10:12:00'      # serves; export the printe
 ```
 
 The script reads the hourly tier, else the daily tier (`SOURCE=raw`: the
-raw tier), and takes the API server's release from the kubelet version
+raw tier's hours that still have objects; the compactor may delete an
+hour's raw objects at its final fold), and takes the API server's release from the kubelet version
 the cluster's Nodes reported at that time. A state loads and serves in
 about ten seconds.
 
@@ -180,8 +192,9 @@ What apiserver-at shows differently from the cluster at that time:
 | test | what |
 |---|---|
 | `kobjects` units (fake clients) | snapshot rows then the snapshot row, no initial-list events, changes in all namespaces, a requested snapshot, Secret values scrambled on every row (empty ones kept empty), Secrets not watched unless secrets_mode is scrambled, discovery filtering, snapshot alignment |
+| `tools/apiserver-at` `TestLoadLargeObjects` | objects of 1.2 MiB among small ones load into etcd |
 | `tools/apiserver-at` `TestObjectsAt` | `apiserver_at` over crafted raw rows, through `raw.sql` and `tables.sql` |
-| `tools/apiserver-at` `TestAcceptance` | a real API server as the source. The watcher's rows go through the SQL to apiserver-at. Every object of the 62 resources is equal at a past time and at the present. At the present, the server-side Tables of all of them are equal, as is `kubectl describe` of a pod, a node and a deployment. The source's etcd keys are the keys apiserver-at writes. A write is refused. About 40 s, part of `./test.sh checks` |
+| `tools/apiserver-at` `TestAcceptance` | a real API server as the source. The watcher's rows go through the SQL to apiserver-at. Every object of the 62 resources is equal at a past time and at the present. At the present, the server-side Tables of all of them are equal, as is `kubectl describe` of a pod, a node and a deployment. The source's etcd keys are the keys apiserver-at writes. A write is refused. A NodePort Service gets no `PortNotAllocated` Event. About 40 s, part of `./test.sh checks` |
 | `./test.sh` itest | the cluster agent in k3s, through out_s3 and the compactor: its keys and lines, built-in and custom resources snapshotted at the scheduled interval, snapshot counts, no managedFields, Secret values scrambled to a tenth of their length and no Secret data anywhere, Events of all namespaces including one about the Node, three pod incarnations, the apiserver tier equal to raw hourly and daily. Then kubectl through apiserver-at: a ConfigMap before its creation, at each of its two values, after its deletion, and fourteen `kubectl get`/`describe` outputs equal to the live cluster's |
 
 ## Measured

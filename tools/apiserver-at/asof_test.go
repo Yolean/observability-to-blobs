@@ -165,6 +165,7 @@ func TestPrepare(t *testing.T) {
 		{APIVersion: "apiregistration.k8s.io/v1", Resource: "apiservices", Name: "v1beta1.metrics.k8s.io", Object: `{"spec":{"service":{"name":"metrics-server","namespace":"kube-system"}}}`},
 		{APIVersion: "apiregistration.k8s.io/v1", Resource: "apiservices", Name: "v1.apps", Object: `{"spec":{"group":"apps"}}`},
 		{APIVersion: "networking.k8s.io/v1", Resource: "servicecidrs", Name: "kubernetes", Object: `{"spec":{"cidrs":["10.43.0.0/16"]}}`},
+		{APIVersion: "v1", Resource: "services", Namespace: "app", Name: "lb", Object: `{"spec":{"type":"LoadBalancer","ports":[{"port":80,"nodePort":30001},{"port":443,"nodePort":30017}],"healthCheckNodePort":30010}}`},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -180,10 +181,28 @@ func TestPrepare(t *testing.T) {
 		"/registry/apiextensions.k8s.io/customresourcedefinitions/widgets.example.com",
 		"/registry/apiregistration.k8s.io/apiservices/v1.apps",
 		"/registry/example.com/widgets/app/w1",
+		"/registry/ranges/servicenodeports",
 		"/registry/servicecidrs/kubernetes",
+		"/registry/services/specs/app/lb",
 	}
 	if !reflect.DeepEqual(keys, want) {
 		t.Errorf("keys %q", keys)
+	}
+	// the NodePorts 30001, 30010 and 30017 are allocated: bits 1, 10, 17
+	for _, kv := range p.KVs {
+		if kv.Key != "/registry/ranges/servicenodeports" {
+			continue
+		}
+		var ra struct {
+			Kind, Range string
+			Data        []byte
+		}
+		if err := json.Unmarshal(kv.Value, &ra); err != nil {
+			t.Fatal(err)
+		}
+		if ra.Kind != "RangeAllocation" || ra.Range != "30000-32767" || !reflect.DeepEqual(ra.Data, []byte{0x02, 0x04, 0x02}) {
+			t.Errorf("node ports %s", kv.Value)
+		}
 	}
 	if p.Skipped["aggregated apiservice"] != 1 || !reflect.DeepEqual(p.ServiceCIDRs, []string{"10.43.0.0/16"}) {
 		t.Errorf("skipped %v cidrs %v", p.Skipped, p.ServiceCIDRs)
