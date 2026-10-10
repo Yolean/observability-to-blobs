@@ -11,6 +11,8 @@
 #   SKIP_BUILD=1    use target/host/*.tar.gz if there is one
 #   HOST_VERSION    the version in the tarball's name (default dev)
 #   HOST_BUILD_ARGS extra docker buildx flags, e.g. a CI cache
+#   LOCAL_PORT      this host's port for the gateway's port-forward (default
+#                   17071; itest/host/run.sh)
 #   BUILDKIT_HOST   build with buildctl against this BuildKit (set by test.sh
 #                   when it built the image in the itest cluster); without it
 #                   docker builds, and without docker there is no builder
