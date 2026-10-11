@@ -10,3 +10,5 @@ alerts-cf/.wrangler/
 .claude/
 itest/cluster/.kubeconfig.y-cluster-lock
 examples/gke/s3-credentials.env
+# release.sh puts the extension here for the build, then removes it
+tools/y-obs/httpfs/

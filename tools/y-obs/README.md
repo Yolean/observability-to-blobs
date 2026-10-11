@@ -9,7 +9,8 @@
 > - `kubectl --at`, in-process: no duckdb CLI, temp files or go needed
 >   when `setup-envtest` or `KUBEBUILDER_ASSETS` provides the release;
 > - contexts, `auth` with cache and renewal, and `mint-stub`;
-> - the window planner (each hour from one tier), `pods`, `exits`, `logs`, `grep` and `metrics`.
+> - the window planner (each hour from one tier), `pods`, `exits`, `logs`, `grep` and `metrics`;
+> - release builds with httpfs embedded (`release.sh`, `.github/workflows/y-obs.yaml`), and `version`.
 > The rest is design.
 
 `y-obs` is one local executable that answers the questions people (and
@@ -57,11 +58,26 @@ Two things make this possible now:
 - It reuses the stdlib S3 client (`images/blobs-to-prometheus/s3.go` with
   `sigv4.go`) for listings and HEADs. DuckDB reads the objects.
 
-**Release.** A tag builds four binaries, linux/amd64, linux/arm64,
-darwin/arm64 and darwin/amd64, each on a native runner. This is because
-duckdb-go links prebuilt static libraries per platform through cgo. The
-release attaches the binaries with their sha256 files, so a `y-bin`
-download entry can pin them like any other tool.
+**Release.** A tag `y-obs-v*` runs `.github/workflows/y-obs.yaml`. It
+builds four binaries, linux/amd64, linux/arm64, darwin/arm64 and
+darwin/amd64, each on a native runner: duckdb-go links prebuilt static
+libraries per platform through cgo, so there is no cross compiling.
+
+- **Building.** `tools/y-obs/release.sh` is the one build step.
+  - It downloads DuckDB's signed httpfs extension for the platform and
+    checks it against `release.env`, whose linux checksums equal
+    `compactor/build.env`'s.
+  - It embeds the extension with the `httpfs_embed` build tag. At run
+    time the binary writes it once to the user cache, under its
+    checksum, and `LOAD`s it by path: no extension download, and no
+    `~/.duckdb`.
+- **Smoke test.** The workflow runs `version`, `schema` and a query on
+  an empty blobs directory.
+- **Publishing.** It attaches the binaries with their sha256 files to
+  the tag's release, so a `y-bin` download entry can pin them.
+- **Development builds.** Without the tag, httpfs is installed from
+  DuckDB's signed repository at first use. `TestReleaseEnv` fails when
+  `release.env` pins another engine version than the one linked.
 
 ## Design rules for LLM callers
 

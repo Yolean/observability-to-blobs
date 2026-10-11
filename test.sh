@@ -153,7 +153,7 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
   need go "https://go.dev/dl/"
   need shellcheck "https://github.com/koalaman/shellcheck"
   phase "checks: shell"
-  shellcheck -x -P SCRIPTDIR test.sh compactor/build.sh local/kubectl-at.sh operator-to-annotations/crds/vendor.sh
+  shellcheck -x -P SCRIPTDIR test.sh compactor/build.sh local/kubectl-at.sh operator-to-annotations/crds/vendor.sh tools/y-obs/release.sh
 
   # tools/y-obs's acceptance test runs a source API server, the
   # watcher, compactor/sql/ in DuckDB and apiserver-at

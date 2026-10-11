@@ -33,6 +33,7 @@ var commands = []command{
 	{"kubectl", "kubectl against the cluster as it was at a time, read-only", cmdKubectl},
 	{"auth", "get or show the context's read credential, never printing the secret", cmdAuth},
 	{"contexts", "the configured contexts: bucket, endpoint, the clusters the credential covers", cmdContexts},
+	{"version", "y-obs, DuckDB and Go versions, and where httpfs comes from", cmdVersion},
 	{"mint-stub", "development only: a credential mint handing out static keys", cmdMintStub},
 	{"apiserver-at", "serve a state of objects (JSON lines of apiserver_at rows) to kubectl, read-only", func(_ context.Context, args []string) error {
 		cmdApiserverAt(args)

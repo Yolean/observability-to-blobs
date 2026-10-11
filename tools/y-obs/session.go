@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -262,9 +264,16 @@ func openSession(ctx context.Context, f *sessionFlags, w window) (*session, erro
 			return nil, fail(exitUsage, "no bucket: set S3_BUCKET and S3_ENDPOINT (and AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY), or pass --blobs-dir")
 		}
 		s.root = "s3://" + st.bucket
-		if p := os.Getenv("HTTPFS_EXTENSION"); p != "" {
+		switch p := os.Getenv("HTTPFS_EXTENSION"); {
+		case p != "":
 			init = append(init, "LOAD "+sqlString(p))
-		} else {
+		case len(httpfsExtension) > 0:
+			p, err := embeddedHTTPFS()
+			if err != nil {
+				return nil, fail(exitStore, "the embedded httpfs extension: %v", err)
+			}
+			init = append(init, "LOAD "+sqlString(p))
+		default:
 			init = append(init, "INSTALL httpfs", "LOAD httpfs")
 		}
 		s.setSecret(st)
@@ -291,6 +300,38 @@ func openSession(ctx context.Context, f *sessionFlags, w window) (*session, erro
 		return nil, err
 	}
 	return s, nil
+}
+
+// embeddedHTTPFS writes the embedded extension once into the user's cache,
+// under its checksum, and returns its path: DuckDB loads extensions from
+// files, and verifies the signature when it does.
+func embeddedHTTPFS() (string, error) {
+	sum := sha256.Sum256(httpfsExtension)
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		dir = os.TempDir()
+	}
+	dir = filepath.Join(dir, "y-obs", "httpfs-"+hex.EncodeToString(sum[:8]))
+	p := filepath.Join(dir, "httpfs.duckdb_extension")
+	if fi, err := os.Stat(p); err == nil && fi.Size() == int64(len(httpfsExtension)) {
+		return p, nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	tmp, err := os.CreateTemp(dir, "httpfs-*")
+	if err != nil {
+		return "", err
+	}
+	if _, err := tmp.Write(httpfsExtension); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	return p, os.Rename(tmp.Name(), p)
 }
 
 // openEngine opens an in-memory engine with autoinstall and autoload
