@@ -143,7 +143,7 @@ func stateAt(ctx context.Context, sf *sessionFlags, t time.Time, source string) 
 	var err error
 	switch source {
 	case "raw":
-		if s, err = openSession(ctx, sf, hours, storeFromEnv()); err != nil {
+		if s, err = openSession(ctx, sf, hours); err != nil {
 			return nil, "", err
 		}
 		if err := s.prepare(ctx, map[string]bool{"raw": true}, sf.maxObjects); err != nil {
@@ -159,7 +159,7 @@ func stateAt(ctx context.Context, sf *sessionFlags, t time.Time, source string) 
 			w    window
 			view string
 		}{{hours, "hourly_apiserver"}, {days, "daily_apiserver"}} {
-			if s, err = openSession(ctx, sf, c.w, storeFromEnv()); err != nil {
+			if s, err = openSession(ctx, sf, c.w); err != nil {
 				return nil, "", err
 			}
 			if err := s.prepare(ctx, map[string]bool{c.view: true}, sf.maxObjects); err != nil {

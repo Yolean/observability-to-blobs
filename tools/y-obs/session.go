@@ -10,9 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/duckdb/duckdb-go/v2"
@@ -57,13 +59,14 @@ func (w window) String() string {
 
 // sessionFlags are the flags every command that reads the bucket shares.
 type sessionFlags struct {
-	cluster, node, since, from, to, blobsDir, keysDir string
-	maxObjects                                        int
-	explain                                           bool
+	context, cluster, node, since, from, to, blobsDir, keysDir string
+	maxObjects                                                 int
+	explain                                                    bool
 }
 
 func (f *sessionFlags) register(fs *flag.FlagSet) {
-	fs.StringVar(&f.cluster, "cluster", os.Getenv("CLUSTER_NAME"), "the cluster, the first key segment of every tier (env CLUSTER_NAME)")
+	fs.StringVar(&f.context, "context", "", "the bucket and its credential (y-obs contexts); default Y_OBS_CONTEXT, else the config's current, unless S3_BUCKET is set")
+	fs.StringVar(&f.cluster, "cluster", os.Getenv("CLUSTER_NAME"), "the cluster, the first key segment of every tier (env CLUSTER_NAME); default the credential's only cluster")
 	fs.StringVar(&f.node, "node", "", "read only this node's raw objects")
 	fs.StringVar(&f.since, "since", "1h", "the window: this long back from now, or from --from (30m, 6h, 2d)")
 	fs.StringVar(&f.from, "from", "", "window start, UTC: 2026-10-11T09:00:00Z or '2026-10-11 09:00'")
@@ -177,6 +180,11 @@ type session struct {
 	tmp      string
 	plan     map[string][]string // view -> the objects it reads
 	warnings []string
+	// secretStmt is the current CREATE SECRET, read by every new
+	// connection's init; a renewal replaces it
+	secretMu   sync.Mutex
+	secretStmt string
+	stopRenew  func()
 }
 
 // storeConfig is where the bucket is; static keys from the environment, as
@@ -184,6 +192,10 @@ type session struct {
 type storeConfig struct {
 	bucket, endpoint, region, keyID, secret, token string
 	tls                                            bool
+	// expires is the credential's expiry, zero for static keys; it is
+	// renewed margin before
+	expires time.Time
+	margin  time.Duration
 }
 
 func storeFromEnv() storeConfig {
@@ -199,15 +211,44 @@ func storeFromEnv() storeConfig {
 	}
 }
 
+// clusterFor is the cluster a session reads: the flag, else the
+// credential's only cluster; one the credential does not cover is refused.
+func clusterFor(flagValue string, scope []string) (string, error) {
+	cluster := flagValue
+	if cluster == "" && len(scope) == 1 {
+		cluster = scope[0]
+	}
+	if cluster == "" {
+		hint := ""
+		if len(scope) > 1 {
+			hint = ": the credential covers " + strings.Join(scope, ", ")
+		}
+		return "", fail(exitUsage, "no cluster: pass --cluster or set CLUSTER_NAME%s", hint)
+	}
+	if len(scope) > 0 && !slices.Contains(scope, cluster) {
+		return "", fail(exitAuth, "the credential covers clusters %s, not %s", strings.Join(scope, ", "), cluster)
+	}
+	return cluster, nil
+}
+
 // openSession opens the engine. With blobsDir the tiers are read from a
 // local directory and no extension is loaded; otherwise httpfs is loaded,
 // from HTTPFS_EXTENSION when set, else installed from DuckDB's signed
 // repository, and the secret is scoped to the bucket.
-func openSession(ctx context.Context, f *sessionFlags, w window, st storeConfig) (*session, error) {
-	if f.cluster == "" {
-		return nil, fail(exitUsage, "no cluster: pass --cluster or set CLUSTER_NAME")
+func openSession(ctx context.Context, f *sessionFlags, w window) (*session, error) {
+	var st storeConfig
+	var scope []string
+	if f.blobsDir == "" {
+		var err error
+		if st, scope, err = storeFor(ctx, f.context); err != nil {
+			return nil, err
+		}
 	}
-	s := &session{cluster: f.cluster, w: w, node: f.node, keyIDs: map[string]bool{}, plan: map[string][]string{}}
+	cluster, err := clusterFor(f.cluster, scope)
+	if err != nil {
+		return nil, err
+	}
+	s := &session{cluster: cluster, w: w, node: f.node, keyIDs: map[string]bool{}, plan: map[string][]string{}}
 	var init []string
 	if f.blobsDir != "" {
 		abs, err := filepath.Abs(f.blobsDir)
@@ -225,13 +266,7 @@ func openSession(ctx context.Context, f *sessionFlags, w window, st storeConfig)
 		} else {
 			init = append(init, "INSTALL httpfs", "LOAD httpfs")
 		}
-		secret := fmt.Sprintf("CREATE OR REPLACE SECRET blobs (TYPE s3, PROVIDER config, KEY_ID %s, SECRET %s, ENDPOINT %s, REGION %s, URL_STYLE 'path', USE_SSL %t, SCOPE %s",
-			sqlString(st.keyID), sqlString(st.secret), sqlString(st.endpoint), sqlString(st.region), st.tls, sqlString(s.root))
-		if st.token != "" {
-			secret += ", SESSION_TOKEN " + sqlString(st.token)
-		}
-		init = append(init, secret+")")
-		s.redact = append(s.redact, st.secret, st.token)
+		s.setSecret(st)
 	}
 	init = append(init, "SET TimeZone = 'UTC'", "SET enable_object_cache = true")
 	if f.keysDir != "" {
@@ -244,7 +279,12 @@ func openSession(ctx context.Context, f *sessionFlags, w window, st storeConfig)
 	if err := s.openEngine(ctx, init); err != nil {
 		return nil, err
 	}
-	var err error
+	if !st.expires.IsZero() {
+		s.renewEvery(func(ctx context.Context) (storeConfig, error) {
+			st, _, err := storeFor(ctx, f.context)
+			return st, err
+		}, st.expires, st.margin)
+	}
 	if s.tmp, err = os.MkdirTemp("", "y-obs-"); err != nil {
 		s.close()
 		return nil, err
@@ -256,7 +296,13 @@ func openSession(ctx context.Context, f *sessionFlags, w window, st storeConfig)
 // off, runs init on its connection, and pins that one connection.
 func (s *session) openEngine(ctx context.Context, init []string) error {
 	c, err := duckdb.NewConnector("", func(e driver.ExecerContext) error {
-		for _, q := range append([]string{"SET autoinstall_known_extensions = false", "SET autoload_known_extensions = false"}, init...) {
+		stmts := append([]string{"SET autoinstall_known_extensions = false", "SET autoload_known_extensions = false"}, init...)
+		s.secretMu.Lock()
+		if s.secretStmt != "" {
+			stmts = append(stmts, s.secretStmt)
+		}
+		s.secretMu.Unlock()
+		for _, q := range stmts {
 			if _, err := e.ExecContext(ctx, q, nil); err != nil {
 				return s.wrap(err)
 			}
@@ -274,7 +320,62 @@ func (s *session) openEngine(ctx context.Context, init []string) error {
 	return nil
 }
 
+// setSecret makes st's credential the one new connections create, and
+// keeps its secret out of error messages.
+func (s *session) setSecret(st storeConfig) string {
+	q := fmt.Sprintf("CREATE OR REPLACE SECRET blobs (TYPE s3, PROVIDER config, KEY_ID %s, SECRET %s, ENDPOINT %s, REGION %s, URL_STYLE 'path', USE_SSL %t, SCOPE %s",
+		sqlString(st.keyID), sqlString(st.secret), sqlString(st.endpoint), sqlString(st.region), st.tls, sqlString(s.root))
+	if st.token != "" {
+		q += ", SESSION_TOKEN " + sqlString(st.token)
+	}
+	q += ")"
+	s.secretMu.Lock()
+	s.secretStmt = q
+	s.redact = append(s.redact, st.secret, st.token)
+	s.secretMu.Unlock()
+	return q
+}
+
+// renewEvery replaces the secret margin before its expiry, for a session
+// that outlives its credential: secrets are the database's, so a statement
+// on a second connection reaches the pinned one, and httpfs re-reads the
+// secret when a request is refused (httpfs_enable_credential_refresh).
+func (s *session) renewEvery(get func(context.Context) (storeConfig, error), expires time.Time, margin time.Duration) {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.stopRenew = cancel
+	go func() {
+		for {
+			wait := time.Until(expires.Add(-margin))
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(max(wait, time.Second)):
+			}
+			st, err := get(ctx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "y-obs: renewing the credential: %v\n", err)
+				return
+			}
+			q := s.setSecret(st)
+			c, err := s.db.Conn(ctx)
+			if err == nil {
+				_, err = c.ExecContext(ctx, q)
+				c.Close()
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "y-obs: replacing the secret: %v\n", s.wrap(err))
+				return
+			}
+			expires, margin = st.expires, st.margin
+			fmt.Fprintf(os.Stderr, "y-obs: credential renewed, expires %s\n", expires.UTC().Format(time.RFC3339))
+		}
+	}()
+}
+
 func (s *session) close() {
+	if s.stopRenew != nil {
+		s.stopRenew()
+	}
 	if s.conn != nil {
 		s.conn.Close()
 	}

@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -25,6 +26,9 @@ var commands = []command{
 	{"sql", "a DuckDB query over the views of a window (raw, logs, metrics, podindex, pods, apiserver, hourly_*, daily_*)", cmdSQL},
 	{"schema", "the views, or one view's columns and their meanings", cmdSchema},
 	{"kubectl", "kubectl against the cluster as it was at a time, read-only", cmdKubectl},
+	{"auth", "get or show the context's read credential, never printing the secret", cmdAuth},
+	{"contexts", "the configured contexts: bucket, endpoint, the clusters the credential covers", cmdContexts},
+	{"mint-stub", "development only: a credential mint handing out static keys", cmdMintStub},
 	{"apiserver-at", "serve a state of objects (JSON lines of apiserver_at rows) to kubectl, read-only", func(_ context.Context, args []string) error {
 		cmdApiserverAt(args)
 		return nil
@@ -73,6 +77,31 @@ func exitCode(err error) int {
 	}
 	fmt.Fprintln(os.Stderr, "y-obs: "+err.Error())
 	return exitStore
+}
+
+// newFlagSet is a command's flag set: errors returned, not exits, and -h
+// printing the command's usage text before its flags.
+func newFlagSet(name, usage string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprint(fs.Output(), usage)
+		fmt.Fprintln(fs.Output(), "\nFlags:")
+		fs.PrintDefaults()
+	}
+	return fs
+}
+
+func parseFlags(fs *flag.FlagSet, args []string) error {
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return &exitError{code: exitOK}
+		}
+		return fail(exitUsage, "%v; run y-obs %s -h", err, fs.Name())
+	}
+	if fs.NArg() > 0 {
+		return fail(exitUsage, "unexpected arguments %v; run y-obs %s -h", fs.Args(), fs.Name())
+	}
+	return nil
 }
 
 func printUsage(w io.Writer) {

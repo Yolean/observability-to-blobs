@@ -131,7 +131,7 @@ func runSQL(ctx context.Context, args []string, stdout, stderr io.Writer, now ti
 		if err != nil {
 			return fail(exitUsage, "%v", err)
 		}
-		if s, err = openSession(ctx, &c.sf, w, storeFromEnv()); err != nil {
+		if s, err = openSession(ctx, &c.sf, w); err != nil {
 			return err
 		}
 		defer s.close()
@@ -279,7 +279,7 @@ func cmdSchema(ctx context.Context, args []string) error {
 	defer os.RemoveAll(dir)
 	sf := &sessionFlags{cluster: "schema", blobsDir: dir}
 	now := time.Now()
-	s, err := openSession(ctx, sf, window{from: now.Add(-time.Hour), to: now}, storeConfig{})
+	s, err := openSession(ctx, sf, window{from: now.Add(-time.Hour), to: now})
 	if err != nil {
 		return err
 	}

@@ -71,7 +71,7 @@ func TestStateAt(t *testing.T) {
 	}
 
 	// the hourly tier's apiserver object for 10, from the raw view
-	s, err := openSession(ctx, sf, window{from: at.Truncate(time.Hour), to: at.Truncate(time.Hour).Add(time.Hour)}, storeConfig{})
+	s, err := openSession(ctx, sf, window{from: at.Truncate(time.Hour), to: at.Truncate(time.Hour).Add(time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}

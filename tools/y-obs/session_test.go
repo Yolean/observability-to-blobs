@@ -53,7 +53,7 @@ func fixture(t *testing.T) string {
 	// the hourly tier's logs object for 09, from the raw view
 	ctx := context.Background()
 	sf := &sessionFlags{cluster: "c", blobsDir: dir}
-	s, err := openSession(ctx, sf, testWindow, storeConfig{})
+	s, err := openSession(ctx, sf, testWindow)
 	if err != nil {
 		t.Fatal(err)
 	}

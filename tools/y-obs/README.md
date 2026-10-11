@@ -7,7 +7,8 @@
 >   `local/blobs.sh`) or `--blobs-dir`;
 > - `--out`, `--db` and `--attach` on `sql`;
 > - `kubectl --at`, in-process: no duckdb CLI, temp files or go needed
->   when `setup-envtest` or `KUBEBUILDER_ASSETS` provides the release.
+>   when `setup-envtest` or `KUBEBUILDER_ASSETS` provides the release;
+> - contexts, `auth` with cache and renewal, and `mint-stub`.
 > The rest is design.
 
 `y-obs` is one local executable that answers the questions people (and
@@ -293,31 +294,53 @@ reads the `hourly_*` views instead.
 
 ### auth and contexts
 
-`~/.config/y-obs/contexts.yaml` gives each context a cluster name, a
-bucket, an S3 endpoint and region, and where the read credential comes
-from:
+A context is what one credential can read: one bucket at one endpoint,
+and the mint that hands out its read credentials. The credential's scope
+may narrow the bucket to some clusters; `--cluster` picks among them,
+and defaults to the only one.
+
+`~/.config/y-obs/contexts.yaml` (or `Y_OBS_CONFIG`):
 
 ```yaml
+current: prod
 contexts:
   prod:
-    cluster: prod
     bucket: node-data
     endpoint: objects.example.net
     region: auto
     credentials:
-      url: https://obs-creds.example.net/v1/read/prod   # behind an identity-aware proxy
+      url: https://obs-creds.example.net/v1/read     # behind an identity-aware proxy
       token: y-remote-iap print https://obs-creds.example.net
 ```
 
-- `y-obs auth` runs the token command and POSTs to `url`. The answer is
-  `{accessKeyId, secretAccessKey, sessionToken, expiration, endpoint,
-  region, bucket, prefixes}` and lives 5–15 min.
-- The credential is cached 0600 in the user's runtime directory until
-  2 min before it expires. Repeated calls then do not mint again, and
-  an expiry mid-query renews and retries once.
-- `y-obs auth` prints the expiry and scope, never the secret.
-- `y-obs auth --exec -- duckdb` hands the credential to another program
-  in its environment, for the cases y-obs does not cover.
+- **Which context.** `--context`, else `Y_OBS_CONTEXT`, else `current`,
+  else the only one. `S3_BUCKET` in the environment wins over `current`,
+  as `local/blobs.sh`'s static keys.
+- **Minting.** y-obs runs the token command and POSTs to `url` with the
+  output as a bearer token. The answer is `{accessKeyId, secretAccessKey,
+  sessionToken, expiration}`, optionally with `bucket`, `endpoint` and
+  `region` overriding the context's, and `clusters`, the scope.
+- **Cache and renewal.** The credential is cached 0600 in
+  `$XDG_RUNTIME_DIR/y-obs/` (else the user cache directory). It is used
+  until a margin before it expires: 2 min, or half its lifetime when
+  that is shorter. A session that outlives it gets a new one at the
+  margin. The new secret replaces the database's from a second
+  connection, so a running query carries on; httpfs re-reads secrets on
+  a refused request.
+- **The auth command.** `y-obs auth` prints the context, bucket, scope,
+  source (cached or minted) and expiry, never the secret. `--renew`
+  mints even when the cache is valid. `y-obs auth -- duckdb` runs a
+  program with the credential in its environment (the `AWS_*` and `S3_*`
+  variables of `local/blobs.sh`).
+- **Listing contexts.** `y-obs contexts` lists the contexts with the
+  clusters their cached credential covers. Listing the clusters present
+  in the bucket, with their newest upload, needs a delimiter listing; it
+  comes with the stdlib S3 client.
+- **The stub mint.** `y-obs mint-stub` is a mint for development. It
+  hands out the static keys it was started with, under an expiry: the
+  protocol of a real mint, none of its security.
+- **Exit codes.** A token command that fails, a mint that refuses or is
+  down, and a cluster outside the scope are all exit 3.
 
 ## Credentials
 
