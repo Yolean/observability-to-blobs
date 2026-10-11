@@ -38,6 +38,18 @@ func plain(v any) any {
 			return nil
 		}
 		return plain(*x)
+	case duckdb.OrderedMap:
+		return plain(&x)
+	case *duckdb.OrderedMap:
+		if x == nil {
+			return nil
+		}
+		m := make(map[string]any, x.Len())
+		for _, k := range x.Keys() {
+			val, _ := x.Get(k)
+			m[fmt.Sprint(plain(k))] = plain(val)
+		}
+		return m
 	case duckdb.Map:
 		m := make(map[string]any, len(x))
 		for k, val := range x {
