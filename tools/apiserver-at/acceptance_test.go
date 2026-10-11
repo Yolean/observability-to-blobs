@@ -534,6 +534,15 @@ func TestAcceptance(t *testing.T) {
 				t.Errorf("create: %v, want MethodNotAllowed", err)
 			}
 
+			// the API server's NodePort repair finds the Service's port
+			// allocated, so it records no Event of its own
+			time.Sleep(2 * time.Second)
+			evs, err := at.dyn.Resource(schema.GroupVersionResource{Version: "v1", Resource: "events"}).
+				List(ctx, metav1.ListOptions{FieldSelector: "reason=PortNotAllocated"})
+			if err != nil || len(evs.Items) != 0 {
+				t.Errorf("PortNotAllocated events: %v %v", evs, err)
+			}
+
 			if c.name != "t2" {
 				return
 			}

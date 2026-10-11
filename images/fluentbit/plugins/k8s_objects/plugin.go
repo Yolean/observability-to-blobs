@@ -95,11 +95,22 @@ func parseConfig(get func(key, def string) string) (config, error) {
 	return c, nil
 }
 
+// restConfig is the API server's, with its warnings logged once each: the
+// server repeats a deprecation warning at every request for a deprecated
+// resource, v1 Endpoints at every re-watch, every few minutes
 func restConfig(kubeconfig string) (*rest.Config, error) {
+	var c *rest.Config
+	var err error
 	if kubeconfig != "" {
-		return clientcmd.BuildConfigFromFlags("", kubeconfig)
+		c, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+	} else {
+		c, err = rest.InClusterConfig()
 	}
-	return rest.InClusterConfig()
+	if err != nil {
+		return nil, err
+	}
+	c.WarningHandler = rest.NewWarningWriter(os.Stderr, rest.WarningWriterOptions{Deduplicate: true})
+	return c, nil
 }
 
 //export FLBPluginInit

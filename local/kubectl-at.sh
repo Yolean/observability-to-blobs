@@ -8,9 +8,11 @@
 #   local/kubectl-at.sh itest '2026-10-07 10:12:00'                # serve until ^C
 #
 # The time is UTC. The objects come from the hourly tier (the hour of the
-# time and the one before, which holds the base snapshot of a time just
-# after a full hour), else the daily tier (the day and the day before);
-# SOURCE=raw reads the raw tier's two hours instead. The bucket is
+# time and the two before: a time just after a full hour has its base
+# snapshot in the hour before, and a snapshot's rows can sit in the hour
+# before their own, in an object the agent opened before the full hour),
+# else the daily tier (the day and the day before); SOURCE=raw reads the
+# raw tier's hours of those three that still have objects instead. The bucket is
 # local/blobs.sh's: S3_BUCKET, S3_ENDPOINT, S3_TLS, S3_REGION,
 # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, PARQUET_KEYS_DIR.
 #
@@ -62,7 +64,7 @@ if [ -n "${PARQUET_KEYS_DIR:-}" ]; then
 fi
 q() { duckdb -noheader -csv -c ".read $WORK/init.sql" -c ".output" -c "$1"; }
 
-hours=$(q "SELECT strftime(h, '%Y-%m-%d/%H') FROM (SELECT unnest([date_trunc('hour', TIMESTAMP '$AT') - INTERVAL 1 HOUR, date_trunc('hour', TIMESTAMP '$AT')]) AS h)")
+hours=$(q "SELECT strftime(h, '%Y-%m-%d/%H') FROM (SELECT unnest([date_trunc('hour', TIMESTAMP '$AT') - INTERVAL 2 HOUR, date_trunc('hour', TIMESTAMP '$AT') - INTERVAL 1 HOUR, date_trunc('hour', TIMESTAMP '$AT')]) AS h)")
 days=$(q "SELECT strftime(d, '%Y-%m-%d') FROM (SELECT unnest([date_trunc('day', TIMESTAMP '$AT') - INTERVAL 1 DAY, date_trunc('day', TIMESTAMP '$AT')]) AS d)")
 
 # tier <stem...>: a FROM clause over the tier objects of the stems, each
@@ -86,7 +88,12 @@ tier() {
 case "${SOURCE:-tier}" in
   (raw)
     files=""
-    for h in $hours; do files="${files:+$files, }'s3://$BUCKET/raw1/$CLUSTER/$h/*/*.jsonl.zst'"; done
+    # an hour's raw objects go at its final fold: a glob of none is an error
+    for h in $hours; do
+      [ "$(q "SELECT count(*) FROM glob('s3://$BUCKET/raw1/$CLUSTER/$h/*/*.jsonl.zst')")" = 0 ] \
+        || files="${files:+$files, }'s3://$BUCKET/raw1/$CLUSTER/$h/*/*.jsonl.zst'"
+    done
+    [ -n "$files" ] || { echo "no raw objects of $CLUSTER around $AT in s3://$BUCKET/raw1/" >&2; exit 1; }
     {
       echo "SET VARIABLE raw_files = [$files];"
       echo ".read $ROOT/compactor/sql/raw.sql"

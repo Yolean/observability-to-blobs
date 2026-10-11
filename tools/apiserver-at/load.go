@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"sort"
 	"strings"
 
@@ -91,8 +92,16 @@ func Prepare(lines []Line) (Prepared, error) {
 		}
 		all = append(all, parsed{l, gvr, obj})
 	}
+	nodePorts := new(big.Int)
 	for _, x := range all {
 		gr := x.gvr.GroupResource()
+		if gr == serviceResource {
+			for _, port := range servicePorts(x.obj) {
+				if port >= nodePortBase && port < nodePortBase+nodePortSize {
+					nodePorts.SetBit(nodePorts, int(port-nodePortBase), 1)
+				}
+			}
+		}
 		if gr == apiServiceResource && hasService(x.obj) {
 			p.Skipped["aggregated apiservice"]++
 			continue
@@ -110,11 +119,52 @@ func Prepare(lines []Line) (Prepared, error) {
 		}
 		p.KVs = append(p.KVs, KV{Key: Key(gr, crds[gr], x.l.Namespace, x.l.Name), Value: b})
 	}
+	b, err := json.Marshal(map[string]interface{}{
+		"kind": "RangeAllocation", "apiVersion": "v1",
+		"metadata": map[string]interface{}{},
+		"range":    NodePortRange,
+		"data":     nodePorts.Bytes(),
+	})
+	if err != nil {
+		return p, err
+	}
+	p.KVs = append(p.KVs, KV{Key: nodePortsKey, Value: b})
 	sort.Slice(p.KVs, func(i, j int) bool { return p.KVs[i].Key < p.KVs[j].Key })
 	return p, nil
 }
 
+// The API server's NodePort allocation, a bitmap of the ports its Services
+// hold (offset from the range's base, as big.Int bytes). Without it, the
+// server's repair loop finds every NodePort unallocated, allocates it, and
+// records a PortNotAllocated Warning Event that the cluster never had.
+// The range is the API server's default, which apiserver-at keeps; a port
+// outside it gets that Event anyway.
+const (
+	NodePortRange              = "30000-32767"
+	nodePortBase, nodePortSize = 30000, 2768
+	nodePortsKey               = etcdPrefix + "/ranges/servicenodeports"
+)
+
+// servicePorts is the NodePorts a Service holds: its ports' and its
+// health check's
+func servicePorts(obj map[string]interface{}) []int64 {
+	spec, _ := obj["spec"].(map[string]interface{})
+	var out []int64
+	ports, _ := spec["ports"].([]interface{})
+	for _, p := range ports {
+		m, _ := p.(map[string]interface{})
+		if n, ok := m["nodePort"].(float64); ok && n > 0 {
+			out = append(out, int64(n))
+		}
+	}
+	if n, ok := spec["healthCheckNodePort"].(float64); ok && n > 0 {
+		out = append(out, int64(n))
+	}
+	return out
+}
+
 var (
+	serviceResource     = schema.GroupResource{Resource: "services"}
 	crdResource         = schema.GroupResource{Group: "apiextensions.k8s.io", Resource: "customresourcedefinitions"}
 	apiServiceResource  = schema.GroupResource{Group: "apiregistration.k8s.io", Resource: "apiservices"}
 	serviceCIDRResource = schema.GroupResource{Group: "networking.k8s.io", Resource: "servicecidrs"}
