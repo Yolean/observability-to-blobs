@@ -142,6 +142,11 @@ echo "$probe" | paste -sd' ' | sed 's/^/  the policy, as the probe user sees it:
 
 # DuckDB reads through a port-forward as root
 pf_start() {
+  # the first forward needs the port free: one that already answers is
+  # another process's, perhaps another itest's gateway
+  if [ -z "$PF_PID" ] && (exec 3<>"/dev/tcp/127.0.0.1/$LOCAL_PORT") 2>/dev/null; then
+    fail "127.0.0.1:$LOCAL_PORT is in use (another itest?); set LOCAL_PORT to a free port"
+  fi
   [ -z "$PF_PID" ] || kill "$PF_PID" 2>/dev/null || true
   $KUBECTL port-forward svc/versitygw-host "$LOCAL_PORT:7070" >/dev/null 2>&1 &
   PF_PID=$!

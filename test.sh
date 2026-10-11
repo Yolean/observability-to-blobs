@@ -23,6 +23,16 @@
 #   CLUSTER_CONFIG=dir   y-cluster config dir (default: itest/cluster/qemu with
 #                        /dev/kvm, itest/cluster/docker otherwise)
 #   CONTEXT, S3_PORT     must match CLUSTER_CONFIG when overriding it
+#   BUILDKIT_PORT, LOGS_PORT, PUT_LOGS_PORT, SERVE_LOGS_PORT, LOCAL_PORT
+#                        this host's ports for the port-forwards to the
+#                        cluster's BuildKit (default 18234), the logs API of
+#                        the compactor (18080), of the put compactor (18081)
+#                        and of the serve pod (18082), and the host phase's
+#                        gateway (17071, itest/host/run.sh). Two itests on
+#                        one machine need their own, as well as their own
+#                        CLUSTER_CONFIG, CONTEXT and S3_PORT; a port that
+#                        already answers fails the run instead of reading
+#                        the other itest's cluster.
 #   IMAGE_BUILD_ARGS     extra docker buildx flags, e.g. a CI cache
 #   KUBEBUILDER_ASSETS   etcd, kube-apiserver and kubectl at ENVTEST_K8S for
 #                        tools/apiserver-at's tests (default: setup-envtest
@@ -45,6 +55,12 @@ CLUSTER=itest
 PUT_NS=observability-put
 PUT_CLUSTER=itest-put
 S3_PORT=${S3_PORT:-30070}
+# this host's ends of the port-forwards (the Env above)
+BUILDKIT_PORT=${BUILDKIT_PORT:-18234}
+LOGS_PORT=${LOGS_PORT:-18080}
+PUT_LOGS_PORT=${PUT_LOGS_PORT:-18081}
+SERVE_LOGS_PORT=${SERVE_LOGS_PORT:-18082}
+export LOCAL_PORT=${LOCAL_PORT:-17071}
 # the compactor's parquet keys (itest/compactor), kept across runs so that
 # a bucket left by `up` stays readable: PARQUET_KEYS_DIR=$PARQUET_KEYS local/blobs.sh
 PARQUET_KEYS=target/itest/parquet-keys
@@ -73,6 +89,14 @@ trap cleanup EXIT
 
 phase() { printf '\n==> %s\n' "$*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
+# port_free <port> <variable>: nothing listens on 127.0.0.1:<port>, else
+# fail: a port-forward to it could not bind, and the run would read
+# whatever answers there, such as another itest's cluster
+port_free() {
+  if (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; then
+    fail "127.0.0.1:$1 is in use (another itest?); set $2 to a free port"
+  fi
+}
 need() {
   command -v "$1" >/dev/null 2>&1 || fail "missing tool: $1 ($2)"
 }
@@ -222,9 +246,10 @@ cluster_builder() {
   phase "image: BuildKit in $CONTEXT"
   $KUBECTL apply -k itest/buildkit >/dev/null
   $KUBECTL -n itest-buildkit rollout status deployment/buildkitd --timeout=300s
-  $KUBECTL -n itest-buildkit port-forward deployment/buildkitd 18234:1234 >/dev/null 2>&1 &
+  port_free "$BUILDKIT_PORT" BUILDKIT_PORT
+  $KUBECTL -n itest-buildkit port-forward deployment/buildkitd "$BUILDKIT_PORT:1234" >/dev/null 2>&1 &
   BUILDKIT_PF=$!
-  export BUILDKIT_HOST=tcp://127.0.0.1:18234
+  export BUILDKIT_HOST=tcp://127.0.0.1:$BUILDKIT_PORT
   for _ in $(seq 1 30); do buildctl debug workers >/dev/null 2>&1 && return 0; sleep 1; done
   fail "BuildKit in $CONTEXT does not answer on $BUILDKIT_HOST"
 }
@@ -667,10 +692,12 @@ logs_expect() {
 
 # The logs API (compactor/README.md, "The logs API"), through a
 # port-forward from this host.
-# logs_forward <namespace> <resource> <local port>: forward to port 8080
-# of svc/... or pod/..., until the script exits, and wait for the API
+# logs_forward <namespace> <resource> <local port> <its variable>: forward
+# to port 8080 of svc/... or pod/..., until the script exits, and wait for
+# the API
 logs_forward() {
   local deadline=$((SECONDS + 60))
+  port_free "$3" "$4"
   $KUBECTL -n "$1" port-forward "$2" "$3:8080" >/dev/null 2>&1 &
   LOGS_PF_PIDS+=($!)
   until curl -sf -o /dev/null "http://127.0.0.1:$3/openapi.json"; do
@@ -1111,13 +1138,13 @@ $KUBECTL -n observability run logs-serve --restart=Never --image="$COMPACTOR_IMA
   \"volumes\": [{\"name\": \"parquet-keys\", \"secret\": {\"secretName\": \"blobs-compactor-parquet-keys\"}}]}}" >/dev/null
 $KUBECTL -n observability wait --for=condition=Ready pod/logs-serve --timeout=120s >/dev/null \
   || { $KUBECTL -n observability logs pod/logs-serve || true; fail "blobs-compactor serve is not ready"; }
-logs_forward observability pod/logs-serve 18082 \
+logs_forward observability pod/logs-serve "$SERVE_LOGS_PORT" SERVE_LOGS_PORT \
   || { $KUBECTL -n observability logs pod/logs-serve || true; fail "no logs API on the serve pod's port 8080"; }
 GEN_POD=$($KUBECTL get pods -l app=log-generator -o jsonpath='{.items[0].metadata.name}')
 SERVE_MARKER="serve-marker-$(date +%s)"
 $KUBECTL exec deploy/log-generator -- sh -c "echo '$SERVE_MARKER' > /proc/1/fd/1"
 deadline=$((SECONDS + 150))
-while logs_get 18082 "/api/v1/logs/n/default/$GEN_POD/app?grep=$SERVE_MARKER&tail=0"; [ "$LOGS_BODY" != "$SERVE_MARKER" ]; do
+while logs_get "$SERVE_LOGS_PORT" "/api/v1/logs/n/default/$GEN_POD/app?grep=$SERVE_MARKER&tail=0"; [ "$LOGS_BODY" != "$SERVE_MARKER" ]; do
   [ $SECONDS -lt $deadline ] || break
   sleep 5
 done
@@ -1420,12 +1447,12 @@ logs_api() {
 }
 phase "assert: the logs API ($CLUSTER: encrypted tiers, raw1/ in the bucket)"
 $KUBECTL -n observability rollout status deployment/blobs-compactor --timeout=180s >/dev/null
-logs_forward observability svc/blobs-compactor-logs 18080 || fail "no logs API on svc/blobs-compactor-logs in observability"
-logs_api 18080 Running Succeeded
+logs_forward observability svc/blobs-compactor-logs "$LOGS_PORT" LOGS_PORT || fail "no logs API on svc/blobs-compactor-logs in observability"
+logs_api "$LOGS_PORT" Running Succeeded
 # stock Fluent Bit ships no podindex: the phase is unknown
 phase "assert: the logs API ($PUT_CLUSTER: plain tiers, the spool)"
-logs_forward "$PUT_NS" svc/blobs-compactor-logs 18081 || fail "no logs API on svc/blobs-compactor-logs in $PUT_NS"
-logs_api 18081 Unknown Unknown
+logs_forward "$PUT_NS" svc/blobs-compactor-logs "$PUT_LOGS_PORT" PUT_LOGS_PORT || fail "no logs API on svc/blobs-compactor-logs in $PUT_NS"
+logs_api "$PUT_LOGS_PORT" Unknown Unknown
 
 # The host agent on the node itself (HOST_MODE.md): tarball, systemd unit,
 # its own bucket. It needs the qemu node; k3s-in-docker has no systemd.

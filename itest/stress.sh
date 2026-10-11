@@ -10,12 +10,12 @@ cd "$(dirname "$0")/.."
 PODS=${1:-20}
 RATE=${2:-200}
 SECONDS_RUN=${3:-150}
-CONTEXT=node-agent
+CONTEXT=${CONTEXT:-node-agent}
 export KUBECONFIG=$PWD/itest/cluster/kubeconfig
 KUBECTL="kubectl --context=$CONTEXT"
 
 S3_SQL="INSTALL httpfs; LOAD httpfs;
-SET s3_region='us-east-1'; SET s3_endpoint='127.0.0.1:30070';
+SET s3_region='us-east-1'; SET s3_endpoint='127.0.0.1:${S3_PORT:-30070}';
 SET s3_access_key_id='demoaccess'; SET s3_secret_access_key='demosecret';
 SET s3_use_ssl=false; SET s3_url_style='path';"
 LOGS="read_parquet('s3://node-agent/itest/*/*/*/*/logs-*.parquet', filename=true)"
