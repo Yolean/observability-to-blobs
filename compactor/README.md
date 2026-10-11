@@ -459,6 +459,16 @@ reads. The secret then needs delete on
 `raw1/`; lifecycle rules still bound everything else. In spool mode
 (below) the raw tier is the spool, and this deletion is always on.
 
+A line that no table holds would be deleted with its object, so the fold
+refuses, before it writes anything, an hour with a line whose `table` is
+missing or not one it folds (an agent newer than the compactor, a table
+renamed, an input an overlay adds without one); the rollup refuses a
+`logs` or `metrics` row without a namespace, which no partition holds. A
+refusal writes nothing, deletes no raw, logs `msg=unaccounted` with the
+hour or day, the count and a key, and adds the count to
+`blobs_compactor_unaccounted_total`. It repeats at every pass until the
+compactor knows the table or the object is moved out of `raw1/`.
+
 ## Encryption
 
 Off by default. With it on, the hourly and daily tiers' Parquet objects
@@ -921,8 +931,10 @@ Service from everyone else.
   `blobs_compactor_raw_keys_read_total`, `blobs_compactor_raw_deleted_total`,
   `blobs_compactor_raw_objects` and `blobs_compactor_raw_oldest_age_seconds`
   (by upload time, aging between listings), and
-  `blobs_compactor_parquet_keys_missing`, and in spool mode the put and
-  spool families (above). The raw gauges are per hour as its
+  `blobs_compactor_parquet_keys_missing`,
+  `blobs_compactor_unaccounted_total` (above, "Raw deletion"), and in
+  spool mode the put and spool families (above). The raw gauges are per
+  hour as its
   latest listing saw it, less what was deleted since: every fold lists its
   hour, the rolling pass's folds too, and the past pass lists every hour,
   so a deletion by either pass shows at once.
@@ -931,7 +943,9 @@ Service from everyone else.
   which go in with the rules that phase 3 wires into the tailer:
   `time() - blobs_compactor_last_success_timestamp_seconds{job="rolling"} > 600`,
   with raw deletion on, `blobs_compactor_raw_oldest_age_seconds > 7200`,
-  and `blobs_compactor_parquet_keys_missing > 0`.
+  `blobs_compactor_parquet_keys_missing > 0`, and
+  `increase(blobs_compactor_unaccounted_total[2h]) > 0` (a refused fold or
+  rollup; the past pass repeats one at least hourly).
 
 `deploy/release/kustomization.yaml`: `resources: [../base]`, and `images:`
 with the tag and digest (written by `build.sh bump`), to be vendored

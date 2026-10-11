@@ -103,7 +103,8 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 	if err := loadSQL(ctx, conn); err != nil {
 		return r, err
 	}
-	hourly := map[string]string{} // table: a FROM clause over the changed hours' objects
+	hourly := map[string]string{}           // table: a FROM clause over the changed hours' objects
+	hourlyObjs := map[string][]tierObject{} // table: those objects
 	for _, t := range foldTables {
 		if err := c.exec(ctx, conn, fmt.Sprintf("CREATE TEMP TABLE empty_%s AS SELECT * EXCLUDE (filename) FROM %s LIMIT 0", t, t)); err != nil {
 			return r, err
@@ -118,17 +119,23 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 				objs = append(objs, o)
 			}
 		}
+		hourlyObjs[t] = objs
 		hourly[t] = "(SELECT * FROM empty_" + t
 		if len(objs) > 0 {
 			hourly[t] += " UNION ALL BY NAME " + c.readTier(objs, "")
 		}
 		hourly[t] += ")"
 	}
+	// every logs and metrics row has a namespace, or nothing is written
+	if err := c.guardNamespaces(ctx, conn, day, hourlyObjs); err != nil {
+		return r, err
+	}
 	if err := c.exec(ctx, conn, "CREATE TEMP TABLE changed_namespaces AS SELECT DISTINCT namespace FROM ("+
 		"SELECT namespace FROM "+hourly["logs"]+" UNION ALL SELECT namespace FROM "+hourly["metrics"]+
 		" UNION ALL SELECT namespace FROM "+hourly["podindex"]+")"); err != nil {
 		return r, err
 	}
+	// a podindex row without a namespace changes no partition
 	changed, err := queryStrings(ctx, conn, "SELECT namespace FROM changed_namespaces WHERE namespace IS NOT NULL")
 	if err != nil {
 		return r, err
@@ -151,7 +158,7 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 		if err != nil {
 			return r, err
 		}
-		namespaces, err := queryStrings(ctx, conn, "SELECT DISTINCT namespace FROM "+hourly[t]+" WHERE namespace IS NOT NULL")
+		namespaces, err := queryStrings(ctx, conn, "SELECT DISTINCT namespace FROM "+hourly[t])
 		if err != nil {
 			return r, err
 		}

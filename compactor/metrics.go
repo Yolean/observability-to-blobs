@@ -30,6 +30,8 @@ type metrics struct {
 	rawHours map[time.Time]rawSummary
 	// parquet key ids the tiers' object names carry with no key file
 	keysMissed float64
+	// rows that refused folds and rollups could not account for (guard.go)
+	unaccounted float64
 	// spool mode: the put endpoint's requests by result, the bytes it
 	// stored, and the spool's files now, a walk of it that a scrape makes
 	// without holding mu, so that a put's count never waits for a walk.
@@ -141,6 +143,13 @@ func (m *metrics) rawRetain(hours map[time.Time]bool) {
 	}
 }
 
+// refused counts a fold or a rollup that the guard refused.
+func (m *metrics) refused(e *unaccountedError) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.unaccounted += float64(e.n)
+}
+
 func (m *metrics) keysMissing(n int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -207,6 +216,8 @@ func (m *metrics) write(w io.Writer) {
 		age = m.now().Sub(oldest).Seconds()
 	}
 	fmt.Fprintf(&b, "blobs_compactor_raw_oldest_age_seconds %s\n", num(age))
+	family("blobs_compactor_unaccounted_total", "counter", "Raw lines without a table the compactor folds, and hourly logs or metrics rows without a namespace, counted at every fold or rollup that refused for them: it wrote nothing and deleted no raw. Alert on any increase.")
+	fmt.Fprintf(&b, "blobs_compactor_unaccounted_total %s\n", num(m.unaccounted))
 	family("blobs_compactor_parquet_keys_missing", "gauge", "Parquet key ids that tier object names (or PARQUET_KEY_ID) carry and PARQUET_KEYS_DIR lacks; folds and rollups refuse while it is above 0.")
 	fmt.Fprintf(&b, "blobs_compactor_parquet_keys_missing %s\n", num(m.keysMissed))
 	if m.spool != nil {
