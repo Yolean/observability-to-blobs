@@ -1281,6 +1281,37 @@ for a in "${LIVE_ARGS[@]}"; do
 done
 at_stop
 
+# y-obs's investigation commands against what the agents shipped: the
+# bucket alone, through the binary the kubectl phase built. The window's
+# hours are recent, so the planner reads raw; sql reads the encrypted
+# hourly tier with the compactor's keys.
+phase "assert: y-obs over the bucket (tools/y-obs)"
+yobs() {
+  env Y_OBS_CONTEXT= S3_ENDPOINT="127.0.0.1:$S3_PORT" S3_BUCKET="$BUCKET" S3_TLS=off \
+    AWS_ACCESS_KEY_ID=demoaccess AWS_SECRET_ACCESS_KEY=demosecret CLUSTER_NAME="$CLUSTER" \
+    target/bin/y-obs "$@" --since 3h --max-objects 2000 2>"$INIT.yobs.err"
+}
+yobs_expect() {
+  local what=$1 want=$2 out
+  shift 2
+  if out=$(yobs "$@") && grep -qE -- "$want" <<<"$out"; then
+    echo "  PASS: y-obs $what"
+  else
+    echo "  FAIL: y-obs $what: no line matches $want in:" >&2
+    { echo "$out"; cat "$INIT.yobs.err"; } | sed 's/^/    /' | head -20 >&2
+    ERRORS=$((ERRORS + 1))
+  fi
+}
+GEN_POD=$(yobs pods -n default --name '^log-generator-' --phase running --format csv | sed -n '2p' | cut -d, -f2)
+GEN_NODE=$(yobs pods -n default --name '^log-generator-' --phase running --format csv | sed -n '2p' | cut -d, -f4)
+yobs_expect "pods: a running log-generator incarnation" ",running," pods -n default --name '^log-generator-' --format csv
+yobs_expect "grep --count: the restart marker exactly once" $'\t1\t' grep "$MARKER" -n default --count
+yobs_expect "logs: the generator's lines, with timestamps" "Z [{].*hello from log-generator" logs default "${GEN_POD:-none}" app --grep 'hello from log-generator' --tail 3 --timestamps
+yobs_expect "logs _node: the kernel marker in the node's journal" "$KMSG_MARKER" logs _node "${GEN_NODE:-none}" --grep "$KMSG_MARKER" --tail 0
+yobs_expect "exits: the restarter's exit code 1" "^[^,]*,default,restarter,[^,]*,[^,]*,[0-9]+,1," exits -n default --name '^restarter$' --format csv
+yobs_expect "metrics latest: app_requests_total code 200 is 42" '"value":42' metrics latest app_requests_total --pod '^metrics-multi$' --where code=200 --format jsonl
+yobs_expect "sql: the encrypted hourly tier with the parquet keys" "^true$" sql --parquet-keys-dir "$PARQUET_KEYS" --format csv "SELECT count(*) > 0 AS rows FROM hourly_logs"
+
 phase "assert: compactor"
 # The key rotation: the hourly objects so far, then PARQUET_KEY_ID
 # itest-2. They keep their names, so their key; new hours and the day's
