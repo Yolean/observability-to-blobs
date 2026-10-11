@@ -8,7 +8,8 @@
 > - `--out`, `--db` and `--attach` on `sql`;
 > - `kubectl --at`, in-process: no duckdb CLI, temp files or go needed
 >   when `setup-envtest` or `KUBEBUILDER_ASSETS` provides the release;
-> - contexts, `auth` with cache and renewal, and `mint-stub`.
+> - contexts, `auth` with cache and renewal, and `mint-stub`;
+> - the window planner (each hour from one tier) and `pods`.
 > The rest is design.
 
 `y-obs` is one local executable that answers the questions people (and
