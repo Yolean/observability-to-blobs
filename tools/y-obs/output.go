@@ -19,7 +19,7 @@ import (
 // as the CRI writes them and the logs API returns them.
 const timeLayout = "2006-01-02T15:04:05.000000000Z"
 
-var formats = []string{"tsv", "csv", "json", "jsonl"}
+var formats = []string{"text", "tsv", "csv", "json", "jsonl"}
 
 // plain turns an engine value into one JSON can carry: times as strings
 // in timeLayout, maps with their keys as strings, UUIDs and blobs as text.
@@ -106,6 +106,8 @@ func writeRows(w io.Writer, rows *sql.Rows, format string, limit int) (n int, mo
 	switch format {
 	case "tsv":
 		fmt.Fprintln(w, strings.Join(cols, "\t"))
+	case "text":
+		// no header: one line per row, the columns joined by spaces
 	case "csv":
 		cw = csv.NewWriter(w)
 		if err := cw.Write(cols); err != nil {
@@ -129,6 +131,14 @@ func writeRows(w io.Writer, rows *sql.Rows, format string, limit int) (n int, mo
 				cells[i] = tsvEscape.Replace(text(v))
 			}
 			fmt.Fprintln(w, strings.Join(cells, "\t"))
+		case "text":
+			cells := make([]string, 0, len(vals))
+			for _, v := range vals {
+				if v != nil {
+					cells = append(cells, text(v))
+				}
+			}
+			fmt.Fprintln(w, strings.Join(cells, " "))
 		case "csv":
 			cells := make([]string, len(vals))
 			for i, v := range vals {

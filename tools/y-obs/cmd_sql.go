@@ -50,6 +50,12 @@ func newSessionCommand(name, usage string, limit int) *sessionCommand {
 	return c
 }
 
+func (c *sessionCommand) limitSet() bool {
+	set := false
+	c.fs.Visit(func(f *flag.Flag) { set = set || f.Name == "limit" })
+	return set
+}
+
 func (c *sessionCommand) parse(args []string) error {
 	c.fs.SetOutput(os.Stderr)
 	if err := c.fs.Parse(interleave(args)); err != nil {
@@ -89,7 +95,7 @@ func interleave(args []string) []string {
 
 func isBoolFlag(a string) bool {
 	switch strings.TrimLeft(a, "-") {
-	case "explain", "h", "help", "append", "timestamps", "prefix", "count", "previous":
+	case "explain", "h", "help", "append", "timestamps", "prefix", "count", "previous", "failed", "i", "ignore-case", "regex", "v":
 		return true
 	}
 	return false
@@ -195,6 +201,8 @@ func (s *session) summary(w io.Writer, n int, more bool, limit int) {
 	line := fmt.Sprintf("y-obs: cluster=%s window=%s objects %s rows=%d", s.cluster, s.w, s.planSummary(), n)
 	if s.cluster == "" {
 		line = fmt.Sprintf("y-obs: db=%s rows=%d", s.local, n)
+	} else if s.wplan != nil {
+		line = fmt.Sprintf("y-obs: cluster=%s window=%s %s objects %s rows=%d", s.cluster, s.w, s.sourcesSummary(), s.planSummary(), n)
 	}
 	if more {
 		line += fmt.Sprintf("; more rows than --limit %d: narrow the query (WHERE, a shorter window) or raise --limit", limit)

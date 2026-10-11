@@ -179,6 +179,7 @@ type session struct {
 	redact   []string
 	tmp      string
 	plan     map[string][]string // view -> the objects it reads
+	wplan    *windowPlan         // the window views' plan (planner.go)
 	warnings []string
 	// secretStmt is the current CREATE SECRET, read by every new
 	// connection's init; a renewal replaces it
