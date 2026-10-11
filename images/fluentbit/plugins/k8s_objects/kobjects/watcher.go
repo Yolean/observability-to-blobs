@@ -34,6 +34,9 @@ type Config struct {
 	// SecretsMode: whether Secrets are watched at all (SecretsSkip, the
 	// default) or watched and shipped with scrambled values (SecretsScrambled)
 	SecretsMode SecretsMode
+	// CRDMode: what is kept of CustomResourceDefinitions' schemas
+	// (CRDRedacted, the default; CRDStorageSchema; CRDFull)
+	CRDMode CRDMode
 }
 
 // SecretsMode says what the watcher does with core Secrets.
@@ -60,6 +63,33 @@ func ParseSecretsMode(s string) (SecretsMode, error) {
 	}
 }
 
+// CRDMode says what the watcher keeps of a CustomResourceDefinition
+// (RedactCRD).
+type CRDMode string
+
+const (
+	// CRDRedacted: every version's schema is replaced by a placeholder
+	// that accepts any object; the default.
+	CRDRedacted CRDMode = "redacted"
+	// CRDStorageSchema: the storage version keeps its schema, the other
+	// versions get the placeholder.
+	CRDStorageSchema CRDMode = "storage-schema"
+	// CRDFull: CRDs ship as the API server serves them.
+	CRDFull CRDMode = "full"
+)
+
+// ParseCRDMode reads redacted, storage-schema or full; empty is redacted.
+func ParseCRDMode(s string) (CRDMode, error) {
+	switch m := CRDMode(strings.TrimSpace(s)); m {
+	case "":
+		return CRDRedacted, nil
+	case CRDRedacted, CRDStorageSchema, CRDFull:
+		return m, nil
+	default:
+		return "", fmt.Errorf("crd_mode: %q is none of %q, %q, %q", s, CRDRedacted, CRDStorageSchema, CRDFull)
+	}
+}
+
 // secretsResource is the core Secrets' group/resource.
 var secretsResource = schema.GroupResource{Resource: "secrets"}
 
@@ -67,11 +97,15 @@ var secretsResource = schema.GroupResource{Resource: "secrets"}
 // events.k8s.io's events are the core events' storage seen through another
 // group, so they would be every Event twice; leases are renewed every few
 // seconds by every controller and node, and nothing a person asks of a past
-// cluster needs them.
+// cluster needs them; core v1 Endpoints are deprecated since Kubernetes
+// 1.33 (the API server warns at every request), and the EndpointSlices,
+// which are watched, carry the same addresses: kubectl describe service
+// reads those.
 func DefaultExclude() map[schema.GroupResource]bool {
 	return map[schema.GroupResource]bool{
 		{Group: "events.k8s.io", Resource: "events"}:       true,
 		{Group: "coordination.k8s.io", Resource: "leases"}: true,
+		{Resource: "endpoints"}:                            true,
 	}
 }
 
@@ -129,6 +163,9 @@ func NewWatcher(cfg Config, disc discovery.DiscoveryInterface, dyn dynamic.Inter
 	}
 	if cfg.SecretsMode == "" {
 		cfg.SecretsMode = SecretsSkip
+	}
+	if cfg.CRDMode == "" {
+		cfg.CRDMode = CRDRedacted
 	}
 	if cfg.SecretsMode == SecretsSkip {
 		// a copy: the caller's map stays as given
@@ -298,10 +335,11 @@ func (w *Watcher) start(parent context.Context, gvr schema.GroupVersionResource)
 	ctx, cancel := context.WithCancel(parent)
 	inf := dynamicinformer.NewFilteredDynamicInformer(w.dyn, gvr, metav1.NamespaceAll, 0, cache.Indexers{}, nil).Informer()
 	// sanitize before the store keeps the object: Secret data is never
-	// held, and managedFields cost no memory
+	// held, and managedFields and redacted CRD schemas cost no memory
 	_ = inf.SetTransform(func(obj interface{}) (interface{}, error) {
 		if u, ok := obj.(*unstructured.Unstructured); ok {
 			Sanitize(gvr, u)
+			RedactCRD(gvr, u, w.cfg.CRDMode)
 		}
 		return obj, nil
 	})
@@ -424,5 +462,5 @@ func (c Config) String() string {
 		ex = append(ex, gr.String())
 	}
 	sort.Strings(ex)
-	return fmt.Sprintf("snapshot_interval=%s discovery_interval=%s exclude=%s secrets_mode=%s", c.SnapshotInterval, c.DiscoveryInterval, strings.Join(ex, ","), c.SecretsMode)
+	return fmt.Sprintf("snapshot_interval=%s discovery_interval=%s exclude=%s secrets_mode=%s crd_mode=%s", c.SnapshotInterval, c.DiscoveryInterval, strings.Join(ex, ","), c.SecretsMode, c.CRDMode)
 }

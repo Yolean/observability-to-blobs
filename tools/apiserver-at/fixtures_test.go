@@ -14,6 +14,23 @@ spec:
   scope: Namespaced
   names: {plural: widgets, singular: widget, kind: Widget, shortNames: [wg]}
   versions:
+  # a served version besides the storage version: from the blobs both are
+  # served without their schemas (crd_mode redacted)
+  - name: v1beta1
+    served: true
+    storage: false
+    additionalPrinterColumns:
+    - {name: Size, type: integer, jsonPath: .spec.size}
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            description: the old version
+            properties:
+              size: {type: integer}
+              color: {type: string}
   - name: v1
     served: true
     storage: true
@@ -22,6 +39,7 @@ spec:
     - {name: Color, type: string, jsonPath: .spec.color, priority: 1}
     - {name: Age, type: date, jsonPath: .metadata.creationTimestamp}
     subresources: {status: {}}
+    selectableFields: [{jsonPath: .spec.color}]
     schema:
       openAPIV3Schema:
         type: object

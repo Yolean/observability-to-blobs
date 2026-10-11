@@ -174,6 +174,7 @@ func (c *cluster) dump(t *testing.T, ctx context.Context, gvrs []schema.GroupVer
 			u := &l.Items[i]
 			if sanitize {
 				kobjects.Sanitize(g, u)
+				kobjects.RedactCRD(g, u, kobjects.CRDRedacted)
 			}
 			if g == secrets {
 				maskScrambled(t, u)
@@ -381,8 +382,13 @@ var ages = regexp.MustCompile(`\b(\d+d)?(\d+h)?(\d+m)?\d+[smhd]\b`)
 
 // timeless is kubectl output without ages, and without the column padding
 // that follows their widths.
+var resourceVersions = regexp.MustCompile(`(Resource Version:\s+)\d+`)
+
 func timeless(s string) string {
 	var out []string
+	// and without the resourceVersion, apiserver-at's own (K8SAGENT.md),
+	// which describe of a custom resource prints
+	s = resourceVersions.ReplaceAllString(s, "${1}<rv>")
 	for _, l := range strings.Split(ages.ReplaceAllString(s, "<age>"), "\n") {
 		out = append(out, strings.Join(strings.Fields(l), " "))
 	}
@@ -568,6 +574,11 @@ func TestAcceptance(t *testing.T) {
 				{"describe", "node", "node1"},
 				{"describe", "deployment", "-n", "app", "web"},
 				{"get", "pods,deploy,svc,ing,cm,secrets,widgets,events", "-A", "-o", "wide"},
+				// custom resources from a CRD without its schemas: printer
+				// columns, describe, and the version that is not stored
+				{"describe", "widget", "-n", "app", "w1"},
+				{"get", "widgets.v1beta1.example.com", "-A", "-o", "wide"},
+				{"get", "widgets", "-A", "--field-selector", "spec.color=red"},
 			} {
 				want := timeless(kubectl(t, assets, srcKubeconfig, args...))
 				got := timeless(kubectl(t, assets, atKubeconfig, args...))

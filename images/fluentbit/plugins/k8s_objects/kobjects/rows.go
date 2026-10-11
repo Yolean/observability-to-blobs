@@ -34,7 +34,9 @@ const (
 	KindSnapshot = "snapshot"
 )
 
-// RedactedAnnotation marks a Secret whose data values the agent scrambled.
+// RedactedAnnotation marks an object the agent changed: "data" on a Secret
+// whose values it scrambled, "schemas" or "schemas-except-storage" on a
+// CustomResourceDefinition whose schemas it replaced (RedactCRD).
 const RedactedAnnotation = "observability-to-blobs/redacted"
 
 // ScrambledPrefix starts every Secret value the agent ships. The rest is
@@ -170,4 +172,62 @@ func Scramble(n int) string {
 		}
 	}
 	return string(out)
+}
+
+// RedactCRD removes from a CustomResourceDefinition what is large and that
+// nothing read from the blobs needs: the versions' OpenAPI schemas (all of
+// them in CRDRedacted, all but the storage version's in CRDStorageSchema),
+// the conversion webhook's caBundle, and the last-applied-configuration
+// annotation, which holds the whole CRD again. A replaced schema is
+// PlaceholderSchema, which accepts any object, so an API server still
+// serves the custom resources: their objects as stored, with the CRD's
+// printer columns, subresources and conversion strategy, all of which are
+// kept, as are the names, scope, versions and status. It marks the CRD
+// with RedactedAnnotation. Other objects, and CRDFull, are left as they are.
+func RedactCRD(gvr schema.GroupVersionResource, u *unstructured.Unstructured, mode CRDMode) {
+	if mode == CRDFull || gvr.Group != "apiextensions.k8s.io" || gvr.Resource != "customresourcedefinitions" {
+		return
+	}
+	spec, _ := u.Object["spec"].(map[string]interface{})
+	versions, _ := spec["versions"].([]interface{})
+	for _, v := range versions {
+		ver, ok := v.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if storage, _ := ver["storage"].(bool); storage && mode == CRDStorageSchema {
+			continue
+		}
+		if _, ok := ver["schema"]; ok {
+			ver["schema"] = map[string]interface{}{"openAPIV3Schema": PlaceholderSchema()}
+		}
+	}
+	if conv, ok := spec["conversion"].(map[string]interface{}); ok {
+		if wh, ok := conv["webhook"].(map[string]interface{}); ok {
+			if cc, ok := wh["clientConfig"].(map[string]interface{}); ok {
+				delete(cc, "caBundle")
+			}
+		}
+	}
+	ann := u.GetAnnotations()
+	if ann == nil {
+		ann = map[string]string{}
+	}
+	delete(ann, "kubectl.kubernetes.io/last-applied-configuration")
+	ann[RedactedAnnotation] = "schemas"
+	if mode == CRDStorageSchema {
+		ann[RedactedAnnotation] = "schemas-except-storage"
+	}
+	u.SetAnnotations(ann)
+}
+
+// PlaceholderSchema is the schema RedactCRD leaves in place of a removed
+// one: a structural schema that accepts any object and says why it is
+// empty, for kubectl explain.
+func PlaceholderSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":                                 "object",
+		"x-kubernetes-preserve-unknown-fields": true,
+		"description":                          "Schema removed by the observability-to-blobs cluster agent (crd_mode).",
+	}
 }

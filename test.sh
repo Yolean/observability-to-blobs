@@ -527,6 +527,52 @@ message: an event about the node, from test.sh
 type: Normal
 source: {component: test.sh}
 YAML
+# A CRD of two versions with large schemas (crd_mode redacted ships
+# neither) and a custom resource of it, which apiserver-at must still list
+# with the CRD's printer columns
+BIG_DESCRIPTION=$(head -c 150000 /dev/zero | tr '\0' x)
+gadget_version() { # name storage
+  cat <<YAML
+  - name: $1
+    served: true
+    storage: $2
+    additionalPrinterColumns:
+    - {name: Size, type: integer, jsonPath: .spec.size}
+    - {name: Color, type: string, jsonPath: .spec.color, priority: 1}
+    - {name: Age, type: date, jsonPath: .metadata.creationTimestamp}
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            description: "$1 $BIG_DESCRIPTION"
+            properties:
+              size: {type: integer}
+              color: {type: string}
+YAML
+}
+$KUBECTL delete crd gadgets.itest.example.com --ignore-not-found >/dev/null
+{ cat <<YAML
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: {name: gadgets.itest.example.com}
+spec:
+  group: itest.example.com
+  scope: Namespaced
+  names: {plural: gadgets, singular: gadget, kind: Gadget}
+  versions:
+YAML
+  gadget_version v1alpha1 false
+  gadget_version v1 true
+} | $KUBECTL create -f - >/dev/null
+$KUBECTL wait --for condition=established crd/gadgets.itest.example.com --timeout=60s >/dev/null
+$KUBECTL apply -f - >/dev/null <<YAML
+apiVersion: itest.example.com/v1
+kind: Gadget
+metadata: {name: g1, namespace: default}
+spec: {size: 3, color: blue}
+YAML
 $KUBECTL delete configmap k8sagent-probe --ignore-not-found >/dev/null
 PROBE_0=$(utc_now)
 sleep 3
@@ -932,8 +978,11 @@ assert "built-in and custom resources are snapshotted, k3s's Addons included" \
      ('v1', 'services'), ('apps/v1', 'deployments'), ('apps/v1', 'daemonsets'), ('apps/v1', 'statefulsets'), ('batch/v1', 'jobs'),
      ('apiextensions.k8s.io/v1', 'customresourcedefinitions'), ('rbac.authorization.k8s.io/v1', 'clusterroles'),
      ('storage.k8s.io/v1', 'storageclasses'), ('k3s.cattle.io/v1', 'addons'))"
-assert "leases and events.k8s.io's copy of the events are not watched" \
-  "SELECT count(*) = 0 FROM apiserver WHERE resource = 'leases' OR api_version LIKE 'events.k8s.io/%'"
+assert "leases, events.k8s.io's copy of the events and the deprecated v1 endpoints are not watched" \
+  "SELECT count(*) = 0 FROM apiserver WHERE resource = 'leases' OR api_version LIKE 'events.k8s.io/%' OR (api_version = 'v1' AND resource = 'endpoints')"
+assert "EndpointSlices are watched, versitygw's among them" \
+  "SELECT count(*) > 0 FROM apiserver WHERE api_version = 'discovery.k8s.io/v1' AND resource = 'endpointslices' AND kind = 'object-snapshot'
+     AND json_extract_string(apijson, '\$.metadata.labels.\"kubernetes.io/service-name\"') = 'versitygw'"
 assert "every snapshot row counts the object rows of its snapshot" \
   "WITH n AS (SELECT api_version, resource, time, count(DISTINCT coalesce(namespace, '') || '/' || name) AS c
               FROM apiserver WHERE kind = 'object-snapshot' GROUP BY ALL)
@@ -941,6 +990,14 @@ assert "every snapshot row counts the object rows of its snapshot" \
 assert "configmaps are snapshotted at least twice at multiples of SNAPSHOT_INTERVAL (2m)" \
   "SELECT count(DISTINCT time) >= 2 FROM apiserver WHERE kind = 'snapshot' AND api_version = 'v1' AND resource = 'configmaps'
      AND minute(time) % 2 = 0 AND second(time) < 5 AND time > $SINCE"
+assert "CRDs ship without schemas (crd_mode redacted), marked" \
+  "SELECT count(*) > 0 AND bool_and(json_extract_string(apijson, '\$.metadata.annotations.\"observability-to-blobs/redacted\"') = 'schemas'
+     AND NOT contains(apijson, '\"properties\"')) FROM apiserver WHERE resource = 'customresourcedefinitions' AND apijson IS NOT NULL"
+assert "the gadgets CRD (two versions, 300 KB of schemas) ships in under 4 KB, both versions and their printer columns kept" \
+  "SELECT count(*) > 0 AND bool_and(length(apijson) < 4000 AND NOT contains(apijson, 'xxxxxxxxxx')
+     AND json_array_length(apijson, '\$.spec.versions') = 2
+     AND json_extract_string(apijson, '\$.spec.versions[1].additionalPrinterColumns[1].name') = 'Color')
+   FROM apiserver WHERE resource = 'customresourcedefinitions' AND name = 'gadgets.itest.example.com' AND apijson IS NOT NULL"
 assert "no object carries managedFields" \
   "SELECT count(*) > 0 AND bool_and(NOT contains(apijson, '\"managedFields\"')) FROM apiserver WHERE apijson IS NOT NULL"
 # every value of every Secret row, as (key, value) structs
@@ -1007,7 +1064,9 @@ at_stop() {
 at_kubectl() { kubectl --kubeconfig "$INIT.at.kubeconfig" "$@"; }
 # kubectl output without the ages it renders relative to now, and without
 # the column padding that follows their width
-timeless() { perl -pe 's/\b(\d+d)?(\d+h)?(\d+m)?\d+[smhd]\b/<age>/g; s/[ \t]+/ /g; s/ $//'; }
+# (and without the resourceVersion, apiserver-at's own, that describe of a
+# custom resource prints)
+timeless() { perl -pe 's/\b(\d+d)?(\d+h)?(\d+m)?\d+[smhd]\b/<age>/g; s/(Resource Version:\s+)\d+/$1<rv>/; s/[ \t]+/ /g; s/ $//'; }
 
 probe_is() { [ "$(at_kubectl get configmap k8sagent-probe -o jsonpath='{.data.v}' 2>&1)" = "$1" ]; }
 # (kubectl's output is captured first: it exits non-zero on these, which
@@ -1036,8 +1095,12 @@ LIVE_ARGS=(
   "get storageclasses"
   "get nodes -o wide"
   "get addons.k3s.cattle.io -A"
+  "get gadgets -A -o wide"
+  "get gadgets.v1alpha1.itest.example.com -A -o wide"
+  "describe gadget -n default g1"
   "get pods -l app=log-generator -o wide"
   "describe deployment log-generator"
+  "describe service versitygw"
 )
 i=0
 for a in "${LIVE_ARGS[@]}"; do
