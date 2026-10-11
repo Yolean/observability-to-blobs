@@ -24,6 +24,7 @@ type command struct {
 var commands = []command{
 	{"sql", "a DuckDB query over the views of a window (raw, logs, metrics, podindex, pods, apiserver, hourly_*, daily_*)", cmdSQL},
 	{"schema", "the views, or one view's columns and their meanings", cmdSchema},
+	{"kubectl", "kubectl against the cluster as it was at a time, read-only", cmdKubectl},
 	{"apiserver-at", "serve a state of objects (JSON lines of apiserver_at rows) to kubectl, read-only", func(_ context.Context, args []string) error {
 		cmdApiserverAt(args)
 		return nil

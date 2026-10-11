@@ -5,7 +5,9 @@
 > - `apiserver-at`;
 > - `sql` and `schema`, with static keys from the environment (as for
 >   `local/blobs.sh`) or `--blobs-dir`;
-> - `--out`, `--db` and `--attach` on `sql`.
+> - `--out`, `--db` and `--attach` on `sql`;
+> - `kubectl --at`, in-process: no duckdb CLI, temp files or go needed
+>   when `setup-envtest` or `KUBEBUILDER_ASSETS` provides the release.
 > The rest is design.
 
 `y-obs` is one local executable that answers the questions people (and
