@@ -592,7 +592,9 @@ func (s *session) planned() int {
 func (s *session) planSummary() string {
 	var parts []string
 	for _, v := range s.planViews() {
-		parts = append(parts, fmt.Sprintf("%s=%d", v, len(s.plan[v])))
+		if len(s.plan[v]) > 0 || v != "raw" || s.wplan == nil {
+			parts = append(parts, fmt.Sprintf("%s=%d", v, len(s.plan[v])))
+		}
 	}
 	return strings.Join(parts, " ")
 }

@@ -11,7 +11,11 @@ import (
 // runInvestigation runs a command's query over the window views of tables:
 // plan, budget, --explain, then the rows printed or kept with --out. ns
 // prunes the daily tier's namespace partitions.
-func runInvestigation(ctx context.Context, c *sessionCommand, args []string, tables []string, ns, query, outTable string, stdout, stderr io.Writer, now time.Time) error {
+func runInvestigation(ctx context.Context, c *sessionCommand, args []string, tables []string, ns, query, outTable string, stdout, stderr io.Writer, now time.Time, hooks ...hook) error {
+	var h hook
+	if len(hooks) > 0 {
+		h = hooks[0]
+	}
 	if c.of.db != "" {
 		return fail(exitUsage, "--db is for y-obs sql; to join a saved table with this command's rows, save them with --out and query both with sql")
 	}
@@ -80,8 +84,49 @@ func runInvestigation(ctx context.Context, c *sessionCommand, args []string, tab
 		return s.wrap(err)
 	}
 	s.summary(stderr, n, more, c.limit)
+	if h.cut != nil && n > 0 {
+		if note := h.cut(ctx, s, n); note != "" {
+			fmt.Fprintln(stderr, "y-obs: "+note)
+		}
+	}
 	if n == 0 {
+		if h.empty != nil {
+			if err := h.empty(ctx, s); err != nil {
+				return err
+			}
+		}
 		return &exitError{code: exitNoRows}
 	}
 	return nil
+}
+
+// hook lets a command say more than the generic runner: what a cut left
+// out, and why a result is empty (README.md, rules 1 and 5).
+type hook struct {
+	// cut returns a note when the command's own bound (logs --tail) left
+	// rows out, given the rows printed
+	cut func(ctx context.Context, s *session, printed int) string
+	// empty explains an empty result, for example with exit 4 and the
+	// names that do exist; nil error keeps exit 1
+	empty func(ctx context.Context, s *session) error
+}
+
+// strings runs a query of one text column.
+func (s *session) strings(ctx context.Context, q string) ([]string, error) {
+	rows, err := s.conn.QueryContext(ctx, q)
+	if err != nil {
+		return nil, s.wrap(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var v *string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		if v != nil {
+			out = append(out, *v)
+		}
+	}
+	return out, rows.Err()
 }
