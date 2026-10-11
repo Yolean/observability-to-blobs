@@ -168,6 +168,7 @@ type session struct {
 	db       *sql.DB
 	conn     *sql.Conn
 	root     string // s3://bucket or a local directory
+	local    string // the .duckdb file attached as local, if any
 	cluster  string
 	w        window
 	node     string
@@ -240,6 +241,20 @@ func openSession(ctx context.Context, f *sessionFlags, w window, st storeConfig)
 		}
 		init = append(init, stmts...)
 	}
+	if err := s.openEngine(ctx, init); err != nil {
+		return nil, err
+	}
+	var err error
+	if s.tmp, err = os.MkdirTemp("", "y-obs-"); err != nil {
+		s.close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// openEngine opens an in-memory engine with autoinstall and autoload
+// off, runs init on its connection, and pins that one connection.
+func (s *session) openEngine(ctx context.Context, init []string) error {
 	c, err := duckdb.NewConnector("", func(e driver.ExecerContext) error {
 		for _, q := range append([]string{"SET autoinstall_known_extensions = false", "SET autoload_known_extensions = false"}, init...) {
 			if _, err := e.ExecContext(ctx, q, nil); err != nil {
@@ -249,18 +264,14 @@ func openSession(ctx context.Context, f *sessionFlags, w window, st storeConfig)
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	s.db = sql.OpenDB(c)
 	if s.conn, err = s.db.Conn(ctx); err != nil {
 		s.db.Close()
-		return nil, s.wrap(err)
+		return s.wrap(err)
 	}
-	if s.tmp, err = os.MkdirTemp("", "y-obs-"); err != nil {
-		s.close()
-		return nil, err
-	}
-	return s, nil
+	return nil
 }
 
 func (s *session) close() {

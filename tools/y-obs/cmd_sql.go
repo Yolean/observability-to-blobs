@@ -22,6 +22,8 @@ Examples:
   y-obs sql --cluster prod --since 6h "SELECT namespace, pod, count(*) AS n FROM logs GROUP BY ALL ORDER BY n DESC"
   y-obs sql --cluster prod --from '2026-10-11 08:00' --to '2026-10-11 10:00' "SELECT * FROM hourly_pods WHERE exit_reason = 'OOMKilled'"
   y-obs sql --cluster prod --explain "SELECT count(*) FROM daily_logs"
+  y-obs sql --cluster prod --since 6h --out inv.duckdb:qa_logs "SELECT * FROM logs WHERE namespace = 'qa'"
+  y-obs sql --db inv.duckdb "SELECT pod, count(*) FROM qa_logs GROUP BY 1"
 
 Flags:
 `
@@ -30,6 +32,7 @@ Flags:
 type sessionCommand struct {
 	fs     *flag.FlagSet
 	sf     sessionFlags
+	of     outFlags
 	format string
 	limit  int
 }
@@ -37,6 +40,7 @@ type sessionCommand struct {
 func newSessionCommand(name, usage string, limit int) *sessionCommand {
 	c := &sessionCommand{fs: flag.NewFlagSet(name, flag.ContinueOnError)}
 	c.sf.register(c.fs)
+	c.of.register(c.fs)
 	c.fs.StringVar(&c.format, "format", "tsv", "output: "+strings.Join(formats, ", "))
 	c.fs.IntVar(&c.limit, "limit", limit, "print at most this many rows; 0 for all")
 	c.fs.Usage = func() {
@@ -104,27 +108,67 @@ func runSQL(ctx context.Context, args []string, stdout, stderr io.Writer, now ti
 		return fail(exitUsage, "sql takes one query, quoted; run y-obs sql -h")
 	}
 	query := c.fs.Arg(0)
-	w, err := c.sf.window(now)
-	if err != nil {
-		return fail(exitUsage, "%v", err)
+	limitSet := false
+	c.fs.Visit(func(f *flag.Flag) { limitSet = limitSet || f.Name == "limit" })
+	var target *outTarget
+	if c.of.out != "" {
+		t, err := parseOut(c.of.out, "result")
+		if err != nil {
+			return err
+		}
+		target = &t
 	}
-	s, err := openSession(ctx, &c.sf, w, storeFromEnv())
-	if err != nil {
-		return err
+	intoFile := func(f string) bool { return target != nil && target.format == "duckdb" && samePath(target.path, f) }
+	var s *session
+	if c.of.db != "" {
+		var err error
+		if s, err = openLocal(ctx, c.of.db, intoFile(c.of.db)); err != nil {
+			return err
+		}
+		defer s.close()
+	} else {
+		w, err := c.sf.window(now)
+		if err != nil {
+			return fail(exitUsage, "%v", err)
+		}
+		if s, err = openSession(ctx, &c.sf, w, storeFromEnv()); err != nil {
+			return err
+		}
+		defer s.close()
+		ref := referenced(query)
+		if err := s.prepare(ctx, ref, c.sf.maxObjects); err != nil {
+			return err
+		}
+		for _, msg := range s.warnings {
+			fmt.Fprintln(stderr, "y-obs: "+msg)
+		}
+		if c.sf.explain {
+			return s.printPlan(stdout)
+		}
+		if miss := s.missingViews(ref); len(miss) > 0 {
+			return fail(exitNoRows, "%s: no objects in the window %s; widen --since/--from/--to, or read the raw views for the last hours", strings.Join(miss, ", "), w)
+		}
+		if c.of.attach != "" {
+			if err := s.attachLocal(ctx, c.of.attach, intoFile(c.of.attach)); err != nil {
+				return err
+			}
+			s.local = c.of.attach
+		}
 	}
-	defer s.close()
-	ref := referenced(query)
-	if err := s.prepare(ctx, ref, c.sf.maxObjects); err != nil {
-		return err
-	}
-	for _, msg := range s.warnings {
-		fmt.Fprintln(stderr, "y-obs: "+msg)
-	}
-	if c.sf.explain {
-		return s.printPlan(stdout)
-	}
-	if miss := s.missingViews(ref); len(miss) > 0 {
-		return fail(exitNoRows, "%s: no objects in the window %s; widen --since/--from/--to, or read the raw views for the last hours", strings.Join(miss, ", "), w)
+	if target != nil {
+		q := query
+		if limitSet {
+			q = limited(query, c.limit)
+		}
+		n, err := s.writeOut(ctx, *target, q, c.of.append, commandLine("sql", args), stdout)
+		if err != nil {
+			return err
+		}
+		s.summary(stderr, int(n), false, 0)
+		if n == 0 {
+			return &exitError{code: exitNoRows}
+		}
+		return nil
 	}
 	rows, err := s.conn.QueryContext(ctx, query)
 	if err != nil {
@@ -149,6 +193,9 @@ func runSQL(ctx context.Context, args []string, stdout, stderr io.Writer, now ti
 // summary is the stderr line that says what was read (README.md, rule 4).
 func (s *session) summary(w io.Writer, n int, more bool, limit int) {
 	line := fmt.Sprintf("y-obs: cluster=%s window=%s objects %s rows=%d", s.cluster, s.w, s.planSummary(), n)
+	if s.cluster == "" {
+		line = fmt.Sprintf("y-obs: db=%s rows=%d", s.local, n)
+	}
 	if more {
 		line += fmt.Sprintf("; more rows than --limit %d: narrow the query (WHERE, a shorter window) or raise --limit", limit)
 	}

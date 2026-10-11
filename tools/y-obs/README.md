@@ -4,7 +4,8 @@
 > proposal to change freely. Built so far:
 > - `apiserver-at`;
 > - `sql` and `schema`, with static keys from the environment (as for
->   `local/blobs.sh`) or `--blobs-dir`.
+>   `local/blobs.sh`) or `--blobs-dir`;
+> - `--out`, `--db` and `--attach` on `sql`.
 > The rest is design.
 
 `y-obs` is one local executable that answers the questions people (and
@@ -124,7 +125,7 @@ y-obs [--context=NAME] <command> [flags]
 
 Shared flags: `--since=1h` | `--from=T --to=T` | `--at=T` (kubectl),
 `--namespace/-n`, `--limit`, `--format`, `--explain`, `--max-objects`,
-`--out=FILE.duckdb[:TABLE]`, `--db=FILE.duckdb`.
+`--out=FILE.duckdb[:TABLE]`, `--append`, `--db=FILE.duckdb`, `--attach=FILE.duckdb`.
 T is RFC 3339 or `2026-10-11 09:00`, always UTC.
 
 ### pods
@@ -241,7 +242,8 @@ y-obs sql --db inv.duckdb "SELECT pod, max(value) FROM mem GROUP BY 1"  # local 
 ```
 
 - **The table.** The table is named after the command (`pods`, `exits`,
-  `logs`, `grep`, `metrics_series`, `sql`) unless `:TABLE` names it.
+  `logs`, `grep`, `metrics_series`; `result` for `sql`) unless `:TABLE`
+  names it.
 - **Replace or append.** The table is replaced; `--append` adds rows to
   an existing table with the same columns instead.
 - **Typed rows, uncut.** The rows are typed as in the views, so times
@@ -257,14 +259,18 @@ y-obs sql --db inv.duckdb "SELECT pod, max(value) FROM mem GROUP BY 1"  # local 
   ```
 
 - **Provenance.** Each write adds a row to the file's `y_obs_runs`
-  table: the table, the command line, context, cluster, window, tiers,
-  `fresh-to`, rows, and the time written. A later reader can then see
+  table: the table, the mode (created, replaced or appended), the command
+  line, cluster, window, the objects read per view, the rows that run
+  wrote, and the time written. `fresh-to` joins them once the planner
+  knows upload times. A later reader can then see
   what a table covers and how fresh it was. Credentials are never
   written.
-- **Querying a file.** `--db FILE` makes `sql` (and `schema`) work on the
-  file alone. With `--db` and `--context` together, the file is attached
-  as `local`, so a query can join bucket views with saved tables. For
-  example: `pods` from the bucket against a list of uids saved earlier.
+- **Querying a file.** `--db FILE` makes `sql` work on the file alone,
+  its tables unqualified, whatever bucket settings the environment holds.
+  `--attach FILE` attaches the file as `local` beside the bucket's views,
+  so a query can join them. For example, `pods` from the bucket against
+  `local.uids`, saved earlier. Two flags, not one: a saved table named
+  `pods` must never shadow the bucket's view of that name, or the reverse.
 - **Other formats.** `--out` also takes `.parquet`, `.csv` and `.jsonl`,
   through DuckDB's COPY, for handing a result to another tool. The table
   name and `y_obs_runs` then do not apply.

@@ -87,8 +87,8 @@ y-obs sql --db $DB "SELECT * FROM y_obs_runs"           # what each table covers
 - `--out` prints the table's columns and a next-step query instead of
   rows.
 - `--append` adds to a table rather than replacing it.
-- `--db` together with `--context` joins saved tables (attached as
-  `local`) with the bucket's views.
+- `--attach $DB` instead of `--db $DB` keeps the bucket's views and adds
+  the file as `local`: `... --attach $DB "SELECT * FROM local.web1 JOIN pods USING (pod_uid)"`.
 - The file holds log lines. Delete it when the investigation is done.
 
 ## Investigation patterns
