@@ -45,9 +45,9 @@ Two things make this possible now:
 
 `tools/apiserver-at` becomes `tools/y-obs`:
 
-- Its server becomes the `kubectl` subcommand. It still downloads
-  kube-apiserver and etcd of the cluster's release on first use, into the
-  cache directory.
+- Its server becomes the `kubectl` subcommand, and stays as
+  `apiserver-at` for test.sh and `local/kubectl-at.sh`. kube-apiserver
+  and etcd of the cluster's release come from setup-envtest, as before.
 - It embeds DuckDB with `github.com/duckdb/duckdb-go/v2`, the version the
   compactor pins, so the SQL behaves the same as the compactor's.
 - It embeds the `.sql` view files with `go:embed`, so the binary needs no
@@ -55,8 +55,11 @@ Two things make this possible now:
 - It embeds the httpfs extension, sha256-pinned per platform as the
   compactor's `build.env` does. On first use the binary writes it to the
   cache directory and `LOAD`s it by path, with autoinstall off.
-- It reuses the stdlib S3 client (`images/blobs-to-prometheus/s3.go` with
-  `sigv4.go`) for listings and HEADs. DuckDB reads the objects.
+- **Not built yet.** It will reuse the stdlib S3 client
+  (`images/blobs-to-prometheus/s3.go` with `sigv4.go`, once merged) for
+  listings with upload times: `fresh-to`, and the clusters present in a
+  bucket. Until then DuckDB's glob lists, and DuckDB reads the
+  objects.
 
 **Release.** A tag `y-obs-v*` runs `.github/workflows/y-obs.yaml`. It
 builds four binaries, linux/amd64, linux/arm64, darwin/arm64 and
@@ -85,153 +88,202 @@ An agent calls `y-obs` many times per investigation, reads every byte of
 output into its context, and cannot see a progress bar. So:
 
 1. **Bounded by default.** Every command has a time window (default: the
-   last hour) and a row limit (default 100 lines, 50 rows). When
-   output is cut, the last line on stderr says so and how to narrow:
-   `y-obs: 412 more lines; add --grep, --container or --since, or raise --limit`.
-2. **Cost guard.** Before reading anything, `y-obs` plans the keys or
-   globs from the window, cluster, namespace and pod. If the plan exceeds
-   `--max-objects` (default 200), it refuses with exit 5 and prints the
-   plan. `--explain` prints the plan without reading: tier, keys, and
-   estimated requests.
-3. **Stable, parseable output.** `--format text|tsv|json|jsonl`. text is
-   the default for `logs` and `grep`, tsv for everything else. Columns
-   come in a fixed order with a header line. Timestamps are always UTC
-   RFC 3339 with nanoseconds. There is no colour, and none of the output
-   depends on terminal width.
+   last hour) and a bound:
+   - `pods` and `exits`: 50 rows;
+   - `logs --tail` and `grep`: 100 lines;
+   - `metrics names`: 200, `series` and `rate`: 500, `latest`: 100;
+   - `sql`: 100.
+
+   When output is cut, stderr says so and how to narrow:
+   `y-obs: 412 earlier lines not shown: --tail 0 for every line, or narrow with --grep, --since or a container`.
+2. **Cost guard.** Before reading anything, `y-obs` plans the objects
+   each view reads. If the plan exceeds `--max-objects` (default 200), it
+   refuses with exit 5 and the plan's counts. `--explain` prints the plan
+   without reading: the hours per tier and the objects per view.
+3. **Stable, parseable output.** `--format text|tsv|csv|json|jsonl`.
+   text is the default for `logs` and `grep`, tsv for everything else.
+   Columns come in a fixed order with a header line. Timestamps are
+   always UTC RFC 3339 with nine fractional digits. A MAP (labels) is
+   JSON in a cell. There is no colour, and none of the output depends on
+   terminal width.
 4. **Says where the data came from.** On exit, stderr gets one summary
-   line: `y-obs: tier=raw+hourly objects=37 requests=118 window=2026-10-11T08:00Z..09:12Z fresh-to=09:11:42Z`.
-   An agent can then tell an empty window from data not yet uploaded.
+   line:
+   `y-obs: cluster=prod window=2026-10-11T08:00:00Z..2026-10-11T10:00:00Z hours raw=1 hourly=1 objects hourly_logs=1 raw=40 rows=12`.
+   **Not built yet:** `fresh-to`, the newest upload, which needs upload
+   times from a listing (the stdlib S3 client).
 5. **Errors are one line with a next step**, plus documented exit codes:
    - 0: ok, results printed;
    - 1: ok, nothing matched;
    - 2: usage;
-   - 3: credentials (`run y-obs auth`);
-   - 4: not in the bucket (with the nearest match, for example the
-     container names that do exist);
+   - 3: credentials (the token command, the mint, or the store refusing
+     the key; also a cluster outside the credential's scope);
+   - 4: not in the bucket, with what is (the pod's containers, the
+     closest pod or metric names, DuckDB's "did you mean" for a view);
    - 5: the plan exceeds the budget;
-   - 6: the store failed.
+   - 6: the store or the engine failed.
 6. **Self-describing.**
-   - `y-obs help <command>` prints usage with three examples.
-   - `y-obs schema [table]` prints columns, types and one-line meanings,
-     taken from the comments in `raw.sql`.
+   - `y-obs <command> -h` (or `y-obs help <command>`) prints usage with
+     examples.
+   - `y-obs schema [view]` prints columns, types and one-line meanings,
+     from `raw.sql`'s comments or the view's own.
    - `y-obs help` lists the commands in the order an investigation uses
-     them.
+     them, with the exit codes.
 7. **Identity is the pod uid.** Names are reused by StatefulSets and
-   retries, so every row that names a pod also carries `pod_uid`. Any
-   command takes `--uid` to pin one incarnation.
-
-8. **Results can stay local.** Every command takes `--out FILE.duckdb`
-   and writes its rows into a table there instead of printing them. Later
+   retries, so every row that names a pod also carries `pod_uid`.
+   `pods`, `exits` and `logs` take `--uid` to pin one incarnation.
+8. **Results can stay local.** Every command that prints rows takes
+   `--out FILE.duckdb` and writes them into a table there instead. Later
    questions then run against that file, with no credentials, no budget
    and no bucket reads (below, "Output to a DuckDB file").
 
 ## Commands
 
 ```
-y-obs [--context=NAME] <command> [flags]
+y-obs <command> [flags]
 
-  pods      which pods ran: by namespace, name, label, node, phase, window
-  exits     why containers ended: exit code, reason, OOMKilled, eviction
-  logs      one pod's lines (all containers merged, or one container)
-  grep      a pattern across pods and hours, scoped by namespace/pod/window
-  metrics   names, series, rate, latest: every scraped sample, no allowlist
-  kubectl   kubectl against the cluster as it was at a time (read-only)
-  sql       a DuckDB query over the views, with the same budget guard
-  schema    tables, columns, meanings
-  auth      fetch or show the read credential (never prints the secret)
-  contexts  configured clusters and buckets
-  version
+  pods          which pods ran: one row per incarnation
+  exits         why containers ended: exit code, reason, the limits in force
+  logs          one pod's lines (all containers merged, or one), or a node's journal
+  grep          a pattern across pods and hours, scoped by namespace or name
+  metrics       names, series, rate, latest: every scraped sample, no allowlist
+  sql           a DuckDB query over the views, with the same budget guard
+  schema        views, columns, meanings
+  kubectl       kubectl against the cluster as it was at a time (read-only)
+  auth          get or show the read credential (never prints the secret)
+  contexts      the configured contexts and the clusters their credential covers
+  version       y-obs, DuckDB and Go versions, and where httpfs comes from
+  mint-stub     development only: a mint handing out static keys
+  apiserver-at  serve a state file to kubectl (what kubectl and the itest use)
 ```
 
-Shared flags: `--since=1h` | `--from=T --to=T` | `--at=T` (kubectl),
-`--namespace/-n`, `--limit`, `--format`, `--explain`, `--max-objects`,
-`--out=FILE.duckdb[:TABLE]`, `--append`, `--db=FILE.duckdb`, `--attach=FILE.duckdb`.
-T is RFC 3339 or `2026-10-11 09:00`, always UTC.
+Shared flags of the commands that read the bucket:
+
+- `--context`, `--cluster`, `--node`;
+- `--since=1h`, or `--from=T` and `--to=T`;
+- `--limit`, `--format`, `--explain`, `--max-objects`;
+- `--out=FILE.duckdb[:TABLE]`, `--append`, `--attach=FILE.duckdb`;
+- `--blobs-dir` (a local directory laid out like the bucket) and
+  `--parquet-keys-dir`.
+
+`sql` also takes `--db=FILE.duckdb`, and `kubectl` takes `--at=T`. T is
+RFC 3339 or `2026-10-11 09:00`, always UTC.
+
+**Which tier.** `pods`, `exits`, `logs`, `grep` and `metrics` read each
+hour of the window from exactly one tier. It is the hourly tier when the
+hour is final (more than the compactor's grace, at most 30 min, past its
+end), else raw when raw objects remain. A day that only the daily tier
+still has reads the daily tier. Rows are cut to the window by time. The
+summary line counts the hours per tier.
 
 ### pods
 
 ```
 y-obs pods -n qa --name '^build-' --since 6h
 y-obs pods --label app=gateway --at '2026-10-11 09:00'
-y-obs pods --node worker-3 --since 1d --phase Failed
+y-obs pods --node worker-3 --since 1d --phase failed
 ```
 
-This command gives one row per incarnation, from the `pods` view: hourly
-tier for complete hours, raw for the current one. Its columns:
+One row per incarnation (pod_uid), aggregated from the window's pods
+index:
 
 ```
-namespace  pod  pod_uid  node  started  ended  phase  restarts  last_exit
+namespace  pod  pod_uid  node  workload  owner_kind  started  ended  phase  restarts  last_exit  containers
 ```
 
-`--at` keeps the pods alive at that instant. Alive means started before
-it, and ended after it or not ended. A pod whose deletion was not seen
-counts as alive until one checkpoint interval after its last row, the
-gap rule. `--name` takes a RE2 pattern.
+- `workload` and `owner_kind` come from labels.
+- `phase` is running (no deletion seen), succeeded, failed or unknown.
+- `started` is the earliest sandbox start seen in the window.
+- `ended` is the deletion seen, empty when none was.
+
+Filters: `-n`, `--name` (RE2), `--label k=v` (repeatable), `--node`,
+`--uid`, `--workload` and `--phase`.
+
+`--at` keeps the pods alive at that instant: started by then, and ended
+after it, or, with no deletion seen, seen in the hour before it (the gap
+rule). The window then defaults to T±1h.
 
 ### exits
 
 ```
 y-obs exits -n qa --since 1d
 y-obs exits --reason OOMKilled --since 7d
-y-obs exits --uid 3f2a...
+y-obs exits --uid 3f2a... --failed
 ```
 
-This lists `container-exit` rows from podindex: time, namespace, pod,
-pod_uid, container, restart, exit_code, exit_reason and exit_message. For
-the limits in force at the exit, it joins memory_limit and cpu_quota
-from the container rows.
+The `container-exit` rows of the window's podindex, newest first, each
+once:
+
+- time, namespace, pod, pod_uid, container, restart, exit_code,
+  exit_reason and exit_message;
+- memory_limit and cpu_quota from that run's container row, and the
+  node.
 
 ### logs
 
 ```
 y-obs logs ci build-abc-verify-pod step-verify --tail 200
 y-obs logs ops bot-xyz --grep error --since 3h --timestamps
-y-obs logs qa web-1 --uid 3f2a... --restart 2
+y-obs logs qa web-1 --uid 3f2a... --previous
 ```
 
-The arguments are those of the logs API and its CLI: `--tail`, applied
-after grep, `--grep` (substring, or `^`prefix), `--timestamps`,
-`--prefix` and `--ansi=strip`. On top of those:
+The arguments are those of the logs API and its CLI, with the same line
+format: `--tail`, applied after grep (default 100, 0 for all), `--grep`
+(substring, or `^`prefix), `--timestamps`, `--prefix` and
+`--ansi=strip`. On top of those:
 
 - `--since`, `--from` and `--to` set a time window, which the API never
   had.
 - `--uid` and `--restart` pick an incarnation and a run.
-- `--previous` picks the run before the last restart.
+- `--previous` picks the run before each container's latest.
+- `--format jsonl` gives time, container, restart, pod_uid and message
+  as fields.
 
-Journal rows use the namespace `_node` with the node as pod, for example
-`y-obs logs _node worker-3 --grep kubelet`.
+Journal rows use the namespace `_node`, with the node as pod and the unit
+as container: `y-obs logs _node worker-3 kubelet.service --grep error`.
+An unknown container or pod is exit 4, with the pod's containers or the
+namespace's closest pods.
 
 ### grep
 
 ```
 y-obs grep 'connection reset' -n qa --since 2h
 y-obs grep 'OutOfMemory' --name '^gateway-' --since 1d --count
+y-obs grep 'timeout|refused' --regex -i -n qa --since 6h
 ```
 
-It searches log content across pods. It needs `-n` or `--name`; with
-neither, the plan covers the whole cluster and normally hits the cost
-guard. It prints matching lines prefixed `[ns/pod/container]`. With
-`--count` it prints matches per pod instead, which is the cheap first
-pass before reading lines.
+It searches log content across pods: a substring, or an RE2 expression
+with `--regex`, `-i` for either. Without `-n` or `--name` the plan
+covers the whole cluster and usually meets the cost guard.
+
+- **Lines.** It prints the newest `--limit` matches oldest first,
+  prefixed `[ns/pod/container] TIMESTAMP`.
+- **Counts.** `--count` prints matches per pod and container run with
+  the first and last, the cheap first pass.
 
 ### metrics
 
 ```
 y-obs metrics names -n qa --pod '^web-'
-y-obs metrics series container_memory_working_set_bytes --pod web-1 --since 6h --step 1m
+y-obs metrics series container_memory_working_set_bytes --pod '^web-1$' --since 6h --step 1m
 y-obs metrics rate http_requests_total -n qa --by code --since 1h --step 5m
 y-obs metrics latest up --where job=pod --value 0
 ```
 
 Every scraped sample is in the bucket, so there is no allowlist and no
-90-minute cliff: history is the bucket's retention. The subcommands:
+90-minute cliff: history is the bucket's retention. A series is one
+target (pod_uid, container, instance) and label set. The subcommands:
 
-- `series` gives samples, bucketed by `--step` (last value per step).
-- `rate` gives the per-second increase with counter resets handled, the
-  same as PromQL's `rate()`.
-- `latest` gives the latest sample per series.
-- `--where label=value` filters on labels and `--by label,...` groups
-  by them.
+- `names` gives the metric names with type, series, samples and last.
+- `series` gives the last value of each series per `--step` (default 1m).
+- `rate` gives the per-second increase per `--step` (default 5m). A drop
+  is a counter reset counted from zero, as PromQL's `rate()` does.
+- `latest` gives the newest sample per series; `--value` keeps series
+  at a value.
+
+`--where key=value` and `--by key,...` take labels or the namespace,
+pod, pod_uid, container, node, job and instance columns. `--agg` (sum,
+avg, max, min) combines the series sharing the `--by` keys. An unknown
+name is exit 4, with the closest names in the window.
 
 PromQL itself is out of scope here. `local/README.md`'s Prometheus plus
 blobs-to-prometheus stack serves it from the same bucket.
@@ -241,10 +293,19 @@ blobs-to-prometheus stack serves it from the same bucket.
 ```
 y-obs kubectl --at '2026-10-11 09:00' -- get pods -A
 y-obs kubectl --at '2026-10-11 09:00' -- describe deploy -n qa web
+y-obs kubectl --at '2026-10-11 11:58' --source raw -- get events -n qa
 ```
 
-This is `local/kubectl-at.sh` as a subcommand: apiserver-at over
-`apiserver_at(T)`, with the kubeconfig in a temporary directory.
+This is `local/kubectl-at.sh` as a subcommand, in-process: `apiserver_at(T)`
+in the embedded engine, the state served by apiserver-at, with the
+kubeconfig in a temporary directory.
+
+- **Objects.** They come from the hourly tier (T's hour and the two
+  before), else the daily tier (T's day and the day before), or the raw
+  tier with `--source raw`.
+- **The release.** kube-apiserver and etcd are the cluster's release at
+  T: `--assets`, `KUBEBUILDER_ASSETS`, or setup-envtest.
+- **Without kubectl arguments** it serves and prints the `KUBECONFIG`.
 
 ### Output to a DuckDB file
 
@@ -421,14 +482,19 @@ of y-obs, so the deployment documents it.
 
 ## Order of work
 
-1. Turn `apiserver-at` into `y-obs`: embedded DuckDB, embedded SQL, and
-   the `sql`, `schema` and `kubectl` subcommands, using static keys from
-   the environment. The itest calls `y-obs sql` in place of the duckdb
-   CLI for a few assertions, so the binary is tested.
-2. Add `pods`, `exits`, `logs` and `grep`, with the planner, budget and
-   output rules. Then `metrics`.
-3. Add the release workflow, then the `y-bin` entry.
-4. Build the credential mint for the chosen store, then `auth` and the
-   contexts.
-5. Replace the consuming repositories' log, pod-index and metrics skills
-   with `SKILL.md` from this directory.
+1. Done: `apiserver-at` became `y-obs`, with embedded DuckDB and SQL,
+   and `sql`, `schema` and `kubectl`. The itest runs `y-obs
+   apiserver-at`. Using `y-obs sql` in place of the duckdb CLI in some
+   itest assertions is still to do.
+2. Done: the window planner, then `pods`, `exits`, `logs`, `grep` and
+   `metrics`, each with its rules for LLM callers.
+3. Done: the release workflow and `release.sh`. The `y-bin` entry
+   follows the first release, whose checksums it pins.
+4. Done with a stub: contexts, `auth`, the cache and renewal, and
+   `mint-stub`. The real mint waits for the decisions in "Credentials".
+5. To do once a cluster's bucket has a context: replace the consuming
+   repositories' log, pod-index and metrics skills with `SKILL.md` from
+   this directory. Until then those skills read the archive y-obs does
+   not.
+6. To do: `fresh-to` and the clusters of a bucket, with the stdlib S3
+   client.

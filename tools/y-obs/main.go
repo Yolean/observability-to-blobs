@@ -54,6 +54,10 @@ Exit codes: 0 rows printed, 1 nothing matched, 2 usage, 3 credentials,
 `
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "help" {
+		// y-obs help <command> is <command> -h
+		os.Args = []string{os.Args[0], os.Args[2], "-h"}
+	}
 	if len(os.Args) < 2 || os.Args[1] == "help" || os.Args[1] == "-h" || os.Args[1] == "--help" {
 		printUsage(os.Stdout)
 		return

@@ -30,11 +30,12 @@ anything older.
 
 ## Reading the output
 
-- The last stderr line is a summary:
-  `y-obs: tier=... objects=... window=... fresh-to=...`. Read it before
-  you conclude anything from an empty result.
-  - `fresh-to` is the newest upload. An event after it is not in the
-    bucket yet: wait 30–60 s and ask again.
+- stderr ends with a summary line:
+  `y-obs: cluster=... window=... hours raw=1 hourly=5 objects ... rows=N`.
+  Read it before you conclude anything from an empty result.
+  - It names the window actually read and the tier of each hour. The
+    raw tier lags production by 30–60 s, so an event in the last minute
+    may not be there yet: ask again.
   - Exit code 1 means the window was read and nothing matched. That is
     evidence of absence for that window only.
 - A cut result says so on stderr, with how to narrow it. Narrow first:
@@ -50,25 +51,25 @@ anything older.
 ## Commands
 
 ```bash
-y-obs pods -n qa --name '^web-' --since 6h            # incarnations: pod_uid, node, started, ended, phase, restarts, last_exit
+y-obs pods -n qa --name '^web-' --since 6h            # incarnations: pod_uid, node, workload, started, ended, phase, restarts, last_exit
 y-obs pods --label app=gateway --at '2026-10-11 09:00' # alive at an instant
 y-obs exits -n qa --since 1d                           # exit_code, exit_reason, exit_message, limits in force
 y-obs exits --reason OOMKilled --since 7d
 y-obs logs qa web-1 --tail 200 --timestamps            # all containers merged by time
 y-obs logs qa web-1 app --grep error --since 3h
 y-obs logs qa web-1 --uid <pod_uid> --previous         # the run before the last restart
-y-obs logs _node worker-3 --grep kubelet               # the node's journal
+y-obs logs _node worker-3 kubelet.service --grep error # the node's journal, one unit
 y-obs grep 'connection reset' -n qa --since 2h --count # matches per pod, cheap
 y-obs metrics names -n qa --pod '^web-'
-y-obs metrics series container_memory_working_set_bytes --pod web-1 --since 6h --step 1m
+y-obs metrics series container_memory_working_set_bytes --pod '^web-1$' --since 6h --step 1m
 y-obs metrics rate http_requests_total -n qa --by code --since 1h --step 5m
 y-obs kubectl --at '2026-10-11 09:00' -- get deploy -n qa -o yaml
-y-obs sql "SELECT ..." -n qa --since 1h                # views: y-obs schema
+y-obs sql "SELECT ..." --since 1h                     # views: y-obs schema
 ```
 
-`--format json` or `jsonl` gives machine-readable rows. Default output is
-plain text for `logs` and `grep`, and TSV with a header for everything
-else.
+`--format json`, `jsonl` or `csv` gives machine-readable rows. Default
+output is plain text for `logs` and `grep`, and TSV with a header for
+everything else. `y-obs <command> -h` has every flag and examples.
 
 ## Keep results in a local DuckDB file
 
@@ -79,9 +80,9 @@ bucket.
 ```bash
 DB=$SCRATCH/inv.duckdb                                  # a scratch dir, never the repo
 y-obs pods -n qa --since 1d --out $DB                   # table pods
-y-obs logs qa web-1 --since 6h --limit 0 --out $DB:web1 # table web1, every line
+y-obs logs qa web-1 --since 6h --tail 0 --out $DB:web1 # table web1, every line
 y-obs sql --db $DB "SELECT * FROM web1 WHERE message ILIKE '%timeout%' ORDER BY time"
-y-obs sql --db $DB "SELECT * FROM y_obs_runs"           # what each table covers, how fresh
+y-obs sql --db $DB "SELECT * FROM y_obs_runs"           # what each table covers
 ```
 
 - `--out` prints the table's columns and a next-step query instead of
@@ -107,7 +108,9 @@ around the exit time.
 **An OOM postmortem.** `metrics series container_memory_working_set_bytes`
 over the pod's whole lifetime separates a ramp (leak) from a plateau that
 spikes (an undersized limit). Every sample is kept, so this works days
-later too.
+later too, provided the cluster scrapes cAdvisor: check with
+`metrics names --match '^container_memory'`, since exit 4 only says the
+name is absent.
 
 **A timeout or error spike.** Start with `metrics rate` on the relevant
 counter, `--by` the label that matters. Counters beat quantiles at low
@@ -115,8 +118,9 @@ volume. Then `grep --count` over the window to find which pods logged
 it, then `logs` on one of them.
 
 **Something changed.** `kubectl --at` before and after, then diff the
-two outputs. A resource absent at T can mean "unknown" when the agent had
-no complete snapshot by then; the command says which.
+two outputs. A resource with no complete snapshot by T is missing from
+the answer, which then means unknown, not empty. A time before the
+agent's first snapshot is exit 1.
 
 ## Traps
 
