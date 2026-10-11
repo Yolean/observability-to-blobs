@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # kubectl against a cluster as it was at a time, from the bucket alone
 # (K8SAGENT.md, "Reading"): local/apiserver_at.sql over the cluster agent's
-# objects, served read-only by tools/apiserver-at.
+# objects, served read-only by tools/y-obs (apiserver-at).
 #
 #   local/kubectl-at.sh itest '2026-10-07 10:12:00' get pods -A    # one command
 #   local/kubectl-at.sh itest '2026-10-07 10:12:00' describe pod -n app web-1
@@ -127,10 +127,10 @@ if [ -z "${KUBEBUILDER_ASSETS:-}" ]; then
   KUBEBUILDER_ASSETS=$(GOFLAGS='' go run "sigs.k8s.io/controller-runtime/tools/setup-envtest@$SETUP_ENVTEST" use "$minor.x" -p path)
   export KUBEBUILDER_ASSETS
 fi
-BIN=$ROOT/target/bin/apiserver-at
-(cd "$ROOT/tools/apiserver-at" && go build -o "$BIN" .)
+BIN=$ROOT/target/bin/y-obs
+(cd "$ROOT/tools/y-obs" && go build -o "$BIN" .)
 
-"$BIN" -objects "$WORK/state.jsonl" -kubeconfig "$WORK/kubeconfig" -context "$CLUSTER-at" -label "$AT UTC" >"$WORK/serve.log" 2>&1 &
+"$BIN" apiserver-at -objects "$WORK/state.jsonl" -kubeconfig "$WORK/kubeconfig" -context "$CLUSTER-at" -label "$AT UTC" >"$WORK/serve.log" 2>&1 &
 AT_PID=$!
 until grep -q '^serving ' "$WORK/serve.log"; do
   kill -0 "$AT_PID" 2>/dev/null || { cat "$WORK/serve.log" >&2; exit 1; }

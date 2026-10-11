@@ -1,4 +1,4 @@
-module github.com/Yolean/observability-to-blobs/tools/apiserver-at
+module github.com/Yolean/observability-to-blobs/tools/y-obs
 
 go 1.26.0
 

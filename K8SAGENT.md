@@ -166,7 +166,7 @@ snapshot at or before `t`. Complete means its `snapshot` row exists. A
 snapshot cut off by a crash has no `snapshot` row and is never a base.
 The events after the base and up to `t` are laid over it, and for each
 object the latest row wins. The rules this gives, asserted on crafted rows
-in `tools/apiserver-at/asof_test.go`:
+in `tools/y-obs/asof_test.go`:
 
 - an object deleted while the agent was down disappears at the first
   snapshot without it, the restart's
@@ -184,7 +184,7 @@ can sit in the object opened a few seconds before that hour. So a time
 just after a full hour, whose base is the previous full hour's snapshot,
 may find it two hours back.
 
-`tools/apiserver-at` serves such a state to kubectl. It loads the objects
+`y-obs apiserver-at` (`tools/y-obs`) serves such a state to kubectl. It loads the objects
 into a new etcd under kube-apiserver's own key layout (`registry.go`,
 checked against a real API server's etcd by the acceptance test), and
 starts a stock kube-apiserver on it, using setup-envtest's binaries at the
@@ -246,9 +246,9 @@ What apiserver-at shows differently from the cluster at that time:
 | test | what |
 |---|---|
 | `kobjects` units (fake clients) | snapshot rows then the snapshot row, no initial-list events, changes in all namespaces, a requested snapshot, Secret values scrambled on every row (empty ones kept empty), Secrets not watched unless secrets_mode is scrambled, CRD schemas, caBundle and applied manifest removed in each crd_mode and nothing else changed, CRD rows redacted by default, discovery filtering, snapshot alignment |
-| `tools/apiserver-at` `TestLoadLargeObjects` | objects of 1.2 MiB among small ones load into etcd |
-| `tools/apiserver-at` `TestObjectsAt` | `apiserver_at` over crafted raw rows, through `raw.sql` and `tables.sql` |
-| `tools/apiserver-at` `TestAcceptance` | a real API server as the source. The watcher's rows go through the SQL to apiserver-at. Every object of the 62 resources is equal at a past time and at the present, the CRD with its schemas redacted. At the present, the server-side Tables of all of them are equal, as is `kubectl describe` of a pod, a node, a deployment and a custom resource, and `kubectl get` of the custom resources at the version that is not stored. The source's etcd keys are the keys apiserver-at writes. A write is refused. A NodePort Service gets no `PortNotAllocated` Event. About 40 s, part of `./test.sh checks` |
+| `tools/y-obs` `TestLoadLargeObjects` | objects of 1.2 MiB among small ones load into etcd |
+| `tools/y-obs` `TestObjectsAt` | `apiserver_at` over crafted raw rows, through `raw.sql` and `tables.sql` |
+| `tools/y-obs` `TestAcceptance` | a real API server as the source. The watcher's rows go through the SQL to apiserver-at. Every object of the 62 resources is equal at a past time and at the present, the CRD with its schemas redacted. At the present, the server-side Tables of all of them are equal, as is `kubectl describe` of a pod, a node, a deployment and a custom resource, and `kubectl get` of the custom resources at the version that is not stored. The source's etcd keys are the keys apiserver-at writes. A write is refused. A NodePort Service gets no `PortNotAllocated` Event. About 40 s, part of `./test.sh checks` |
 | `./test.sh` itest | the cluster agent in k3s, through out_s3 and the compactor: its keys and lines, built-in and custom resources snapshotted at the scheduled interval, snapshot counts, no managedFields, Secret values scrambled to a tenth of their length and no Secret data anywhere, Events of all namespaces including one about the Node, three pod incarnations, the apiserver tier equal to raw hourly and daily, CRDs without schemas (a two-version CRD with 300 KB of schemas in under 4 KB, printer columns kept). Then kubectl through apiserver-at: a ConfigMap before its creation, at each of its two values, after its deletion, and seventeen `kubectl get`/`describe` outputs equal to the live cluster's, three of them of that CRD's custom resources |
 
 ## Measured

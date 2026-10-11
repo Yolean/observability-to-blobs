@@ -35,7 +35,7 @@
 #                        the other itest's cluster.
 #   IMAGE_BUILD_ARGS     extra docker buildx flags, e.g. a CI cache
 #   KUBEBUILDER_ASSETS   etcd, kube-apiserver and kubectl at ENVTEST_K8S for
-#                        tools/apiserver-at's tests (default: setup-envtest
+#                        tools/y-obs's tests (default: setup-envtest
 #                        downloads them; the itest's are the cluster's release)
 #   IMAGE_BUILDER        docker (default when docker is installed), buildkit
 #                        (buildctl against BUILDKIT_HOST) or cluster (buildctl
@@ -100,7 +100,7 @@ port_free() {
 need() {
   command -v "$1" >/dev/null 2>&1 || fail "missing tool: $1 ($2)"
 }
-# The Kubernetes release of the API servers in tools/apiserver-at's
+# The Kubernetes release of the API servers in tools/y-obs's
 # acceptance test, the source and apiserver-at both. The itest's
 # apiserver-at runs the itest cluster's own release instead (at_assets).
 ENVTEST_K8S=1.37.0
@@ -155,12 +155,12 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
   phase "checks: shell"
   shellcheck -x -P SCRIPTDIR test.sh compactor/build.sh local/kubectl-at.sh operator-to-annotations/crds/vendor.sh
 
-  # tools/apiserver-at's acceptance test runs a source API server, the
+  # tools/y-obs's acceptance test runs a source API server, the
   # watcher, compactor/sql/ in DuckDB and apiserver-at
   need duckdb "https://duckdb.org/docs/installation/"
   envtest_assets
   for mod in images/fluentbit/plugins/cri_scrape images/fluentbit/plugins/k8s_objects images/blobs-to-prometheus \
-    images/operator-to-annotations tools/rules-manifest tools/apiserver-at; do
+    images/operator-to-annotations tools/rules-manifest tools/y-obs; do
     phase "checks: go ($mod)"
     (
       cd "$mod"
@@ -1177,7 +1177,7 @@ assert "pod 'reused': three incarnations added, the first two deleted" \
 
 # kubectl at a time, from the raw tier alone: apiserver-at, a stock
 # kube-apiserver at the cluster's release over etcd holding apiserver_at(t)
-phase "assert: kubectl at a time (tools/apiserver-at)"
+phase "assert: kubectl at a time (y-obs apiserver-at)"
 # apiserver-at at the cluster's own release: another release's API server
 # prints other columns, and its RBAC bootstrap adds its release's system
 # roles to the state (seen: 1.37 against a 1.35 cluster, 2026-10-07)
@@ -1186,7 +1186,7 @@ AT_K8S=$($KUBECTL version -o json | jq -r .serverVersion.gitVersion | sed -E 's/
 AT_ASSETS=$(GOFLAGS='' go run "sigs.k8s.io/controller-runtime/tools/setup-envtest@$SETUP_ENVTEST" use "$AT_K8S" -p path) \
   || fail "setup-envtest could not provide Kubernetes $AT_K8S"
 echo "  apiserver-at runs Kubernetes $AT_K8S: $AT_ASSETS"
-(cd tools/apiserver-at && go build -o ../../target/bin/apiserver-at .) || fail "build tools/apiserver-at"
+(cd tools/y-obs && go build -o ../../target/bin/y-obs .) || fail "build tools/y-obs"
 # at_serve <UTC time>: apiserver-at serving the raw tier's objects as they
 # were then, in the background, reached with at_kubectl
 at_serve() {
@@ -1194,7 +1194,7 @@ at_serve() {
   q "COPY (SELECT api_version, resource, namespace, name, apijson FROM apiserver_at(TIMESTAMP_NS '$1')) TO '$INIT.at.jsonl' (FORMAT json)" >/dev/null \
     || fail "apiserver_at($1)"
   rm -f "$INIT.at.kubeconfig"
-  target/bin/apiserver-at -assets "$AT_ASSETS" -objects "$INIT.at.jsonl" -kubeconfig "$INIT.at.kubeconfig" -label "$1" >"$INIT.at.log" 2>&1 &
+  target/bin/y-obs apiserver-at -assets "$AT_ASSETS" -objects "$INIT.at.jsonl" -kubeconfig "$INIT.at.kubeconfig" -label "$1" >"$INIT.at.log" 2>&1 &
   AT_PID=$!
   local deadline=$((SECONDS + 120))
   until grep -q '^serving ' "$INIT.at.log"; do
