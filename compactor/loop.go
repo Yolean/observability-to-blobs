@@ -171,7 +171,7 @@ func (c *compactor) rollupJob(ctx context.Context, day time.Time, timeout time.D
 	if len(r.hours) > 0 {
 		c.log.Info("rollup", "day", day.Format(dateLayout), "hours", len(r.hours), "namespaces", r.namespaces,
 			"logs", r.rows["logs"], "metrics", r.rows["metrics"], "podindex", r.rows["podindex"], "pods", r.rows["pods"], "apiserver", r.rows["apiserver"],
-			"seconds", time.Since(start).Seconds())
+			"runs", r.runs, "seconds", time.Since(start).Seconds())
 	}
 	return r, nil
 }
