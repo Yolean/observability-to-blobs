@@ -1,7 +1,11 @@
 # y-obs: the bucket as the only observability backend (draft)
 
-> Draft for review. Nothing here is built yet. Open decisions are marked
-> **Decide**; the rest is a proposal to change freely.
+> Draft for review. Open decisions are marked **Decide**; the rest is a
+> proposal to change freely. Built so far:
+> - `apiserver-at`;
+> - `sql` and `schema`, with static keys from the environment (as for
+>   `local/blobs.sh`) or `--blobs-dir`.
+> The rest is design.
 
 `y-obs` is one local executable that answers the questions people (and
 LLM agents) ask during an investigation: which pods ran, why one died,

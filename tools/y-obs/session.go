@@ -1,0 +1,615 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/duckdb/duckdb-go/v2"
+	"github.com/klauspost/compress/zstd"
+)
+
+// The tables of the hourly and daily tiers (compactor/README.md,
+// "Compaction"); logs and metrics are partitioned by namespace in the
+// daily tier, the others are one object per day.
+var tierTables = []string{"logs", "metrics", "podindex", "pods", "apiserver"}
+
+func dailyPartitioned(t string) bool { return t == "logs" || t == "metrics" }
+
+// The views over the raw tier, all of which read raw (tables.sql,
+// pods.sql). apiserver_at is the macro of apiserver_at.sql.
+var rawViews = []string{"raw", "logs", "metrics", "podindex", "apiserver", "pods", "apiserver_at"}
+
+// window is the time range a command reads, UTC, from inclusive.
+type window struct{ from, to time.Time }
+
+// hours are the UTC hours the window touches, oldest first.
+func (w window) hours() []time.Time {
+	var hs []time.Time
+	for h := w.from.Truncate(time.Hour); h.Before(w.to); h = h.Add(time.Hour) {
+		hs = append(hs, h)
+	}
+	return hs
+}
+
+// days are the UTC dates the window touches, oldest first.
+func (w window) days() []string {
+	var ds []string
+	for d := w.from.Truncate(24 * time.Hour); d.Before(w.to); d = d.Add(24 * time.Hour) {
+		ds = append(ds, d.Format("2006-01-02"))
+	}
+	return ds
+}
+
+func (w window) String() string {
+	return w.from.Format("2006-01-02T15:04:05Z") + ".." + w.to.Format("2006-01-02T15:04:05Z")
+}
+
+// sessionFlags are the flags every command that reads the bucket shares.
+type sessionFlags struct {
+	cluster, node, since, from, to, blobsDir, keysDir string
+	maxObjects                                        int
+	explain                                           bool
+}
+
+func (f *sessionFlags) register(fs *flag.FlagSet) {
+	fs.StringVar(&f.cluster, "cluster", os.Getenv("CLUSTER_NAME"), "the cluster, the first key segment of every tier (env CLUSTER_NAME)")
+	fs.StringVar(&f.node, "node", "", "read only this node's raw objects")
+	fs.StringVar(&f.since, "since", "1h", "the window: this long back from now, or from --from (30m, 6h, 2d)")
+	fs.StringVar(&f.from, "from", "", "window start, UTC: 2026-10-11T09:00:00Z or '2026-10-11 09:00'")
+	fs.StringVar(&f.to, "to", "", "window end, UTC; default now, or --from plus --since")
+	fs.StringVar(&f.blobsDir, "blobs-dir", os.Getenv("BLOBS_DIR"), "read a local directory laid out like the bucket instead of S3 (env BLOBS_DIR)")
+	fs.StringVar(&f.keysDir, "parquet-keys-dir", os.Getenv("PARQUET_KEYS_DIR"), "key files for encrypted tiers, as the compactor mounts them (env PARQUET_KEYS_DIR)")
+	fs.IntVar(&f.maxObjects, "max-objects", 200, "refuse a plan that reads more objects than this")
+	fs.BoolVar(&f.explain, "explain", false, "print the plan, the objects each view would read, and read nothing")
+}
+
+// parseTime takes RFC 3339 or "2006-01-02 15:04[:05]", always UTC.
+func parseTime(s string) (time.Time, error) {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05", "2006-01-02 15:04", "2006-01-02T15:04:05", "2006-01-02T15:04", "2006-01-02"} {
+		if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil {
+			return t.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("%q is not a time: use 2026-10-11T09:00:00Z or '2026-10-11 09:00' (UTC)", s)
+}
+
+// parseSince is time.ParseDuration plus days: 2d, 1d12h.
+func parseSince(s string) (time.Duration, error) {
+	if m := regexp.MustCompile(`^(\d+)d(.*)$`).FindStringSubmatch(s); m != nil {
+		days, _ := strconv.Atoi(m[1])
+		rest := time.Duration(0)
+		if m[2] != "" {
+			var err error
+			if rest, err = time.ParseDuration(m[2]); err != nil {
+				return 0, fmt.Errorf("--since %q: %v", s, err)
+			}
+		}
+		return time.Duration(days)*24*time.Hour + rest, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("--since %q: use 30m, 6h or 2d", s)
+	}
+	return d, nil
+}
+
+func (f *sessionFlags) window(now time.Time) (window, error) {
+	since, err := parseSince(f.since)
+	if err != nil {
+		return window{}, err
+	}
+	var w window
+	switch {
+	case f.from != "" && f.to != "":
+		if w.from, err = parseTime(f.from); err != nil {
+			return w, err
+		}
+		if w.to, err = parseTime(f.to); err != nil {
+			return w, err
+		}
+	case f.from != "":
+		if w.from, err = parseTime(f.from); err != nil {
+			return w, err
+		}
+		w.to = w.from.Add(since)
+	case f.to != "":
+		if w.to, err = parseTime(f.to); err != nil {
+			return w, err
+		}
+		w.from = w.to.Add(-since)
+	default:
+		w.to = now.UTC()
+		w.from = w.to.Add(-since)
+	}
+	if !w.from.Before(w.to) {
+		return w, fmt.Errorf("the window %s is empty: --from must be before --to", w)
+	}
+	return w, nil
+}
+
+// exitError carries an exit code (README.md, "Design rules for LLM
+// callers") with a one-line message.
+type exitError struct {
+	code int
+	msg  string
+}
+
+func (e *exitError) Error() string { return e.msg }
+
+const (
+	exitOK       = 0
+	exitNoRows   = 1
+	exitUsage    = 2
+	exitAuth     = 3
+	exitNotFound = 4
+	exitBudget   = 5
+	exitStore    = 6
+)
+
+func fail(code int, format string, a ...any) error {
+	return &exitError{code: code, msg: fmt.Sprintf(format, a...)}
+}
+
+// session is one engine connection with the bucket's secret, the views
+// and the variables set: views and secrets are the database's, variables
+// the connection's, and raw.sql reads its file list from a variable.
+type session struct {
+	db       *sql.DB
+	conn     *sql.Conn
+	root     string // s3://bucket or a local directory
+	cluster  string
+	w        window
+	node     string
+	keyIDs   map[string]bool
+	redact   []string
+	tmp      string
+	plan     map[string][]string // view -> the objects it reads
+	warnings []string
+}
+
+// storeConfig is where the bucket is; static keys from the environment, as
+// local/blobs.sh reads them, until contexts and auth exist.
+type storeConfig struct {
+	bucket, endpoint, region, keyID, secret, token string
+	tls                                            bool
+}
+
+func storeFromEnv() storeConfig {
+	ep := os.Getenv("S3_ENDPOINT")
+	ep = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(ep, "https://"), "http://"), "/")
+	region := os.Getenv("S3_REGION")
+	if region == "" {
+		region = "us-east-1"
+	}
+	return storeConfig{
+		bucket: os.Getenv("S3_BUCKET"), endpoint: ep, region: region, tls: os.Getenv("S3_TLS") == "on",
+		keyID: os.Getenv("AWS_ACCESS_KEY_ID"), secret: os.Getenv("AWS_SECRET_ACCESS_KEY"), token: os.Getenv("AWS_SESSION_TOKEN"),
+	}
+}
+
+// openSession opens the engine. With blobsDir the tiers are read from a
+// local directory and no extension is loaded; otherwise httpfs is loaded,
+// from HTTPFS_EXTENSION when set, else installed from DuckDB's signed
+// repository, and the secret is scoped to the bucket.
+func openSession(ctx context.Context, f *sessionFlags, w window, st storeConfig) (*session, error) {
+	if f.cluster == "" {
+		return nil, fail(exitUsage, "no cluster: pass --cluster or set CLUSTER_NAME")
+	}
+	s := &session{cluster: f.cluster, w: w, node: f.node, keyIDs: map[string]bool{}, plan: map[string][]string{}}
+	var init []string
+	if f.blobsDir != "" {
+		abs, err := filepath.Abs(f.blobsDir)
+		if err != nil {
+			return nil, err
+		}
+		s.root = abs
+	} else {
+		if st.bucket == "" || st.endpoint == "" {
+			return nil, fail(exitUsage, "no bucket: set S3_BUCKET and S3_ENDPOINT (and AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY), or pass --blobs-dir")
+		}
+		s.root = "s3://" + st.bucket
+		if p := os.Getenv("HTTPFS_EXTENSION"); p != "" {
+			init = append(init, "LOAD "+sqlString(p))
+		} else {
+			init = append(init, "INSTALL httpfs", "LOAD httpfs")
+		}
+		secret := fmt.Sprintf("CREATE OR REPLACE SECRET blobs (TYPE s3, PROVIDER config, KEY_ID %s, SECRET %s, ENDPOINT %s, REGION %s, URL_STYLE 'path', USE_SSL %t, SCOPE %s",
+			sqlString(st.keyID), sqlString(st.secret), sqlString(st.endpoint), sqlString(st.region), st.tls, sqlString(s.root))
+		if st.token != "" {
+			secret += ", SESSION_TOKEN " + sqlString(st.token)
+		}
+		init = append(init, secret+")")
+		s.redact = append(s.redact, st.secret, st.token)
+	}
+	init = append(init, "SET TimeZone = 'UTC'", "SET enable_object_cache = true")
+	if f.keysDir != "" {
+		stmts, err := s.parquetKeys(f.keysDir)
+		if err != nil {
+			return nil, err
+		}
+		init = append(init, stmts...)
+	}
+	c, err := duckdb.NewConnector("", func(e driver.ExecerContext) error {
+		for _, q := range append([]string{"SET autoinstall_known_extensions = false", "SET autoload_known_extensions = false"}, init...) {
+			if _, err := e.ExecContext(ctx, q, nil); err != nil {
+				return s.wrap(err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.db = sql.OpenDB(c)
+	if s.conn, err = s.db.Conn(ctx); err != nil {
+		s.db.Close()
+		return nil, s.wrap(err)
+	}
+	if s.tmp, err = os.MkdirTemp("", "y-obs-"); err != nil {
+		s.close()
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *session) close() {
+	if s.conn != nil {
+		s.conn.Close()
+	}
+	if s.db != nil {
+		s.db.Close()
+	}
+	if s.tmp != "" {
+		os.RemoveAll(s.tmp)
+	}
+}
+
+// wrap blanks secrets out of an engine error and classifies it.
+func (s *session) wrap(err error) error {
+	if err == nil {
+		return nil
+	}
+	var ee *exitError
+	if errors.As(err, &ee) {
+		return err
+	}
+	msg := err.Error()
+	for _, r := range s.redact {
+		if r != "" {
+			msg = strings.ReplaceAll(msg, r, "<redacted>")
+		}
+	}
+	msg = strings.Join(strings.Fields(msg), " ")
+	// DuckDB echoes the statement and appends advice; the cause comes first
+	for _, cut := range []string{" LINE 1:", " Authentication Failure - "} {
+		if i := strings.Index(msg, cut); i > 0 {
+			msg = msg[:i]
+		}
+	}
+	switch {
+	case strings.Contains(msg, "HTTP 403") || strings.Contains(msg, "HTTP 401") || strings.Contains(msg, "SignatureDoesNotMatch") || strings.Contains(msg, "InvalidAccessKeyId") || strings.Contains(msg, "ExpiredToken"):
+		return fail(exitAuth, "the store refused the credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN): %s", msg)
+	case strings.Contains(msg, "Catalog Error"):
+		return fail(exitNotFound, "%s; y-obs schema lists the views", msg)
+	case strings.Contains(msg, "HTTP"), strings.Contains(msg, "IO Error"):
+		return fail(exitStore, "%s", msg)
+	}
+	return fail(exitStore, "%s", msg)
+}
+
+var keyIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+
+// parquetKeys reads key files as the compactor mounts them
+// (compactor/README.md, "Encryption").
+func (s *session) parquetKeys(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fail(exitUsage, "--parquet-keys-dir: %v", err)
+	}
+	var stmts []string
+	for _, e := range entries {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		id := e.Name()
+		if !keyIDPattern.MatchString(id) {
+			return nil, fail(exitUsage, "--parquet-keys-dir: %s is not a key id", id)
+		}
+		b, err := os.ReadFile(filepath.Join(dir, id))
+		if err != nil {
+			return nil, err
+		}
+		key := strings.Join(strings.Fields(string(b)), "")
+		stmts = append(stmts, fmt.Sprintf("PRAGMA add_parquet_key(%s, %s)", sqlString(id), sqlString(key)))
+		s.keyIDs[id] = true
+		s.redact = append(s.redact, key)
+	}
+	return stmts, nil
+}
+
+// glob lists the objects matching a pattern under the root.
+func (s *session) glob(ctx context.Context, pattern string) ([]string, error) {
+	rows, err := s.conn.QueryContext(ctx, "SELECT file FROM glob(?) ORDER BY file", pattern)
+	if err != nil {
+		return nil, s.wrap(err)
+	}
+	defer rows.Close()
+	var files []string
+	for rows.Next() {
+		var f string
+		if err := rows.Scan(&f); err != nil {
+			return nil, err
+		}
+		files = append(files, f)
+	}
+	return files, s.wrap(rows.Err())
+}
+
+// referenced returns the views a query names, and the views they read.
+func referenced(query string) map[string]bool {
+	ref := map[string]bool{}
+	word := func(name string) bool {
+		return regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(name) + `\b`).MatchString(query)
+	}
+	for _, v := range rawViews {
+		if word(v) {
+			ref["raw"] = true
+		}
+	}
+	for _, t := range tierTables {
+		for _, tier := range []string{"hourly_", "daily_"} {
+			if word(tier + t) {
+				ref[tier+t] = true
+			}
+		}
+	}
+	return ref
+}
+
+// planRaw lists the window's raw objects, hour by hour: an hour-first key
+// layout lists one hour per request.
+func (s *session) planRaw(ctx context.Context) error {
+	node := "*"
+	if s.node != "" {
+		node = s.node
+	}
+	var files []string
+	for _, h := range s.w.hours() {
+		fs, err := s.glob(ctx, fmt.Sprintf("%s/raw1/%s/%s/%s/*.jsonl.zst", s.root, s.cluster, h.Format("2006-01-02/15"), node))
+		if err != nil {
+			return err
+		}
+		files = append(files, fs...)
+	}
+	s.plan["raw"] = files
+	return nil
+}
+
+var hourlyName = regexp.MustCompile(`/(\d\d)(?:\.k-([a-z0-9-]+))?\.parquet$`)
+
+// planTier lists one table's objects of the hourly or daily tier in the
+// window.
+func (s *session) planTier(ctx context.Context, tier, table string) error {
+	hours := map[string]bool{}
+	for _, h := range s.w.hours() {
+		hours[h.Format("2006-01-02/15")] = true
+	}
+	var files []string
+	for _, d := range s.w.days() {
+		var pattern string
+		switch {
+		case tier == "hourly":
+			pattern = fmt.Sprintf("%s/hourly/%s/%s/%s/*.parquet", s.root, s.cluster, table, d)
+		case dailyPartitioned(table):
+			pattern = fmt.Sprintf("%s/daily/%s/%s/%s/*/*.parquet", s.root, s.cluster, table, d)
+		default:
+			pattern = fmt.Sprintf("%s/daily/%s/%s/%s*.parquet", s.root, s.cluster, table, d)
+		}
+		fs, err := s.glob(ctx, pattern)
+		if err != nil {
+			return err
+		}
+		for _, f := range fs {
+			if tier == "hourly" {
+				m := hourlyName.FindStringSubmatch(f)
+				if m == nil || !hours[d+"/"+m[1]] {
+					continue
+				}
+			}
+			files = append(files, f)
+		}
+	}
+	s.plan[tier+"_"+table] = files
+	return nil
+}
+
+// keyOf is the parquet key id an object's name carries, "" when plain.
+var keyOfName = regexp.MustCompile(`\.k-([a-z0-9-]+)\.parquet$`)
+
+func keyOf(f string) string {
+	if m := keyOfName.FindStringSubmatch(f); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// prepare plans the views a query references, refuses a plan over budget,
+// and creates them. The raw views always exist: with no raw objects in the
+// plan they read one empty file, so they have their columns and no rows.
+func (s *session) prepare(ctx context.Context, ref map[string]bool, maxObjects int) error {
+	if ref["raw"] {
+		if err := s.planRaw(ctx); err != nil {
+			return err
+		}
+	}
+	for _, t := range tierTables {
+		for _, tier := range []string{"hourly", "daily"} {
+			if ref[tier+"_"+t] {
+				if err := s.planTier(ctx, tier, t); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if n := s.planned(); n > maxObjects {
+		return fail(exitBudget, "the plan reads %d objects, over --max-objects %d (%s): shorten the window, pass --node, or raise --max-objects", n, maxObjects, s.planSummary())
+	}
+	return s.createViews(ctx)
+}
+
+func (s *session) planned() int {
+	n := 0
+	for _, fs := range s.plan {
+		n += len(fs)
+	}
+	return n
+}
+
+func (s *session) planSummary() string {
+	var parts []string
+	for _, v := range s.planViews() {
+		parts = append(parts, fmt.Sprintf("%s=%d", v, len(s.plan[v])))
+	}
+	return strings.Join(parts, " ")
+}
+
+func (s *session) planViews() []string {
+	var vs []string
+	for v := range s.plan {
+		vs = append(vs, v)
+	}
+	sort.Strings(vs)
+	return vs
+}
+
+func (s *session) exec(ctx context.Context, q string) error {
+	_, err := s.conn.ExecContext(ctx, q)
+	return s.wrap(err)
+}
+
+func (s *session) createViews(ctx context.Context) error {
+	raw := s.plan["raw"]
+	if len(raw) == 0 {
+		empty, err := s.emptyRaw()
+		if err != nil {
+			return err
+		}
+		raw = []string{empty}
+	}
+	if err := s.exec(ctx, "SET VARIABLE raw_files = "+sqlList(raw)); err != nil {
+		return err
+	}
+	for _, f := range []string{"raw.sql", "tables.sql", "pods.sql", "apiserver_at.sql"} {
+		b, err := sqlFS.ReadFile("sql/" + f)
+		if err != nil {
+			return err
+		}
+		if err := s.exec(ctx, string(b)); err != nil {
+			return fmt.Errorf("%s: %w", f, err)
+		}
+	}
+	for _, v := range s.planViews() {
+		if v == "raw" {
+			continue
+		}
+		q, err := s.tierView(v, s.plan[v])
+		if err != nil {
+			return err
+		}
+		if q == "" {
+			continue
+		}
+		if err := s.exec(ctx, "CREATE OR REPLACE VIEW "+v+" AS "+q); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// tierView unites by name one read of the plain objects and one per key
+// id: one read takes one key (compactor/README.md, "Encryption").
+func (s *session) tierView(view string, files []string) (string, error) {
+	byKey := map[string][]string{}
+	for _, f := range files {
+		byKey[keyOf(f)] = append(byKey[keyOf(f)], f)
+	}
+	var ids []string
+	for id := range byKey {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	var reads []string
+	for _, id := range ids {
+		hive := ""
+		if strings.HasPrefix(view, "daily_") && dailyPartitioned(strings.TrimPrefix(view, "daily_")) {
+			hive = ", hive_partitioning = false"
+		}
+		if id == "" {
+			reads = append(reads, fmt.Sprintf("SELECT * FROM read_parquet(%s, filename = true, union_by_name = true%s)", sqlList(byKey[id]), hive))
+			continue
+		}
+		if !s.keyIDs[id] {
+			s.warnings = append(s.warnings, fmt.Sprintf("%s: %d objects under parquet key %s, which --parquet-keys-dir lacks, are left out", view, len(byKey[id]), id))
+			continue
+		}
+		reads = append(reads, fmt.Sprintf("SELECT * FROM read_parquet(%s, filename = true, encryption_config = {footer_key: %s}%s)", sqlList(byKey[id]), sqlString(id), hive))
+	}
+	return strings.Join(reads, " UNION ALL BY NAME "), nil
+}
+
+// emptyRaw writes a zstd file with no lines: raw.sql then binds its
+// pinned columns and reads no rows.
+func (s *session) emptyRaw() (string, error) {
+	p := filepath.Join(s.tmp, "empty.jsonl.zst")
+	f, err := os.Create(p)
+	if err != nil {
+		return "", err
+	}
+	zw, err := zstd.NewWriter(f)
+	if err != nil {
+		f.Close()
+		return "", err
+	}
+	if err := zw.Close(); err != nil {
+		f.Close()
+		return "", err
+	}
+	return p, f.Close()
+}
+
+// missingViews are the referenced tier views without objects in the
+// window, which therefore do not exist.
+func (s *session) missingViews(ref map[string]bool) []string {
+	var miss []string
+	for v := range ref {
+		if v != "raw" && len(s.plan[v]) == 0 {
+			miss = append(miss, v)
+		}
+	}
+	sort.Strings(miss)
+	return miss
+}
+
+// sqlString quotes s as a SQL string literal.
+func sqlString(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+func sqlList(items []string) string {
+	q := make([]string, len(items))
+	for i, it := range items {
+		q[i] = sqlString(it)
+	}
+	return "[" + strings.Join(q, ", ") + "]"
+}
