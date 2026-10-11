@@ -24,6 +24,7 @@ type command struct {
 // commands in the order an investigation uses them; help prints them so
 var commands = []command{
 	{"pods", "which pods ran: one row per incarnation, by namespace, name, label, node, phase, window or --at", cmdPods},
+	{"exits", "why containers ended: exit code, reason (OOMKilled), the limits in force", cmdExits},
 	{"sql", "a DuckDB query over the views of a window (raw, logs, metrics, podindex, pods, apiserver, hourly_*, daily_*)", cmdSQL},
 	{"schema", "the views, or one view's columns and their meanings", cmdSchema},
 	{"kubectl", "kubectl against the cluster as it was at a time, read-only", cmdKubectl},
