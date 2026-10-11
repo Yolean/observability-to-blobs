@@ -143,7 +143,9 @@ compactor/
   encryption.go      parquet keys: loading, the missing-key check, which object, per-key reads
   store.go           RawSource and TierStore, and a local directory as both
   s3.go              the bucket as both: ListObjectsV2, HeadObject, CopyObject,
-                     DeleteObjects, SigV4
+                     DeleteObjects
+  sigv4.go           SigV4 signing; images/blobs-to-prometheus has a copy,
+                     refreshed by go generate there and checked by its tests
   put.go             the put endpoint: PutObject, SigV4 verification, S3 errors
   spool.go           the spool: a RawSource on a local directory, durable writes
   folded.go          the put endpoint's cache of the hours' folded keys
