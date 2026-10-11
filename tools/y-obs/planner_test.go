@@ -85,3 +85,37 @@ func TestPlanWindow(t *testing.T) {
 		t.Errorf("w_logs: %v", got)
 	}
 }
+
+// The current day's daily object is a partial rollup: hours without
+// another tier stay "none" rather than turn the day to daily, and the raw
+// hours keep raw. An hourly object under a key the session lacks is not
+// planned: the hour reads raw, with a warning.
+func TestPlanWindowPartialDayAndKeys(t *testing.T) {
+	dir := t.TempDir()
+	tierObject(t, filepath.Join(dir, "daily/c/logs/2026-10-11/namespace=qa/data_0.parquet"), []map[string]interface{}{logLine("2026-10-11T08:30:00Z", "partial daily")})
+	writeRaw(t, filepath.Join(dir, "raw1/c/2026-10-11/09/n1/a.jsonl.zst"), []map[string]interface{}{logLine("2026-10-11T09:30:00Z", "raw 09")})
+	tierObject(t, filepath.Join(dir, "hourly/c/logs/2026-10-11/09.k-k1.parquet"), []map[string]interface{}{logLine("2026-10-11T09:30:00Z", "hourly 09 under k1")})
+	ctx := context.Background()
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	s, err := openSession(ctx, &sessionFlags{cluster: "c", blobsDir: dir}, window{from: time.Date(2026, 10, 11, 7, 0, 0, 0, time.UTC), to: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	if err := s.planWindow(ctx, []string{"logs"}, "qa", now); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.sourcesSummary(); got != "hours raw=1 none=4" {
+		t.Errorf("summary: %s", got)
+	}
+	if len(s.warnings) != 1 || !strings.Contains(s.warnings[0], "parquet key k1") {
+		t.Errorf("warnings: %v", s.warnings)
+	}
+	if err := s.createWindowViews(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.strings(ctx, "SELECT message FROM w_logs ORDER BY time")
+	if err != nil || strings.Join(got, "|") != "raw 09" {
+		t.Errorf("w_logs: %v %v", got, err)
+	}
+}

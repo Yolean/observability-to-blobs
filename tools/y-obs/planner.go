@@ -59,7 +59,7 @@ func (s *session) planWindow(ctx context.Context, tables []string, ns string, no
 			if err != nil {
 				return err
 			}
-			for _, f := range files {
+			for _, f := range s.readable("hourly_"+t, files) {
 				if m := hourlyName.FindStringSubmatch(f); m != nil {
 					hourlyBy[t][d+"/"+m[1]] = append(hourlyBy[t][d+"/"+m[1]], f)
 				}
@@ -93,15 +93,21 @@ func (s *session) planWindow(ctx context.Context, tables []string, ns string, no
 			dailyDays[h.Format("2006-01-02")] = true
 		}
 	}
-	// a day with an hour no other tier has reads the daily tier, if it
-	// has the day, for all its hours
+	// a finished day with an hour no other tier has reads the daily tier,
+	// if it has the day, for all its hours; a day not yet finished has at
+	// most a partial rollup, and keeps its hours' sources
 	for d := range dailyDays {
+		day, _ := time.Parse("2006-01-02", d)
+		if !day.Add(24*time.Hour + finalAfter).Before(now) {
+			continue
+		}
 		found := false
 		for _, t := range tables {
 			files, err := s.dailyObjects(ctx, t, d, ns)
 			if err != nil {
 				return err
 			}
+			files = s.readable("daily_"+t, files)
 			if len(files) > 0 {
 				found = true
 				p.daily[t] = append(p.daily[t], files...)
@@ -149,6 +155,25 @@ func (s *session) planWindow(ctx context.Context, tables []string, ns string, no
 		}
 	}
 	return nil
+}
+
+// readable drops the objects under a parquet key the session lacks, with
+// a warning: a view cannot read them, and a plan that named them would
+// fail the query.
+func (s *session) readable(view string, files []string) []string {
+	var keep []string
+	missing := map[string]int{}
+	for _, f := range files {
+		if id := keyOf(f); id != "" && !s.keyIDs[id] {
+			missing[id]++
+			continue
+		}
+		keep = append(keep, f)
+	}
+	for id, n := range missing {
+		s.warnings = append(s.warnings, fmt.Sprintf("%s: %d objects under parquet key %s are left out: --parquet-keys-dir lacks it", view, n, id))
+	}
+	return keep
 }
 
 // rawHour lists one hour's raw objects, of one node with --node.
