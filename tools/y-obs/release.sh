@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # release.sh OUTDIR [VERSION]: builds y-obs for this host's platform with
 # DuckDB's signed httpfs extension embedded, so the binary needs no
-# extension download at run time, into OUTDIR/y-obs-{os}-{arch} with a
-# .sha256 beside it. The release workflow runs it on one native runner
+# extension download at run time, into OUTDIR/obs-{os}-{arch} with a
+# .sha256 beside it. The asset is obs: ystack's y-bin entry installs it
+# with its own y- prefix. The release workflow runs it on one native runner
 # per platform: duckdb-go links prebuilt static libraries through cgo, so
 # no cross compiling. Needs go, a C compiler, curl and sha256sum or
 # shasum.
@@ -28,7 +29,7 @@ mkdir -p "$HERE/httpfs"
 gunzip -c "$work/httpfs.gz" > "$HERE/httpfs/httpfs.duckdb_extension"
 
 mkdir -p "$OUT"
-bin=$OUT/y-obs-$GOOS-$GOARCH
+bin=$OUT/obs-$GOOS-$GOARCH
 (cd "$HERE" && CGO_ENABLED=1 go build -tags httpfs_embed -trimpath \
   -ldflags "-s -w -X main.version=$VERSION" -o "$bin" .)
 rm -f "$HERE/httpfs/httpfs.duckdb_extension"

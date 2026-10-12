@@ -3,7 +3,8 @@ name: y-obs
 # Release binaries of tools/y-obs (tools/y-obs/README.md, "Release"): a
 # tag y-obs-v* builds each platform on a native runner with
 # tools/y-obs/release.sh, smoke-tests the binary, and attaches it and its
-# .sha256 to the tag's release. duckdb-go links prebuilt static libraries
+# .sha256 to the tag's release as obs-{os}-{arch}: ystack's y-bin entry
+# adds the y- prefix. duckdb-go links prebuilt static libraries
 # through cgo, so there is no cross compiling. workflow_dispatch builds
 # without releasing.
 on:
@@ -33,14 +34,14 @@ jobs:
       # the engine, the embedded extension and the embedded views, without
       # a bucket: version loads nothing, schema reads an empty raw tier
       run: |
-        bin=$(ls dist/y-obs-* | grep -v sha256)
+        bin=$(ls dist/obs-* | grep -v sha256)
         "$bin" version
         "$bin" version | grep -q '^httpfs embedded'
         "$bin" schema logs | grep -q '^message'
         "$bin" sql --blobs-dir "$RUNNER_TEMP" --cluster smoke "SELECT count(*) AS n FROM logs"
     - uses: actions/upload-artifact@v7
       with:
-        name: y-obs-${{ matrix.runner }}
+        name: obs-${{ matrix.runner }}
         path: dist/
         if-no-files-found: error
 

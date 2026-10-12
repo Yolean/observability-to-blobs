@@ -77,7 +77,9 @@ libraries per platform through cgo, so there is no cross compiling.
 - **Smoke test.** The workflow runs `version`, `schema` and a query on
   an empty blobs directory.
 - **Publishing.** It attaches the binaries with their sha256 files to
-  the tag's release, so a `y-bin` download entry can pin them.
+  the tag's release as `obs-{linux,darwin}-{amd64,arm64}`. The asset is
+  `obs`: ystack's `y-bin` download entry pins the checksums and installs
+  it with its own `y-` prefix, as for its other tools.
 - **Development builds.** Without the tag, httpfs is installed from
   DuckDB's signed repository at first use. `TestReleaseEnv` fails when
   `release.env` pins another engine version than the one linked.
