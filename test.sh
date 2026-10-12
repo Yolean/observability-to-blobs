@@ -1312,6 +1312,56 @@ yobs_expect "exits: the restarter's exit code 1" "^[^,]*,default,restarter,[^,]*
 yobs_expect "metrics latest: app_requests_total code 200 is 42" '"value":42' metrics latest app_requests_total --pod '^metrics-multi$' --where code=200 --format jsonl
 yobs_expect "sql: the encrypted hourly tier with the parquet keys" "^true$" sql --parquet-keys-dir "$PARQUET_KEYS" --format csv "SELECT count(*) > 0 AS rows FROM hourly_logs"
 
+# y-obs prometheus: the last two minutes loaded, older ranges through
+# remote read, following, reuse and stop. The bucket was purged earlier in
+# the run, so "older" is minutes, not hours. Needs the Prometheus server.
+PROM_BIN=${PROMETHEUS:-$(command -v y-prometheus || command -v prometheus || true)}
+if [ -z "$PROM_BIN" ]; then
+  echo "  SKIP: y-obs prometheus (no PROMETHEUS, y-prometheus or prometheus)"
+else
+  YOBS_RUN=$(mktemp -d "${TMPDIR:-/tmp}/itest-yobs.XXXXXX")
+  yobs_prom() {
+    env Y_OBS_CONTEXT= XDG_RUNTIME_DIR="$YOBS_RUN" PROMETHEUS="$PROM_BIN" S3_ENDPOINT="127.0.0.1:$S3_PORT" S3_BUCKET="$BUCKET" S3_TLS=off \
+      AWS_ACCESS_KEY_ID=demoaccess AWS_SECRET_ACCESS_KEY=demosecret CLUSTER_NAME="$CLUSTER" \
+      target/bin/y-obs prometheus --no-open --max-objects 2000 "$@"
+  }
+  promq() { curl -s "$PROM_URL/api/v1/$1" --data-urlencode "query=$2" "${@:3}"; }
+  # the loaded window's bounds, as y-obs reports them on its target
+  prom_pushed() { promq query "yobs_pushed_window_seconds{bound=\"$1\"}" | grep -o '"[0-9]*"\]' | tr -dc 0-9 || true; }
+  prom_names() { curl -s "$PROM_URL/api/v1/label/__name__/values" | grep -q '"app_requests_total"'; }
+  prom_value() { promq query 'app_requests_total{pod="metrics-multi",container="app",code="200"}' | grep -q '"42"'; }
+  # five minutes ending before the loaded window: only remote read has them
+  prom_older() {
+    local from
+    from=$(prom_pushed from)
+    [ -n "$from" ] && promq query_range 'count(node_load1)' --data-urlencode start=$((from - 300)) \
+      --data-urlencode end=$((from - 30)) --data-urlencode step=30 | grep -q '"values":\[\['
+  }
+  prom_reused() { [ "$(yobs_prom 2>/dev/null)" = "$PROM_URL" ]; }
+  prom_gone() { ! curl -sf "$PROM_URL/-/ready" >/dev/null; }
+  if PROM_URL=$(yobs_prom --since 2m 2>"$INIT.yobs.err") && [ -n "$PROM_URL" ]; then
+    echo "  PASS: y-obs prometheus: started at $PROM_URL ($(grep -o 'loaded [0-9]* samples[^:]*' "$INIT.yobs.err"))"
+    expect "y-obs prometheus: autocomplete knows app_requests_total" prom_names
+    expect "y-obs prometheus: app_requests_total{code=\"200\"} of metrics-multi is 42" prom_value
+    # Prometheus scrapes y-obs every 15 s: the bounds are there after one
+    sleep 20
+    expect "y-obs prometheus: minutes before the loaded window, through remote read" prom_older
+    PUSHED_TO=$(prom_pushed to)
+    sleep 45
+    PUSHED_TO2=$(prom_pushed to)
+    expect "y-obs prometheus: following moves the loaded window's end ($PUSHED_TO to $PUSHED_TO2)" test "${PUSHED_TO2:-0}" -gt "${PUSHED_TO:-0}"
+    expect "y-obs prometheus: a repeated call reuses the instance" prom_reused
+    expect "y-obs prometheus --stop ends it" yobs_prom --stop
+    expect "y-obs prometheus: stopped, Prometheus answers no more" prom_gone
+  else
+    echo "  FAIL: y-obs prometheus did not start:" >&2
+    sed 's/^/    /' "$INIT.yobs.err" | head -20 >&2
+    ERRORS=$((ERRORS + 1))
+  fi
+  yobs_prom --stop >/dev/null 2>&1 || true
+  rm -rf "$YOBS_RUN"
+fi
+
 phase "assert: compactor"
 # The key rotation: the hourly objects so far, then PARQUET_KEY_ID
 # itest-2. They keep their names, so their key; new hours and the day's
