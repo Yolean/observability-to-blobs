@@ -1,0 +1,310 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io/fs"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
+	"strings"
+	"syscall"
+	"time"
+)
+
+const prometheusUsage = `Usage: y-obs prometheus [flags]
+
+A local Prometheus over the bucket, for exploring metrics in its UI:
+autocomplete, graphs, any PromQL. Prints its URL and opens it in the
+browser.
+
+- The window (--since, default 1h) is loaded at start, so its names
+  autocomplete and its range is local; without --to it keeps loading
+  what arrives.
+- Older ranges load from the bucket when a query reaches them: zoom out
+  in the UI. A query too broad for --max-objects or --max-samples comes
+  back with a warning saying so.
+- One instance per context and cluster: a repeated call reuses it.
+  --stop ends it; --status lists the running ones.
+- Its Targets page has one target, y-obs itself, whose yobs_* metrics
+  say what was loaded and read.
+
+Needs the Prometheus server: ystack's y-prometheus, prometheus on PATH, or
+PROMETHEUS.
+
+Examples:
+  y-obs prometheus
+  y-obs prometheus --cluster prod --since 6h
+  y-obs prometheus --from '2026-10-11 08:00' --to '2026-10-11 10:00'
+  y-obs prometheus --status
+  y-obs prometheus --stop
+
+Flags:
+`
+
+// promState is a running instance, as y-obs prometheus records it.
+type promState struct {
+	PID     int       `json:"pid"`
+	URL     string    `json:"url"`
+	Cluster string    `json:"cluster"`
+	Context string    `json:"context"`
+	Window  string    `json:"window"`
+	Started time.Time `json:"started"`
+	Log     string    `json:"log"`
+}
+
+func promStateDir() string { return filepath.Join(cacheDir(), "prometheus") }
+
+var unsafeKey = regexp.MustCompile(`[^A-Za-z0-9_.-]+`)
+
+func promKey(contextName, cluster string) string {
+	if contextName == "" {
+		contextName = "env"
+	}
+	return unsafeKey.ReplaceAllString(contextName+"-"+cluster, "_")
+}
+
+func readPromState(path string) (*promState, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	var st promState
+	if json.Unmarshal(b, &st) != nil || st.PID == 0 {
+		return nil, false
+	}
+	return &st, st.alive()
+}
+
+// alive is the server process existing and its Prometheus answering ready.
+func (st *promState) alive() bool {
+	if syscall.Kill(st.PID, 0) != nil || st.URL == "" {
+		return false
+	}
+	c := &http.Client{Timeout: 3 * time.Second}
+	res, err := c.Get(st.URL + "/-/ready")
+	if err != nil {
+		return false
+	}
+	res.Body.Close()
+	return res.StatusCode == http.StatusOK
+}
+
+func writePromState(path string, st *promState) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	b, _ := json.MarshalIndent(st, "", "  ")
+	return os.WriteFile(path, b, 0o600)
+}
+
+// lifecycleFlags are y-obs prometheus's own; the rest go to the server.
+var lifecycleFlags = map[string]bool{"stop": true, "status": true, "no-open": true}
+
+func serveArgs(args []string) []string {
+	var out []string
+	for _, a := range args {
+		name := strings.TrimLeft(strings.SplitN(a, "=", 2)[0], "-")
+		if strings.HasPrefix(a, "-") && lifecycleFlags[name] {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+func cmdPrometheus(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("prometheus", flag.ContinueOnError)
+	var sf sessionFlags
+	sf.register(fs)
+	fs.Int("port", 0, "Prometheus's port on 127.0.0.1; 0 picks a free one")
+	fs.Duration("poll", 30*time.Second, "without --to, load what arrived in the bucket this often; 0 loads once")
+	fs.Int("max-samples", 20000000, "refuse a query from the bucket returning more samples")
+	stop := fs.Bool("stop", false, "stop the instance of this context and cluster")
+	status := fs.Bool("status", false, "list the running instances")
+	noOpen := fs.Bool("no-open", false, "print the URL without opening a browser")
+	fs.Usage = func() { fmt.Fprint(fs.Output(), prometheusUsage); fs.PrintDefaults() }
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return &exitError{code: exitOK}
+		}
+		return fail(exitUsage, "%v; run y-obs prometheus -h", err)
+	}
+	if fs.NArg() > 0 {
+		return fail(exitUsage, "prometheus takes only flags; run y-obs prometheus -h")
+	}
+	if *status {
+		return promStatus()
+	}
+	cfg, _, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	contextName := contextName(sf.context, cfg)
+	cluster := sf.cluster
+	if cluster == "" && sf.blobsDir == "" {
+		_, scope, err := storeFor(ctx, sf.context)
+		if err != nil {
+			return err
+		}
+		if cluster, err = clusterFor("", scope); err != nil {
+			return err
+		}
+	} else if cluster == "" {
+		return fail(exitUsage, "no cluster: pass --cluster or set CLUSTER_NAME")
+	}
+	key := promKey(contextName, cluster)
+	statePath := filepath.Join(promStateDir(), key+".json")
+	st, alive := readPromState(statePath)
+	if *stop {
+		if st == nil || syscall.Kill(st.PID, 0) != nil {
+			os.Remove(statePath)
+			return fail(exitNoRows, "no running instance for %s", key)
+		}
+		syscall.Kill(st.PID, syscall.SIGTERM)
+		for i := 0; i < 60 && syscall.Kill(st.PID, 0) == nil; i++ {
+			time.Sleep(250 * time.Millisecond)
+		}
+		if syscall.Kill(st.PID, 0) == nil {
+			syscall.Kill(st.PID, syscall.SIGKILL)
+		}
+		os.Remove(statePath)
+		os.Remove(filepath.Join(promStateDir(), key+".ready"))
+		fmt.Fprintf(os.Stderr, "y-obs: stopped %s (%s); its log stays in %s\n", key, st.URL, st.Log)
+		return nil
+	}
+	if alive {
+		fmt.Fprintf(os.Stderr, "y-obs: reusing %s for %s, loaded %s, started %s ago; older ranges load on query\n",
+			st.URL, key, st.Window, time.Since(st.Started).Round(time.Second))
+		fmt.Println(st.URL)
+		openBrowser(st.URL, *noOpen)
+		return nil
+	}
+	w, err := sf.window(time.Now())
+	if err != nil {
+		return fail(exitUsage, "%v", err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(promStateDir(), 0o700); err != nil {
+		return err
+	}
+	ready := filepath.Join(promStateDir(), key+".ready")
+	logPath := filepath.Join(promStateDir(), key+".log")
+	os.Remove(ready)
+	logf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	sargs := append([]string{"prometheus-serve"}, serveArgs(args)...)
+	if sf.cluster == "" {
+		sargs = append(sargs, "--cluster", cluster)
+	}
+	sargs = append(sargs, "--ready-file", ready)
+	cmd := exec.Command(exe, sargs...)
+	cmd.Stdout, cmd.Stderr = logf, logf
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		logf.Close()
+		return err
+	}
+	logf.Close()
+	st = &promState{PID: cmd.Process.Pid, Cluster: cluster, Context: contextName, Window: w.String(), Started: time.Now().UTC(), Log: logPath}
+	if err := writePromState(statePath, st); err != nil {
+		return err
+	}
+	exited := make(chan struct{})
+	go func() { cmd.Wait(); close(exited) }()
+	fmt.Fprintf(os.Stderr, "y-obs: starting Prometheus for %s, loading %s\n", key, w)
+	for {
+		if b, err := os.ReadFile(ready); err == nil && len(b) > 0 {
+			st.URL = strings.TrimSpace(string(b))
+			break
+		}
+		select {
+		case <-exited:
+			os.Remove(statePath)
+			tail, _ := os.ReadFile(logPath)
+			lines := strings.Split(strings.TrimSpace(string(tail)), "\n")
+			return fail(exitStore, "the server stopped: %s (log %s)", lines[len(lines)-1], logPath)
+		case <-ctx.Done():
+			syscall.Kill(st.PID, syscall.SIGTERM)
+			os.Remove(statePath)
+			return &exitError{code: exitStore, msg: "interrupted while loading; stopped"}
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	if err := writePromState(statePath, st); err != nil {
+		return err
+	}
+	if b, err := os.ReadFile(logPath); err == nil {
+		for _, l := range strings.Split(string(b), "\n") {
+			if strings.HasPrefix(l, "y-obs: loaded ") {
+				fmt.Fprintln(os.Stderr, l)
+			}
+		}
+	}
+	fmt.Fprintf(os.Stderr, "y-obs: %s for %s; older ranges load on query; y-obs prometheus --stop ends it\n", st.URL, key)
+	fmt.Println(st.URL)
+	openBrowser(st.URL, *noOpen)
+	return nil
+}
+
+func promStatus() error {
+	entries, err := os.ReadDir(promStateDir())
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	var names []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".json") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	n := 0
+	fmt.Println("instance\turl\tcluster\tloaded\tstarted\tpid")
+	for _, name := range names {
+		st, alive := readPromState(filepath.Join(promStateDir(), name))
+		if !alive {
+			os.Remove(filepath.Join(promStateDir(), name))
+			continue
+		}
+		n++
+		fmt.Printf("%s\t%s\t%s\t%s\t%s\t%d\n", strings.TrimSuffix(name, ".json"), st.URL, st.Cluster, st.Window, st.Started.Format(time.RFC3339), st.PID)
+	}
+	if n == 0 {
+		return &exitError{code: exitNoRows}
+	}
+	return nil
+}
+
+// openBrowser opens url, unless told not to or there is no display; a
+// failure only means the URL has to be opened by hand.
+func openBrowser(url string, no bool) {
+	if no {
+		return
+	}
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	default:
+		if os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
+			return
+		}
+		cmd = exec.Command("xdg-open", url)
+	}
+	if err := cmd.Start(); err == nil {
+		go cmd.Wait()
+	}
+}

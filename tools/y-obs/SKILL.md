@@ -21,6 +21,7 @@ deleted pods, finished jobs and past days work the same as live ones.
 | that something died or restarted | `y-obs exits` | `logs ... --previous` |
 | only a log pattern | `y-obs grep PATTERN -n NS --count` | drop `--count` for the lines |
 | a metric name | `y-obs metrics series/rate/latest NAME` | `metrics names` if unsure |
+| a PromQL expression, or a human who wants the Prometheus UI | `U=$(y-obs prometheus --no-open)` | `curl "$U/api/v1/query" --data-urlencode query=...` |
 | "what was deployed / configured at T" | `y-obs kubectl --at T -- get ...` | `describe` |
 | none of the above | `y-obs schema`, then `y-obs sql` | |
 
@@ -63,6 +64,8 @@ y-obs grep 'connection reset' -n qa --since 2h --count # matches per pod, cheap
 y-obs metrics names -n qa --pod '^web-'
 y-obs metrics series container_memory_working_set_bytes --pod '^web-1$' --since 6h --step 1m
 y-obs metrics rate http_requests_total -n qa --by code --since 1h --step 5m
+y-obs prometheus                                      # Prometheus UI over the bucket: the last hour loaded, older on query
+y-obs prometheus --stop                               # ends it; a repeated call reuses it
 y-obs kubectl --at '2026-10-11 09:00' -- get deploy -n qa -o yaml
 y-obs sql "SELECT ..." --since 1h                     # views: y-obs schema
 ```
@@ -121,6 +124,14 @@ it, then `logs` on one of them.
 two outputs. A resource with no complete snapshot by T is missing from
 the answer, which then means unknown, not empty. A time before the
 agent's first snapshot is exit 1.
+
+**PromQL.** `y-obs prometheus` runs a real Prometheus over the bucket,
+so any PromQL works, recording-rule style expressions included. It
+prints its URL, and its HTTP API takes the usual `/api/v1/query` and
+`/api/v1/query_range`. Ranges older than the loaded window (default the
+last hour) are read from the bucket as the query needs them. A warning
+in the API's answer means y-obs refused part of the range as too broad:
+add a namespace or narrow the range. Stop it with `--stop` when done.
 
 ## Traps
 

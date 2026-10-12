@@ -10,7 +10,8 @@
 >   when `setup-envtest` or `KUBEBUILDER_ASSETS` provides the release;
 > - contexts, `auth` with cache and renewal, and `mint-stub`;
 > - the window planner (each hour from one tier), `pods`, `exits`, `logs`, `grep` and `metrics`;
-> - release builds with httpfs embedded (`release.sh`, `.github/workflows/y-obs.yaml`), and `version`.
+> - release builds with httpfs embedded (`release.sh`, `.github/workflows/y-obs.yaml`), and `version`;
+> - `prometheus`: a local Prometheus UI over the bucket.
 > The rest is design.
 
 `y-obs` is one local executable that answers the questions people (and
@@ -150,6 +151,7 @@ y-obs <command> [flags]
   metrics       names, series, rate, latest: every scraped sample, no allowlist
   sql           a DuckDB query over the views, with the same budget guard
   schema        views, columns, meanings
+  prometheus    a local Prometheus UI: the window loaded, older ranges on query
   kubectl       kubectl against the cluster as it was at a time (read-only)
   auth          get or show the read credential (never prints the secret)
   contexts      the configured contexts and the clusters their credential covers
@@ -289,6 +291,51 @@ name is exit 4, with the closest names in the window.
 
 PromQL itself is out of scope here. `local/README.md`'s Prometheus plus
 blobs-to-prometheus stack serves it from the same bucket.
+
+### prometheus
+
+```
+y-obs prometheus                      # the last hour loaded, then following
+y-obs prometheus --since 6h
+y-obs prometheus --from '2026-10-11 08:00' --to '2026-10-11 10:00'
+y-obs prometheus --status
+y-obs prometheus --stop
+```
+
+A local Prometheus over the bucket, for exploring metrics in its UI. It
+prints the URL (stdout) and opens it in the browser.
+
+- **The window is loaded at start.** `--since`, default 1h, is
+  remote-written into it, so autocomplete knows every name and label of
+  the window, and its range is local. One hour of a single-node cluster,
+  1.6 M samples, loads in about 4 s. Without `--to` it follows: every
+  `--poll` (30 s) it loads what arrived, overlapping by two minutes for
+  late uploads.
+- **Older ranges load on query.** Prometheus is configured with
+  `remote_read` to y-obs, which answers from the bucket through the
+  window planner. A namespace matcher prunes the daily tier.
+  - Each read is cut to before the loaded window. Prometheus asks for
+    every range anyway: its `read_recent: false` goes by the head's
+    start, which the loaded out-of-order samples do not move.
+  - Measured: 6 h of one name 0.3 s, 24 h 0.7 s, 6 h of 4.3 M samples
+    5 s.
+  - A read over `--max-objects` or `--max-samples` comes back as a
+    warning in the UI, with y-obs's message.
+- **One instance per context and cluster.** A repeated call reuses it
+  (its process alive and Prometheus ready). `--stop` ends it, and
+  `--status` lists the running ones. State and logs are in
+  `$XDG_RUNTIME_DIR/y-obs/prometheus/`, and Prometheus's data is in a
+  temporary directory removed at stop.
+- **The Targets page** has one target, y-obs itself. Its `yobs_*`
+  metrics say what was loaded and what remote reads cost. The original
+  scrape targets are not targets here; their `up` series are queryable
+  as any other.
+- **Series.** The series are blobs-to-prometheus's: `__name__`, the
+  non-empty cluster, node, job, instance, namespace, pod and container,
+  then the sample's labels, renamed `exported_<name>` on a clash.
+- **The server binary.** It is ystack's `y-prometheus` (Prometheus
+  3.15.0), `prometheus` on PATH, or `PROMETHEUS`.
+- **Implementation.** `prometheus-serve` is the part that runs detached.
 
 ### kubectl
 
