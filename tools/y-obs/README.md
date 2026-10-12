@@ -494,9 +494,10 @@ of y-obs, so the deployment documents it.
    follows the first release, whose checksums it pins.
 4. Done with a stub: contexts, `auth`, the cache and renewal, and
    `mint-stub`. The real mint waits for the decisions in "Credentials".
-5. To do once a cluster's bucket has a context: replace the consuming
-   repositories' log, pod-index and metrics skills with `SKILL.md` from
-   this directory. Until then those skills read the archive y-obs does
-   not.
+5. Started: consuming repositories add `SKILL.md` from this directory as
+   an `observability` skill, beside their log, pod-index and metrics
+   skills. The old skills point at it for clusters that have moved, and
+   stay until every cluster has. Each cluster gets a context line in
+   the skill when it moves.
 6. To do: `fresh-to` and the clusters of a bucket, with the stdlib S3
    client.
