@@ -34,6 +34,7 @@ var commands = []command{
 	{"auth", "get or show the context's read credential, never printing the secret", cmdAuth},
 	{"contexts", "the configured contexts: bucket, endpoint, the clusters the credential covers", cmdContexts},
 	{"version", "y-obs, DuckDB and Go versions, and where httpfs comes from", cmdVersion},
+	{"prometheus-serve", "the foreground part of y-obs prometheus (experimental)", cmdPrometheusServe},
 	{"mint-stub", "development only: a credential mint handing out static keys", cmdMintStub},
 	{"apiserver-at", "serve a state of objects (JSON lines of apiserver_at rows) to kubectl, read-only", func(_ context.Context, args []string) error {
 		cmdApiserverAt(args)

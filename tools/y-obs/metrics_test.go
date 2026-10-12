@@ -18,7 +18,7 @@ func scrape(at, pod string, samples ...map[string]interface{}) map[string]interf
 		"instance": "10.0.0.1:9090", "namespace": "qa", "pod": pod, "pod_uid": pod + "-uid", "container": "app", "restart": 0, "samples": samples}
 }
 
-func sample(name, typ string, v float64, labels map[string]string) map[string]interface{} {
+func metricSample(name, typ string, v float64, labels map[string]string) map[string]interface{} {
 	return map[string]interface{}{"name": name, "type": typ, "labels": labels, "value": v}
 }
 
@@ -31,11 +31,11 @@ func TestMetrics(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		at := time.Date(2026, 10, 11, 9, i, 0, 0, time.UTC).Format(time.RFC3339)
 		lines = append(lines, scrape(at, "web-1",
-			sample("http_requests_total", "counter", ok200[i], map[string]string{"code": "200"}),
-			sample("http_requests_total", "counter", float64(6*i), map[string]string{"code": "500"}),
-			sample("up", "gauge", 1, map[string]string{})))
+			metricSample("http_requests_total", "counter", ok200[i], map[string]string{"code": "200"}),
+			metricSample("http_requests_total", "counter", float64(6*i), map[string]string{"code": "500"}),
+			metricSample("up", "gauge", 1, map[string]string{})))
 	}
-	lines = append(lines, scrape("2026-10-11T09:09:30Z", "web-2", sample("up", "gauge", 0, map[string]string{})))
+	lines = append(lines, scrape("2026-10-11T09:09:30Z", "web-2", metricSample("up", "gauge", 0, map[string]string{})))
 	writeRaw(t, filepath.Join(dir, "raw1/c/2026-10-11/09/n1/a.jsonl.zst"), lines)
 	w := []string{"--to", "2026-10-11 09:10"}
 	for _, c := range []struct {
