@@ -307,10 +307,21 @@ prints the URL (stdout) and opens it in the browser.
 
 - **The window is loaded at start.** `--since`, default 1h, is
   remote-written into it, so autocomplete knows every name and label of
-  the window, and its range is local. One hour of a single-node cluster,
-  1.6 M samples, loads in about 4 s. Without `--to` it follows: every
-  `--poll` (30 s) it loads what arrived, overlapping by two minutes for
-  late uploads.
+  the window, and its range is local. It loads in two steps, measured on
+  one hour of a single-node cluster (1.6 M samples):
+  1. **Catalog.** The oldest sample of every series. Every name
+     autocompletes after about 2.5 s, and the browser opens then.
+  2. **Samples.** The rest of each series in order; the hour is in
+     after about 5 s. In order matters: sending a series' newest sample
+     first made Prometheus take the rest out of order, at less than half
+     the speed.
+
+  Progress goes to stderr, as one updating line on a terminal or a line
+  per step otherwise. The command returns, and prints the URL to stdout,
+  once the whole window is in, so a script's first query sees all of
+  it. A repeated call while it loads shows the same progress. Without
+  `--to` it follows: every `--poll` (30 s) it loads what arrived,
+  overlapping by two minutes for late uploads.
 - **Older ranges load on query.** Prometheus is configured with
   `remote_read` to y-obs, which answers from the bucket through the
   window planner. A namespace matcher prunes the daily tier.

@@ -1341,6 +1341,8 @@ else
   prom_gone() { ! curl -sf "$PROM_URL/-/ready" >/dev/null; }
   if PROM_URL=$(yobs_prom --since 2m 2>"$INIT.yobs.err") && [ -n "$PROM_URL" ]; then
     echo "  PASS: y-obs prometheus: started at $PROM_URL ($(grep -o 'loaded [0-9]* samples[^:]*' "$INIT.yobs.err"))"
+    expect "y-obs prometheus: progress shown, names autocompleting before the samples load" \
+      grep -q 'names autocomplete; loading the samples' "$INIT.yobs.err"
     expect "y-obs prometheus: autocomplete knows app_requests_total" prom_names
     expect "y-obs prometheus: app_requests_total{code=\"200\"} of metrics-multi is 42" prom_value
     # Prometheus scrapes y-obs every 15 s: the bounds are there after one

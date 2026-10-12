@@ -177,10 +177,15 @@ func cmdPrometheus(ctx context.Context, args []string) error {
 		}
 		os.Remove(statePath)
 		os.Remove(filepath.Join(promStateDir(), key+".ready"))
+		os.Remove(filepath.Join(promStateDir(), key+".progress"))
 		fmt.Fprintf(os.Stderr, "y-obs: stopped %s (%s); its log stays in %s\n", key, st.URL, st.Log)
 		return nil
 	}
 	if alive {
+		// still loading: show it, and return once loaded
+		if err := waitLoaded(ctx, filepath.Join(promStateDir(), key+".progress"), nil, func(string) {}); err != nil {
+			return err
+		}
 		fmt.Fprintf(os.Stderr, "y-obs: reusing %s for %s, loaded %s, started %s ago; older ranges load on query\n",
 			st.URL, key, st.Window, time.Since(st.Started).Round(time.Second))
 		fmt.Println(st.URL)
@@ -209,7 +214,9 @@ func cmdPrometheus(ctx context.Context, args []string) error {
 	if sf.cluster == "" {
 		sargs = append(sargs, "--cluster", cluster)
 	}
-	sargs = append(sargs, "--ready-file", ready)
+	progressPath := filepath.Join(promStateDir(), key+".progress")
+	os.Remove(progressPath)
+	sargs = append(sargs, "--ready-file", ready, "--progress-file", progressPath)
 	cmd := exec.Command(exe, sargs...)
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -225,25 +232,25 @@ func cmdPrometheus(ctx context.Context, args []string) error {
 	exited := make(chan struct{})
 	go func() { cmd.Wait(); close(exited) }()
 	fmt.Fprintf(os.Stderr, "y-obs: starting Prometheus for %s, loading %s\n", key, w)
-	for {
-		if b, err := os.ReadFile(ready); err == nil && len(b) > 0 {
-			st.URL = strings.TrimSpace(string(b))
-			break
+	opened := false
+	err = waitLoaded(ctx, progressPath, exited, func(url string) {
+		// names autocomplete: open the browser while the samples load
+		st.URL = url
+		writePromState(statePath, st)
+		if !opened {
+			opened = true
+			openBrowser(url, *noOpen)
 		}
-		select {
-		case <-exited:
+	})
+	if err != nil {
+		if errors.Is(err, errServerExited) {
 			os.Remove(statePath)
 			tail, _ := os.ReadFile(logPath)
 			lines := strings.Split(strings.TrimSpace(string(tail)), "\n")
 			return fail(exitStore, "the server stopped: %s (log %s)", lines[len(lines)-1], logPath)
-		case <-ctx.Done():
-			syscall.Kill(st.PID, syscall.SIGTERM)
-			os.Remove(statePath)
-			return &exitError{code: exitStore, msg: "interrupted while loading; stopped"}
-		case <-time.After(250 * time.Millisecond):
 		}
-	}
-	if err := writePromState(statePath, st); err != nil {
+		syscall.Kill(st.PID, syscall.SIGTERM)
+		os.Remove(statePath)
 		return err
 	}
 	if b, err := os.ReadFile(logPath); err == nil {
@@ -255,8 +262,92 @@ func cmdPrometheus(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "y-obs: %s for %s; older ranges load on query; y-obs prometheus --stop ends it\n", st.URL, key)
 	fmt.Println(st.URL)
-	openBrowser(st.URL, *noOpen)
+	if !opened {
+		openBrowser(st.URL, *noOpen)
+	}
 	return nil
+}
+
+var errServerExited = errors.New("the server exited")
+
+// waitLoaded shows the server's progress until its window is loaded: one
+// updating line on a terminal, a line per stage and about every two
+// seconds otherwise. catalog is called with the URL once names
+// autocomplete.
+func waitLoaded(ctx context.Context, progressPath string, exited <-chan struct{}, catalog func(url string)) error {
+	tty := isTerminal(os.Stderr)
+	var last loadProgress
+	var lastLine time.Time
+	called := false
+	defer func() {
+		if tty {
+			fmt.Fprint(os.Stderr, "\r\033[K")
+		}
+	}()
+	for {
+		var l loadProgress
+		b, err := os.ReadFile(progressPath)
+		if err == nil {
+			json.Unmarshal(b, &l)
+		} else if exited == nil {
+			// a reused instance without progress (an older y-obs) is loaded
+			return nil
+		}
+		if l.URL != "" && !called && (l.Stage == "loading" || l.Stage == "loaded") {
+			called = true
+			if tty {
+				fmt.Fprint(os.Stderr, "\r\033[K")
+			}
+			fmt.Fprintf(os.Stderr, "y-obs: %s: names autocomplete; loading the samples\n", l.URL)
+			catalog(l.URL)
+		}
+		switch l.Stage {
+		case "loaded":
+			return nil
+		case "failed":
+			return fail(exitStore, "loading failed: %s", l.Error)
+		}
+		if line := progressLine(l); line != "" {
+			switch {
+			case tty:
+				fmt.Fprint(os.Stderr, "\r\033[K"+line)
+			case l.Stage != last.Stage || time.Since(lastLine) > 2*time.Second && l.Pushed != last.Pushed:
+				fmt.Fprintln(os.Stderr, line)
+				lastLine = time.Now()
+			}
+		}
+		last = l
+		select {
+		case <-exited:
+			return errServerExited
+		case <-ctx.Done():
+			return &exitError{code: exitStore, msg: "interrupted while loading; stopped"}
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+func progressLine(l loadProgress) string {
+	switch l.Stage {
+	case "planning":
+		return "y-obs: planning " + l.Window
+	case "reading":
+		return fmt.Sprintf("y-obs: reading %d objects", l.Objects)
+	case "catalog":
+		return fmt.Sprintf("y-obs: read %d samples of %d series; loading names", l.Samples, l.Series)
+	case "loading":
+		pct := 0
+		if l.Samples > 0 {
+			pct = 100 * l.Pushed / l.Samples
+		}
+		return fmt.Sprintf("y-obs: loading samples: %d of %d (%d%%)", l.Pushed, l.Samples, pct)
+	}
+	return ""
+}
+
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
 func promStatus() error {

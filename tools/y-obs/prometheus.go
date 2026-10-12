@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,7 +33,14 @@ type promServer struct {
 	reads, readErrors, readSamples, readObjects, pushed atomic.Int64
 	readNanos                                           atomic.Int64
 	pushedTo                                            atomic.Int64 // unix seconds, the push window's end
-	pushedFrom                                          atomic.Int64
+	// pushedFrom is how far back the loaded window reaches so far: the
+	// initial load moves it back slice by slice, and remote reads stop
+	// before it
+	pushedFrom atomic.Int64
+
+	progressPath string
+	progressMu   sync.Mutex
+	progress     loadProgress
 }
 
 // read answers a prompb.ReadRequest with SAMPLES, one planned session per
@@ -120,9 +129,45 @@ func matchersString(ms []matcher) string {
 	return "{" + strings.Join(parts, ", ") + "}"
 }
 
-// push writes the recent window into Prometheus by remote write, in
-// requests of about batchSamples samples.
-func (p *promServer) push(ctx context.Context, promURL string, w window) error {
+// loadProgress is what the server is doing, written to --progress-file
+// for y-obs prometheus to show while it waits.
+type loadProgress struct {
+	Stage   string    `json:"stage"` // planning, reading, catalog, loading, loaded, failed
+	Window  string    `json:"window"`
+	Objects int       `json:"objects"`
+	Series  int       `json:"series"`
+	Samples int       `json:"samples"`
+	Pushed  int       `json:"pushed"`
+	URL     string    `json:"url,omitempty"`
+	Error   string    `json:"error,omitempty"`
+	Updated time.Time `json:"updated"`
+}
+
+func (p *promServer) report(f func(*loadProgress)) {
+	if p.progressPath == "" {
+		return
+	}
+	p.progressMu.Lock()
+	defer p.progressMu.Unlock()
+	f(&p.progress)
+	p.progress.Updated = time.Now().UTC()
+	b, _ := json.Marshal(p.progress)
+	tmp := p.progressPath + ".tmp"
+	if os.WriteFile(tmp, b, 0o600) == nil {
+		os.Rename(tmp, p.progressPath)
+	}
+}
+
+// push writes a window into Prometheus by remote write. It sends a
+// catalog first, the oldest sample of every series, so every name and
+// label autocompletes within seconds, and calls catalog; then the rest of
+// each series in order. In order matters: a series whose newest sample
+// came first would take the rest out of order, which Prometheus ingests at
+// less than half the speed (measured). Each sample is sent once.
+func (p *promServer) push(ctx context.Context, promURL string, w window, initial bool, catalog func()) error {
+	if initial {
+		p.report(func(l *loadProgress) { l.Stage, l.Window = "planning", w.String() })
+	}
 	s, err := openSession(ctx, &p.sf, w)
 	if err != nil {
 		return err
@@ -134,6 +179,9 @@ func (p *promServer) push(ctx context.Context, promURL string, w window) error {
 	if n := s.planned(); n > p.sf.maxObjects {
 		return fail(exitBudget, "loading %s reads %d objects, over --max-objects %d (%s): a shorter --since, or raise --max-objects", w, n, p.sf.maxObjects, s.sourcesSummary())
 	}
+	if initial {
+		p.report(func(l *loadProgress) { l.Stage, l.Objects = "reading", s.planned() })
+	}
 	if err := s.createWindowViews(ctx); err != nil {
 		return err
 	}
@@ -144,53 +192,97 @@ func (p *promServer) push(ctx context.Context, promURL string, w window) error {
 		return err
 	}
 	readTook, pushStart := time.Since(readStart), time.Now()
-	const batchSamples = 200000
-	client := &http.Client{Timeout: 2 * time.Minute}
-	var batch []*series
-	inBatch := 0
-	send := func() error {
-		if len(batch) == 0 {
-			return nil
-		}
-		body := snappy.Encode(nil, encodeWriteRequest(batch))
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, promURL+"/api/v1/write", bytes.NewReader(body))
-		if err != nil {
+	sender := &remoteSender{url: promURL, client: &http.Client{Timeout: 2 * time.Minute}, ctx: ctx}
+	sent := 0
+	flush := func(batch []*series, k int) error {
+		if err := sender.send(batch); err != nil {
 			return err
 		}
-		req.Header.Set("Content-Type", "application/x-protobuf")
-		req.Header.Set("Content-Encoding", "snappy")
-		req.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
-		res, err := client.Do(req)
-		if err != nil {
-			return err
+		sent += k
+		p.pushed.Add(int64(k))
+		if initial {
+			p.report(func(l *loadProgress) { l.Pushed = sent })
 		}
-		defer res.Body.Close()
-		if res.StatusCode/100 != 2 {
-			msg, _ := io.ReadAll(io.LimitReader(res.Body, 512))
-			return fmt.Errorf("remote write: HTTP %d %s", res.StatusCode, strings.TrimSpace(string(msg)))
-		}
-		p.pushed.Add(int64(inBatch))
-		batch, inBatch = batch[:0], 0
 		return nil
 	}
+	if initial {
+		p.report(func(l *loadProgress) { l.Stage, l.Series, l.Samples = "catalog", len(ss), n })
+	}
+	var batch []*series
 	for _, sr := range ss {
-		batch = append(batch, sr)
-		inBatch += len(sr.samples)
-		if inBatch >= batchSamples {
-			if err := send(); err != nil {
-				return err
-			}
+		if len(sr.samples) > 0 {
+			batch = append(batch, &series{labels: sr.labels, samples: sr.samples[:1]})
 		}
 	}
-	if err := send(); err != nil {
+	if err := flush(batch, len(batch)); err != nil {
 		return err
 	}
-	if p.pushedFrom.Load() == 0 {
+	if catalog != nil {
+		catalog()
+	}
+	if initial {
+		p.report(func(l *loadProgress) { l.Stage = "loading" })
+	}
+	const batchSamples = 200000
+	batch, inBatch := []*series{}, 0
+	for _, sr := range ss {
+		if len(sr.samples) < 2 {
+			continue
+		}
+		batch = append(batch, &series{labels: sr.labels, samples: sr.samples[1:]})
+		inBatch += len(sr.samples) - 1
+		if inBatch >= batchSamples {
+			if err := flush(batch, inBatch); err != nil {
+				return err
+			}
+			batch, inBatch = []*series{}, 0
+		}
+	}
+	if err := flush(batch, inBatch); err != nil {
+		return err
+	}
+	// remote reads stop before the loaded window once all of it is in;
+	// while it loads they read the bucket too, and duplicates merge
+	if cur := p.pushedFrom.Load(); cur == 0 || w.from.Unix() < cur {
 		p.pushedFrom.Store(w.from.Unix())
 	}
 	p.pushedTo.Store(w.to.Unix())
+	if initial {
+		p.report(func(l *loadProgress) { l.Stage = "loaded" })
+	}
 	fmt.Fprintf(os.Stderr, "y-obs: loaded %d samples of %d series, %s (%s): read %s, pushed %s\n", n, len(ss), w, s.sourcesSummary(),
 		readTook.Round(time.Millisecond), time.Since(pushStart).Round(time.Millisecond))
+	return nil
+}
+
+// remoteSender posts remote-write requests to Prometheus.
+type remoteSender struct {
+	url    string
+	client *http.Client
+	ctx    context.Context
+}
+
+func (r *remoteSender) send(batch []*series) error {
+	if len(batch) == 0 {
+		return nil
+	}
+	body := snappy.Encode(nil, encodeWriteRequest(batch))
+	req, err := http.NewRequestWithContext(r.ctx, http.MethodPost, r.url+"/api/v1/write", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-protobuf")
+	req.Header.Set("Content-Encoding", "snappy")
+	req.Header.Set("X-Prometheus-Remote-Write-Version", "0.1.0")
+	res, err := r.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode/100 != 2 {
+		msg, _ := io.ReadAll(io.LimitReader(res.Body, 512))
+		return fmt.Errorf("remote write: HTTP %d %s", res.StatusCode, strings.TrimSpace(string(msg)))
+	}
 	return nil
 }
 
@@ -298,7 +390,8 @@ func cmdPrometheusServe(ctx context.Context, args []string) error {
 	p.sf.register(fs)
 	port := fs.Int("port", 0, "Prometheus's port on 127.0.0.1; 0 picks a free one")
 	maxSamples := fs.Int("max-samples", 20000000, "refuse a remote read returning more samples")
-	ready := fs.String("ready-file", "", "write the Prometheus URL here once the window is loaded")
+	ready := fs.String("ready-file", "", "write the Prometheus URL here once names autocomplete (the catalog is in)")
+	fs.StringVar(&p.progressPath, "progress-file", "", "keep the load's progress here, as JSON")
 	poll := fs.Duration("poll", 30*time.Second, "without --to, push what arrived in the bucket this often; 0 loads once")
 	fs.Usage = func() { fmt.Fprint(fs.Output(), prometheusServeUsage); fs.PrintDefaults() }
 	if err := fs.Parse(args); err != nil {
@@ -372,15 +465,19 @@ func cmdPrometheusServe(ctx context.Context, args []string) error {
 	}()
 	fmt.Fprintf(os.Stderr, "y-obs: prometheus %s ready in %s, loading %s\n", url, time.Since(started).Round(time.Millisecond), w)
 	pushStart := time.Now()
-	if err := p.push(ctx, url, w); err != nil {
+	p.report(func(l *loadProgress) { l.URL = url })
+	// the ready file is the URL once the catalog is in and names
+	// autocomplete; the progress file says when the samples are
+	writeReady := func() {
+		if *ready != "" {
+			os.WriteFile(*ready, []byte(url+"\n"), 0o600)
+		}
+	}
+	if err := p.push(ctx, url, w, true, writeReady); err != nil {
+		p.report(func(l *loadProgress) { l.Stage, l.Error = "failed", err.Error() })
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "y-obs: loaded in %s; %s\n", time.Since(pushStart).Round(time.Millisecond), url)
-	if *ready != "" {
-		if err := os.WriteFile(*ready, []byte(url+"\n"), 0o600); err != nil {
-			return err
-		}
-	}
 	if p.sf.to != "" || *poll <= 0 {
 		<-ctx.Done()
 		return nil
@@ -396,7 +493,7 @@ func cmdPrometheusServe(ctx context.Context, args []string) error {
 		case <-time.After(*poll):
 		}
 		next := window{from: last.Add(-followOverlap), to: time.Now().UTC()}
-		if err := p.push(ctx, url, next); err != nil {
+		if err := p.push(ctx, url, next, false, nil); err != nil {
 			fmt.Fprintf(os.Stderr, "y-obs: following %s: %v\n", next, err)
 			continue
 		}
