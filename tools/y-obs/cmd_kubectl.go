@@ -23,7 +23,8 @@ keeps serving and prints the KUBECONFIG to use, until interrupted.
 The objects come from the hourly tier, the hour of TIME and the two before
 (a snapshot's rows can sit in the hour before its own), else the daily
 tier, the day of TIME and the day before. --source raw reads the raw tier
-of those hours instead, for times the tiers do not have yet.
+of those hours instead, for times the tiers do not have yet: the cluster
+agent's objects only (node _k8sagent), unless --node says otherwise.
 
 The API server and etcd are the cluster's release at TIME, from its Nodes'
 kubelet version: --assets or KUBEBUILDER_ASSETS, else setup-envtest
@@ -36,6 +37,9 @@ Examples:
 
 Flags:
 `
+
+// k8sAgentNode is the node segment of the cluster agent's raw keys.
+const k8sAgentNode = "_k8sagent"
 
 // setupEnvtest is the version local/kubectl-at.sh pins.
 const setupEnvtest = "v0.25.2"
@@ -143,6 +147,13 @@ func stateAt(ctx context.Context, sf *sessionFlags, t time.Time, source string) 
 	var err error
 	switch source {
 	case "raw":
+		// apiserver rows come only from the cluster agent, whose keys use
+		// _k8sagent as the node (K8SAGENT.md): the nodes' objects are skipped
+		if sf.node == "" {
+			raw := *sf
+			raw.node = k8sAgentNode
+			sf = &raw
+		}
 		if s, err = openSession(ctx, sf, hours); err != nil {
 			return nil, "", err
 		}

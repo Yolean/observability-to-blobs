@@ -47,7 +47,11 @@ func configMaps(lines []Line) string {
 // from the same rows: asof_test.go's first snapshot and the events after it.
 func TestStateAt(t *testing.T) {
 	dir := t.TempDir()
+	// a row under a node's key: the raw source reads only the agent's
 	writeRaw(t, filepath.Join(dir, "raw1/c/2026-10-07/10/n1/0000-a.jsonl.zst"), []map[string]interface{}{
+		cm("10:13", "object-added", "decoy", "ux", "15"),
+	})
+	writeRaw(t, filepath.Join(dir, "raw1/c/2026-10-07/10/_k8sagent/0000-a.jsonl.zst"), []map[string]interface{}{
 		cm("10:00", "object-snapshot", "a", "ua", "10"),
 		cm("10:00", "object-snapshot", "b", "ub", "11"),
 		cm("10:00", "snapshot", "", "", ""),
@@ -70,7 +74,9 @@ func TestStateAt(t *testing.T) {
 		t.Errorf("no tier objects yet: %v", err)
 	}
 
-	// the hourly tier's apiserver object for 10, from the raw view
+	// the hourly tier's apiserver object for 10, from the agent's rows (a
+	// node writes none; the decoy only tests that raw skips nodes)
+	os.RemoveAll(filepath.Join(dir, "raw1/c/2026-10-07/10/n1"))
 	s, err := openSession(ctx, sf, window{from: at.Truncate(time.Hour), to: at.Truncate(time.Hour).Add(time.Hour)})
 	if err != nil {
 		t.Fatal(err)
