@@ -23,35 +23,9 @@ import (
 // access is needed. Container-level data (declared ports, restart count)
 // arrives as io.kubernetes.container.* annotations on each container.
 //
-// Two annotation conventions are honored:
-//
-// 1. The classic prometheus.io convention, single target per pod:
-//
-//		prometheus.io/scrape: "true"          opt in
-//		prometheus.io/port:   "9100"          numeric, scraped on the pod IP, or
-//		prometheus.io/port:   "metrics"       a containerPort name (first match)
-//		                      (absent)        every declared container port
-//		prometheus.io/path:   "/metrics"      default
-//		prometheus.io/scheme: "http"          default
-//
-//	 2. The OpenTelemetry collector's annotation-based discovery, which scopes
-//	    by container port and therefore handles multi-container pods without
-//	    shared port names (the receiver_creator k8s hints convention):
-//
-//	    io.opentelemetry.discovery.metrics.<port>/enabled: "true"
-//	    io.opentelemetry.discovery.metrics.<port>/config: |
-//	    metrics_path: /custom
-//	    collection_interval: 30s
-//	    io.opentelemetry.discovery.metrics/enabled: "true"   pod level: every
-//	    declared port,
-//	    port level wins
-//
-//	    <port> is a containerPort number or name. Of the config fields only
-//	    metrics_path and collection_interval apply here; endpoint is always
-//	    the pod IP and the port, and scraper defaults to prometheus (any other
-//	    scraper value skips the port: it declares a non-prometheus protocol).
-//
-// When both conventions name the same port, the port-scoped one wins.
+// Two annotation conventions are honored, prometheus.io/* and the
+// OpenTelemetry collector's io.opentelemetry.discovery.metrics[.<port>]/*;
+// their specification is the root README's "Scrape annotations".
 const (
 	annScrape = "prometheus.io/scrape"
 	annPort   = "prometheus.io/port"

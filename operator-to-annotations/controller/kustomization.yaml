@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The controller and mutating webhook (../README.md, "Controller"). Needs
+# the CRDs (../crds) and cert-manager, which issues the webhook's serving
+# certificate and injects its CA. Overlays set the image tag. The
+# namespace is observability, as for the agents; another one must also be
+# patched into the ClusterRoleBinding's subject, the webhook's
+# clientConfig.service and namespaceSelector, the Certificate's dnsNames
+# and the webhook's cert-manager.io/inject-ca-from annotation.
+namespace: observability
+
+resources:
+- rbac.yaml
+- deployment.yaml
+- certificate.yaml
+- webhook.yaml
