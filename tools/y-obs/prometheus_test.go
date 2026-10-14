@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -192,5 +193,38 @@ func TestRemoteRead(t *testing.T) {
 	}
 	if got := call(time.Date(2026, 10, 11, 9, 30, 0, 0, time.UTC), to, matcher{0, "__name__", "up"}); len(got[0]) != 0 {
 		t.Errorf("inside the push: %+v", got)
+	}
+}
+
+// Following loads only the raw objects no load has read: a second poll
+// with nothing new pushes nothing, a new object is all a third pushes.
+func TestFollowNewKeysOnly(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	key := func(at time.Time, id string) string {
+		return filepath.Join(dir, "raw1/c", at.Format("2006-01-02/15"), "n1", at.Format("0405")+"-"+id+".jsonl.zst")
+	}
+	line := func(at time.Time, v float64) map[string]interface{} {
+		return scrape(at.Format(time.RFC3339Nano), "web-1", metricSample("up", "gauge", v, map[string]string{}))
+	}
+	t1 := now.Add(-3 * time.Minute)
+	writeRaw(t, key(t1, "a"), []map[string]interface{}{line(t1, 1)})
+	var writes atomic.Int32
+	prom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writes.Add(1) }))
+	defer prom.Close()
+	p := &promServer{sf: sessionFlags{cluster: "c", blobsDir: dir, maxObjects: 100}}
+	if err := p.follow(t.Context(), prom.URL, now.Add(-5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if p.pushed.Load() != 1 || writes.Load() != 1 {
+		t.Fatalf("first poll: %d samples in %d writes", p.pushed.Load(), writes.Load())
+	}
+	if err := p.follow(t.Context(), prom.URL, now); err != nil || writes.Load() != 1 {
+		t.Fatalf("nothing new: %d writes, %v", writes.Load(), err)
+	}
+	t2 := now.Add(-time.Minute)
+	writeRaw(t, key(t2, "b"), []map[string]interface{}{line(t2, 0)})
+	if err := p.follow(t.Context(), prom.URL, now); err != nil || p.pushed.Load() != 2 || writes.Load() != 2 {
+		t.Fatalf("a new object: %d samples in %d writes, %v", p.pushed.Load(), writes.Load(), err)
 	}
 }

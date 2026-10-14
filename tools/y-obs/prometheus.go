@@ -39,8 +39,12 @@ type promServer struct {
 	pushedFrom atomic.Int64
 
 	progressPath string
-	progressMu   sync.Mutex
-	progress     loadProgress
+
+	// seen are the raw keys loaded, so that following reads only new ones
+	seenMu     sync.Mutex
+	seen       map[string]bool
+	progressMu sync.Mutex
+	progress   loadProgress
 }
 
 // read answers a prompb.ReadRequest with SAMPLES, one planned session per
@@ -187,6 +191,7 @@ func (p *promServer) push(ctx context.Context, promURL string, w window, initial
 	if s.cost() > p.sf.maxObjects {
 		return s.overBudget(p.sf.maxObjects, "loading "+w.String())
 	}
+	defer p.markSeen(s.plan["raw"])
 	if initial && s.noObjects() {
 		return s.explainEmpty(ctx)
 	}
@@ -501,9 +506,8 @@ func cmdPrometheusServe(ctx context.Context, args []string) error {
 		<-ctx.Done()
 		return nil
 	}
-	// an open-ended window follows the bucket: every poll the time since
-	// the last push, overlapping it by followOverlap for uploads that
-	// arrived late; Prometheus takes an identical sample again as a no-op
+	// an open-ended window follows the bucket: every poll it loads the raw
+	// objects it has not loaded yet
 	last := w.to
 	for {
 		select {
@@ -511,15 +515,93 @@ func cmdPrometheusServe(ctx context.Context, args []string) error {
 			return nil
 		case <-time.After(*poll):
 		}
-		next := window{from: last.Add(-followOverlap), to: time.Now().UTC()}
-		if err := p.push(ctx, url, next, false, nil); err != nil {
-			fmt.Fprintf(os.Stderr, "y-obs: following %s: %v\n", next, err)
+		now := time.Now().UTC()
+		if err := p.follow(ctx, url, last); err != nil {
+			fmt.Fprintf(os.Stderr, "y-obs: following from %s: %v\n", last.Format(time.RFC3339), err)
 			continue
 		}
-		last = next.to
+		last = now
 	}
 }
 
-// followOverlap is how far each follow push reaches back into the last
-// one: rows land in the bucket up to a minute after their time.
-const followOverlap = 2 * time.Minute
+// followMargin is how far before the last poll each poll looks for raw
+// keys: an object is keyed by when it was opened and uploaded up to
+// UPLOAD_TIMEOUT later, or later still after an outage.
+const followMargin = 10 * time.Minute
+
+// follow loads the raw objects opened since the last poll (less
+// followMargin) that no load has read. Raw objects never change, and new
+// rows come in new objects, so a poll reads about one object per node,
+// where re-reading the current hour read every one of them.
+func (p *promServer) follow(ctx context.Context, promURL string, since time.Time) error {
+	w := window{from: since.Add(-followMargin), to: time.Now().UTC()}
+	s, err := openSession(ctx, &p.sf, w)
+	if err != nil {
+		return err
+	}
+	defer s.close()
+	var keys []string
+	p.seenMu.Lock()
+	for _, h := range w.hours() {
+		files, err := s.rawHour(ctx, h)
+		if err != nil {
+			p.seenMu.Unlock()
+			return err
+		}
+		for _, f := range files {
+			if !p.seen[f] {
+				keys = append(keys, f)
+			}
+		}
+	}
+	p.seenMu.Unlock()
+	if len(keys) == 0 {
+		p.pushedTo.Store(w.to.Unix())
+		return nil
+	}
+	s.plan["raw"] = keys
+	if err := s.createViews(ctx); err != nil {
+		return err
+	}
+	// the new objects' rows whatever their time: the window views would
+	// cut a late object's older rows
+	if err := s.exec(ctx, "CREATE OR REPLACE VIEW w_metrics AS SELECT * FROM metrics"); err != nil {
+		return err
+	}
+	q, _ := metricsQuery(nil)
+	ss, n, err := collectSeries(ctx, s, q, 0)
+	if err != nil {
+		return err
+	}
+	sender := &remoteSender{url: promURL, client: &http.Client{Timeout: 2 * time.Minute}, ctx: ctx}
+	const batchSamples = 200000
+	batch, inBatch := []*series{}, 0
+	for _, sr := range ss {
+		batch = append(batch, sr)
+		inBatch += len(sr.samples)
+		if inBatch >= batchSamples {
+			if err := sender.send(batch); err != nil {
+				return err
+			}
+			batch, inBatch = []*series{}, 0
+		}
+	}
+	if err := sender.send(batch); err != nil {
+		return err
+	}
+	p.pushed.Add(int64(n))
+	p.markSeen(keys)
+	p.pushedTo.Store(w.to.Unix())
+	return nil
+}
+
+func (p *promServer) markSeen(keys []string) {
+	p.seenMu.Lock()
+	defer p.seenMu.Unlock()
+	if p.seen == nil {
+		p.seen = map[string]bool{}
+	}
+	for _, k := range keys {
+		p.seen[k] = true
+	}
+}
