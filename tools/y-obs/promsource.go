@@ -59,8 +59,10 @@ func namespaceOf(ms []matcher) string {
 }
 
 // metricsQuery selects the series of the matchers, one row each with its
-// timestamps and values as lists in time order: grouping in the engine
-// keeps the rows few and builds each label set once.
+// samples as one list of (t, v): grouping in the engine keeps the rows few
+// and builds each label set once. The list is unordered: an ordered list
+// aggregate holds its rows in memory and cannot spill, and ran out of a
+// 2 GB limit on one hour (measured); Go sorts each series instead.
 func metricsQuery(ms []matcher) (string, error) {
 	conds := []string{}
 	for _, m := range ms {
@@ -73,7 +75,7 @@ func metricsQuery(ms []matcher) (string, error) {
 	q := `SELECT name, coalesce(cluster, '') AS cluster, coalesce(node, '') AS node, coalesce(job, '') AS job,
   coalesce(instance, '') AS instance, coalesce(nullif(namespace, '_node'), '') AS namespace, coalesce(pod, '') AS pod,
   coalesce(container, '') AS container, labels,
-  list(epoch_ms(time) ORDER BY time) AS ts, list(value ORDER BY time) AS v
+  list({'t': epoch_ms(time), 'v': value}) AS s
 FROM w_metrics`
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
@@ -95,8 +97,8 @@ func collectSeries(ctx context.Context, s *session, q string, limit int) ([]*ser
 	n := 0
 	for rows.Next() {
 		var name, cluster, node, job, instance, namespace, pod, container string
-		var labels, tsList, vList any
-		if err := rows.Scan(&name, &cluster, &node, &job, &instance, &namespace, &pod, &container, &labels, &tsList, &vList); err != nil {
+		var labels, list any
+		if err := rows.Scan(&name, &cluster, &node, &job, &instance, &namespace, &pod, &container, &labels, &list); err != nil {
 			return nil, n, err
 		}
 		meta := map[string]string{"cluster": cluster, "node": node, "job": job, "instance": instance,
@@ -109,14 +111,11 @@ func collectSeries(ctx context.Context, s *session, q string, limit int) ([]*ser
 			by[key] = sr
 			order = append(order, sr)
 		}
-		tss, _ := tsList.([]any)
-		vs, _ := vList.([]any)
-		for i := range tss {
-			ts, _ := tss[i].(int64)
-			v, _ := vs[i].(float64)
-			if k := len(sr.samples); k > 0 && sr.samples[k-1].ts == ts {
-				continue
-			}
+		items, _ := list.([]any)
+		for _, it := range items {
+			m, _ := it.(map[string]any)
+			ts, _ := m["t"].(int64)
+			v, _ := m["v"].(float64)
 			sr.samples = append(sr.samples, sample{ts: ts, value: v})
 			n++
 		}
@@ -124,9 +123,19 @@ func collectSeries(ctx context.Context, s *session, q string, limit int) ([]*ser
 			return nil, n, fail(exitBudget, "more than %d samples: narrow the selector or the time range", limit)
 		}
 	}
+	// time order, and a retried upload's repeat of a timestamp once
+	n = 0
 	for _, sr := range order {
-		// series joined from several rows interleave
 		sort.SliceStable(sr.samples, func(i, j int) bool { return sr.samples[i].ts < sr.samples[j].ts })
+		kept := sr.samples[:0]
+		for _, smp := range sr.samples {
+			if k := len(kept); k > 0 && kept[k-1].ts == smp.ts {
+				continue
+			}
+			kept = append(kept, smp)
+		}
+		sr.samples = kept
+		n += len(kept)
 	}
 	return order, n, s.wrap(rows.Err())
 }
