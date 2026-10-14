@@ -231,3 +231,30 @@ func TestEngineParquetEncryption(t *testing.T) {
 		"SELECT sum(i) FROM read_parquet("+f("a.k-b64-32.parquet")+", encryption_config = {footer_key: 'b64-32'}, union_by_name = true)",
 		"INTERNAL Error")
 }
+
+// A pod with only pod rows in the range, a checkpoint of a quiet pod, is
+// one pods row without a container; a pod with container rows gets no
+// extra one.
+func TestPodsHasPodsWithOnlyPodRows(t *testing.T) {
+	ctx, c, a, b := fixture(t)
+	quiet := filepath.Join(t.TempDir(), "q.jsonl.zst")
+	if _, err := c.ExecContext(ctx, `COPY (
+	   SELECT 'podindex' AS "table", TIMESTAMP_NS '2026-09-25 14:30:00' AS time, 'itest' AS cluster,
+	          'n1' AS node, 'pod-checkpoint' AS kind, 'default' AS namespace, 'quiet' AS pod, 'u2' AS pod_uid,
+	          MAP {'app': 'quiet'} AS labels, TIMESTAMP_NS '2026-09-24 08:00:00' AS pod_started
+	 ) TO `+sqlString(quiet)+` (FORMAT json, COMPRESSION zstd)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := setRawFiles(ctx, c, []string{a, b, quiet}); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadSQL(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, ctx, c, "SELECT count(*) FROM pods WHERE pod_uid = 'u2' AND pod = 'quiet' AND container IS NULL AND phase = 'running' AND pod_started = TIMESTAMP_NS '2026-09-24 08:00:00'"); n != 1 {
+		t.Fatalf("the quiet pod: %d rows, want 1 without a container", n)
+	}
+	if n := count(t, ctx, c, "SELECT count(*) FROM pods WHERE pod_uid = 'u1'"); n != 1 {
+		t.Fatalf("u1: %d rows, want its one container row and no pod-only row", n)
+	}
+}
