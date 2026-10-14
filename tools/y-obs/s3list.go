@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -57,6 +58,7 @@ func (s *session) listPrefixes(ctx context.Context, prefix string) ([]string, er
 			req.Header.Set("X-Amz-Security-Token", st.token)
 		}
 		signV4(req, hashHex(nil), st.region, st.keyID, st.secret, time.Now())
+		s.listRequests++
 		res, err := client.Do(req)
 		if err != nil {
 			return nil, s.wrap(err)
@@ -193,3 +195,82 @@ func (s *session) clusters(ctx context.Context) ([]string, error) {
 
 // noObjects is a plan with nothing to read.
 func (s *session) noObjects() bool { return s.planned() == 0 }
+
+// listedObject is one key of a full listing.
+type listedObject struct {
+	key      string
+	size     int64
+	modified time.Time
+}
+
+// listObjects lists every key under prefix with its size and upload time:
+// ListObjectsV2 pages of 1,000 keys; for --blobs-dir a directory walk.
+func (s *session) listObjects(ctx context.Context, prefix string, fn func(listedObject)) error {
+	if !strings.HasPrefix(s.root, "s3://") {
+		base := filepath.Join(s.root, prefix)
+		return filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			info, err := d.Info()
+			if err != nil {
+				return nil
+			}
+			rel, _ := filepath.Rel(s.root, path)
+			fn(listedObject{key: filepath.ToSlash(rel), size: info.Size(), modified: info.ModTime().UTC()})
+			return nil
+		})
+	}
+	st := s.store
+	scheme := "http"
+	if st.tls {
+		scheme = "https"
+	}
+	client := &http.Client{Timeout: 60 * time.Second}
+	token := ""
+	for {
+		q := url.Values{"list-type": {"2"}, "prefix": {prefix}}
+		if token != "" {
+			q.Set("continuation-token", token)
+		}
+		path := "/" + st.bucket + "/"
+		u := &url.URL{Scheme: scheme, Host: st.endpoint, Path: path, RawPath: s3Escape(path, false), RawQuery: canonicalQuery(q)}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+		if err != nil {
+			return err
+		}
+		if st.token != "" {
+			req.Header.Set("X-Amz-Security-Token", st.token)
+		}
+		signV4(req, hashHex(nil), st.region, st.keyID, st.secret, time.Now())
+		s.listRequests++
+		res, err := client.Do(req)
+		if err != nil {
+			return s.wrap(err)
+		}
+		body, _ := io.ReadAll(io.LimitReader(res.Body, 64<<20))
+		res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			return s.wrap(fmt.Errorf("listing %s: HTTP %d %s", prefix, res.StatusCode, strings.TrimSpace(string(body[:min(len(body), 300)]))))
+		}
+		var page struct {
+			IsTruncated           bool
+			NextContinuationToken string
+			Contents              []struct {
+				Key          string
+				Size         int64
+				LastModified time.Time
+			}
+		}
+		if err := xml.Unmarshal(body, &page); err != nil {
+			return fmt.Errorf("listing %s: %w", prefix, err)
+		}
+		for _, c := range page.Contents {
+			fn(listedObject{key: c.Key, size: c.Size, modified: c.LastModified})
+		}
+		if !page.IsTruncated || page.NextContinuationToken == "" {
+			return nil
+		}
+		token = page.NextContinuationToken
+	}
+}

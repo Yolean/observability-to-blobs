@@ -12,6 +12,14 @@ Everything comes from one bucket that the cluster's agents write to about
 every 30 seconds per node. Nothing queries the cluster itself, so
 deleted pods, finished jobs and past days work the same as live ones.
 
+## Start with status
+
+`y-obs status` says what you can reach and what is there: the contexts
+and their credentials (with expiry), running Prometheus instances, and
+per cluster the span, volume and newest upload of each tier. Read it
+first when you do not know the cluster's name, or whether its data
+reaches back to the time you are asked about.
+
 ## Pick the command by what you know
 
 | You know | Start with | Then |

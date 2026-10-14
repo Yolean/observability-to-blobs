@@ -23,6 +23,7 @@ type command struct {
 
 // commands in the order an investigation uses them; help prints them so
 var commands = []command{
+	{"status", "what y-obs can reach and what is there: contexts, credentials, prometheus instances, each cluster's tiers", cmdStatus},
 	{"pods", "which pods ran: one row per incarnation, by namespace, name, label, node, phase, window or --at", cmdPods},
 	{"exits", "why containers ended: exit code, reason (OOMKilled), the limits in force", cmdExits},
 	{"logs", "one pod's log lines (or a node's journal): --tail, --grep, --previous, any past window", cmdLogs},

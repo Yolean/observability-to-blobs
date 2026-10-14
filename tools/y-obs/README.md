@@ -11,7 +11,8 @@
 > - contexts, `auth` with cache and renewal, and `mint-stub`;
 > - the window planner (each hour from one tier), `pods`, `exits`, `logs`, `grep` and `metrics`;
 > - release builds with httpfs embedded (`release.sh`, `.github/workflows/y-obs.yaml`), and `version`;
-> - `prometheus`: a local Prometheus UI over the bucket.
+> - `prometheus`: a local Prometheus UI over the bucket;
+> - `status`: contexts, credentials, instances, and each cluster's tiers.
 > The rest is design.
 
 `y-obs` is one local executable that answers the questions people (and
@@ -171,6 +172,7 @@ output into its context, and cannot see a progress bar. So:
 ```
 y-obs <command> [flags]
 
+  status        what y-obs can reach and what is there
   pods          which pods ran: one row per incarnation
   exits         why containers ended: exit code, reason, the limits in force
   logs          one pod's lines (all containers merged, or one), or a node's journal
@@ -205,6 +207,41 @@ hour is final (more than the compactor's grace, at most 30 min, past its
 end), else raw when raw objects remain. A day that only the daily tier
 still has reads the daily tier. Rows are cut to the window by time. The
 summary line counts the hours per tier.
+
+### status
+
+```
+y-obs status
+y-obs status --cluster prod --full
+y-obs status --format json
+```
+
+What y-obs can reach, and what is there, in three sections (TSV with a
+header each, or one JSON object):
+
+- **contexts.** Like `kubectl config get-contexts`: each context's
+  bucket, endpoint and the clusters its credential covers, and the
+  credential (cached with its expiry, none cached, or static keys from
+  the environment), with the one in use marked. Never the secret.
+- **prometheus.** The running `y-obs prometheus` instances.
+- **data.** Per cluster in the bucket in use, and per tier (raw,
+  hourly, daily):
+  - the first and last hour (raw) or day;
+  - objects and bytes;
+  - the newest upload and how long ago;
+  - for raw, the nodes that uploaded in its last hour, the cluster agent
+    apart.
+
+  The clusters come from the credential's scope, or from delimiter
+  listings that skip prefixes holding no cluster's data. Hourly and
+  daily are listed in full. Raw, about 120 objects per node per hour,
+  is measured over its last 24 hours of data, unless `--full` lists all
+  of it.
+
+Retention is the bucket's lifecycle rules, which a read-only key cannot
+see: the spans say how far back each tier reaches, not when it expires.
+On one hour of a single-node cluster's bucket it made 33 listing
+requests in 0.1 s.
 
 ### pods
 

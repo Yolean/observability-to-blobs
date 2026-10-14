@@ -171,22 +171,23 @@ func fail(code int, format string, a ...any) error {
 // and the variables set: views and secrets are the database's, variables
 // the connection's, and raw.sql reads its file list from a variable.
 type session struct {
-	db       *sql.DB
-	conn     *sql.Conn
-	root     string // s3://bucket or a local directory
-	store    storeConfig
-	local    string // the .duckdb file attached as local, if any
-	cluster  string
-	w        window
-	node     string
-	keyIDs   map[string]bool
-	redact   []string
-	tmp      string
-	plan     map[string][]string // view -> the objects it reads
-	wplan    *windowPlan         // the window views' plan (planner.go)
-	promql   bool                // hints speak of matchers, for remote reads
-	narrow   string              // what narrows the command's rows, for the --limit note
-	warnings []string
+	db           *sql.DB
+	conn         *sql.Conn
+	root         string // s3://bucket or a local directory
+	store        storeConfig
+	local        string // the .duckdb file attached as local, if any
+	cluster      string
+	w            window
+	node         string
+	keyIDs       map[string]bool
+	redact       []string
+	tmp          string
+	plan         map[string][]string // view -> the objects it reads
+	wplan        *windowPlan         // the window views' plan (planner.go)
+	promql       bool                // hints speak of matchers, for remote reads
+	narrow       string              // what narrows the command's rows, for the --limit note
+	listRequests int                 // the bucket listings y-obs made itself
+	warnings     []string
 	// secretStmt is the current CREATE SECRET, read by every new
 	// connection's init; a renewal replaces it
 	secretMu   sync.Mutex

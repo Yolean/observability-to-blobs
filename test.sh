@@ -1310,6 +1310,17 @@ yobs_expect "logs: the generator's lines, with timestamps" "Z [{].*hello from lo
 yobs_expect "logs _node: the kernel marker in the node's journal" "$KMSG_MARKER" logs _node "${GEN_NODE:-none}" --grep "$KMSG_MARKER" --tail 0
 yobs_expect "exits: the restarter's exit code 1" "^[^,]*,default,restarter,[^,]*,[^,]*,[0-9]+,1," exits -n default --name '^restarter$' --format csv
 yobs_expect "metrics latest: app_requests_total code 200 is 42" '"value":42' metrics latest app_requests_total --pod '^metrics-multi$' --where code=200 --format jsonl
+yobs_status() {
+  env Y_OBS_CONTEXT= S3_ENDPOINT="127.0.0.1:$S3_PORT" S3_BUCKET="$BUCKET" S3_TLS=off \
+    AWS_ACCESS_KEY_ID=demoaccess AWS_SECRET_ACCESS_KEY=demosecret target/bin/y-obs status --cluster "$CLUSTER" 2>"$INIT.yobs.err"
+}
+if out=$(yobs_status) && grep -qE "^$CLUSTER	raw	[0-9-]+T[0-9]{2}	" <<<"$out" && grep -qE "^$CLUSTER	hourly	" <<<"$out"; then
+  echo "  PASS: y-obs status: the cluster's raw and hourly tiers with their spans"
+else
+  echo "  FAIL: y-obs status: no raw and hourly rows for $CLUSTER in:" >&2
+  { echo "$out"; cat "$INIT.yobs.err"; } | sed 's/^/    /' | head -20 >&2
+  ERRORS=$((ERRORS + 1))
+fi
 yobs_expect "sql: the encrypted hourly tier with the parquet keys" "^true$" sql --parquet-keys-dir "$PARQUET_KEYS" --format csv "SELECT count(*) > 0 AS rows FROM hourly_logs"
 
 # y-obs prometheus: the last two minutes loaded, older ranges through

@@ -395,10 +395,17 @@ func windowFlags(fs *flag.FlagSet) string {
 	return strings.Join(parts, " ")
 }
 
-func promStatus() error {
+// promInstance is a running instance and its record's name.
+type promInstance struct {
+	name string
+	*promState
+}
+
+// promInstances are the running instances; stale records are dropped.
+func promInstances() ([]promInstance, error) {
 	entries, err := os.ReadDir(promStateDir())
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
+		return nil, err
 	}
 	var names []string
 	for _, e := range entries {
@@ -407,18 +414,28 @@ func promStatus() error {
 		}
 	}
 	sort.Strings(names)
-	n := 0
-	fmt.Println("instance\turl\tcluster\tloaded\tstarted\tpid")
+	var out []promInstance
 	for _, name := range names {
 		st, alive := readPromState(filepath.Join(promStateDir(), name))
 		if !alive {
 			os.Remove(filepath.Join(promStateDir(), name))
 			continue
 		}
-		n++
-		fmt.Printf("%s\t%s\t%s\t%s\t%s\t%d\n", strings.TrimSuffix(name, ".json"), st.URL, st.Cluster, st.Window, st.Started.Format(time.RFC3339), st.PID)
+		out = append(out, promInstance{strings.TrimSuffix(name, ".json"), st})
 	}
-	if n == 0 {
+	return out, nil
+}
+
+func promStatus() error {
+	inst, err := promInstances()
+	if err != nil {
+		return err
+	}
+	fmt.Println("instance\turl\tcluster\tloaded\tstarted\tpid")
+	for _, i := range inst {
+		fmt.Printf("%s\t%s\t%s\t%s\t%s\t%d\n", i.name, i.URL, i.Cluster, i.Window, i.Started.Format(time.RFC3339), i.PID)
+	}
+	if len(inst) == 0 {
 		return &exitError{code: exitNoRows}
 	}
 	return nil
