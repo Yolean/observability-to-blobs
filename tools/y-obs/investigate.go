@@ -101,12 +101,13 @@ func runInvestigation(ctx context.Context, c *sessionCommand, args []string, tab
 	if err != nil {
 		return s.wrap(err)
 	}
-	s.summary(stderr, n, more, c.limit)
+	// the summary line comes last
 	if h.cut != nil && n > 0 {
 		if note := h.cut(ctx, s, n); note != "" {
 			fmt.Fprintln(stderr, "y-obs: "+note)
 		}
 	}
+	s.summary(stderr, n, more, c.limit)
 	if n == 0 {
 		if s.noObjects() {
 			// nothing in the window at all: say what the bucket has

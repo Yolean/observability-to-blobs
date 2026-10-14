@@ -481,6 +481,8 @@ func (s *session) wrap(err error) error {
 	switch {
 	case strings.Contains(msg, "HTTP 403") || strings.Contains(msg, "HTTP 401") || strings.Contains(msg, "SignatureDoesNotMatch") || strings.Contains(msg, "InvalidAccessKeyId") || strings.Contains(msg, "ExpiredToken"):
 		return fail(exitAuth, "the store refused the credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN): %s", msg)
+	case strings.Contains(msg, "Parser Error"), strings.Contains(msg, "Binder Error"):
+		return fail(exitUsage, "%s; y-obs schema lists the views and their columns", msg)
 	case strings.Contains(msg, "Catalog Error"):
 		return fail(exitNotFound, "%s; y-obs schema lists the views", msg)
 	case strings.Contains(msg, "HTTP"), strings.Contains(msg, "IO Error"):

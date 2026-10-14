@@ -199,6 +199,9 @@ func runSQL(ctx context.Context, args []string, stdout, stderr io.Writer, now ti
 	if err != nil {
 		return s.wrap(err)
 	}
+	if strings.Contains(query, "s3://") {
+		fmt.Fprintln(stderr, "y-obs: the query reads s3:// itself: those reads are neither planned nor counted against --max-objects")
+	}
 	s.summary(stderr, n, more, c.limit)
 	if n == 0 {
 		if s.cluster != "" && s.noObjects() {

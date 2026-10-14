@@ -140,6 +140,12 @@ func TestSQLExits(t *testing.T) {
 	if _, _, err := runSQLTest(t, dir, "SELECT * FROM log"); exitOf(err) != exitNotFound || !strings.Contains(err.Error(), `Did you mean "logs"`) {
 		t.Errorf("typo: %v", err)
 	}
+	if _, _, err := runSQLTest(t, dir, "SELEC 1 FROM logs"); exitOf(err) != exitUsage {
+		t.Errorf("a syntax error: %v", err)
+	}
+	if _, _, err := runSQLTest(t, dir, "SELECT nosuchcolumn FROM logs"); exitOf(err) != exitUsage {
+		t.Errorf("an unknown column: %v", err)
+	}
 	if _, _, err := runSQLTest(t, dir); exitOf(err) != exitUsage {
 		t.Errorf("no query: %v", err)
 	}

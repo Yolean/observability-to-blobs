@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -92,6 +94,12 @@ func text(v any) string {
 	case map[string]any, []any:
 		b, _ := json.Marshal(x)
 		return string(b)
+	}
+	if f, ok := p.(float64); ok {
+		// plain decimals where they stay readable: 77094912, not 7.7094912e+07
+		if a := math.Abs(f); a == 0 || a >= 1e-6 && a < 1e15 {
+			return strconv.FormatFloat(f, 'f', -1, 64)
+		}
 	}
 	return fmt.Sprint(p)
 }
