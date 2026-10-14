@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -192,4 +193,17 @@ func runSQLTestAt(t *testing.T, dir, from, to string, args ...string) (stdout, s
 	args = append([]string{"--cluster", "c", "--blobs-dir", dir, "--from", from, "--to", to}, args...)
 	err = runSQL(context.Background(), args, &o, &e, time.Now())
 	return o.String(), e.String(), err
+}
+
+func TestEngineThreads(t *testing.T) {
+	t.Setenv("Y_OBS_THREADS", "")
+	for limit, want := range map[string]int{"2GB": 16, "512MiB": 4, "1.5 GB": 12, "100MB": 1, "bogus": 1} {
+		if got := engineThreads(limit); got != min(want, runtime.NumCPU()) {
+			t.Errorf("engineThreads(%q) = %d, want %d", limit, got, want)
+		}
+	}
+	t.Setenv("Y_OBS_THREADS", "3")
+	if got := engineThreads("2GB"); got != 3 {
+		t.Errorf("Y_OBS_THREADS=3 gave %d", got)
+	}
 }

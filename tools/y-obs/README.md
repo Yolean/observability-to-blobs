@@ -63,10 +63,13 @@ Two things make this possible now:
   `images/blobs-to-prometheus` has (`go generate` and
   `TestSigV4Copied`).
 - **The engine is bounded.** Memory is capped at 2 GB
-  (`Y_OBS_MEMORY_LIMIT`), spilling to a temporary directory, and threads
-  at 32 (`Y_OBS_THREADS`): DuckDB's memory grows with its threads. Under
-  the limit 56 threads ran out of memory and 32 did not, while 8 made
-  one- and two-day windows 3.5x slower against a remote store. Each command reads its window once,
+  (`Y_OBS_MEMORY_LIMIT`), spilling to a temporary directory. Threads
+  follow the limit, 8 per GB and at most the CPU count, so 16 by default
+  (`Y_OBS_THREADS` overrides): each DuckDB thread reserves its own
+  buffers. Under 2 GB, `pods` on 30 minutes ran out of memory at 32
+  threads and not at 16, while 8 made one- and two-day windows 3.5x
+  slower against a remote store. Running out of memory is exit 5, like
+  a plan over budget. Each command reads its window once,
   into a temporary table of the rows it scopes to, which its query and
   its follow-up questions (a cut count, the closest names) then read.
 
@@ -146,7 +149,7 @@ output into its context, and cannot see a progress bar. So:
      closest pod or metric names, DuckDB's "did you mean" for a view;
      and when the window has no object at all, the clusters with data,
      or the cluster's dates per tier;
-   - 5: the plan exceeds the budget;
+   - 5: the plan exceeds the budget, or the engine its memory;
    - 6: the store or the engine failed.
 6. **Self-describing.**
    - `y-obs <command> -h` (or `y-obs help <command>`) prints usage with

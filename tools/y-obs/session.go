@@ -241,15 +241,39 @@ func clusterFor(flagValue string, scope []string) (string, error) {
 // defaultMemoryLimit bounds the engine's memory (Y_OBS_MEMORY_LIMIT).
 const defaultMemoryLimit = "2GB"
 
-// engineThreads caps the engine's threads (Y_OBS_THREADS): its memory
-// grows with them. Under the 2 GB limit, 56 threads ran out of memory and
-// 32 did not; 8 made one- and two-day windows 3.5x slower against a
-// remote store, where more threads read more objects at once.
-func engineThreads() int {
+// threadsPerGB scales the engine's threads with its memory limit: each
+// thread reserves its own buffers, so the limit, not the CPU count, bounds
+// them. Under 2 GB, pods on a 30-minute window ran out of memory at 32
+// threads and not at 16; exits on a day was 3.5x slower at 8 than at 32.
+const threadsPerGB = 8
+
+// engineThreads is the engine's thread count (Y_OBS_THREADS), by default
+// threadsPerGB per GB of the memory limit and at most the CPU count.
+func engineThreads(limit string) int {
 	if n, err := strconv.Atoi(os.Getenv("Y_OBS_THREADS")); err == nil && n > 0 {
 		return n
 	}
-	return min(runtime.NumCPU(), 32)
+	n := 1
+	if b, ok := parseBytes(limit); ok {
+		n = max(1, int(b*threadsPerGB/1e9))
+	}
+	return min(runtime.NumCPU(), n)
+}
+
+// parseBytes reads a DuckDB memory size such as 2GB, 512MiB or 1.5 GB.
+func parseBytes(v string) (float64, bool) {
+	v = strings.ToUpper(strings.TrimSpace(v))
+	i := strings.IndexFunc(v, func(r rune) bool { return (r < '0' || r > '9') && r != '.' })
+	if i <= 0 {
+		return 0, false
+	}
+	n, err := strconv.ParseFloat(v[:i], 64)
+	if err != nil {
+		return 0, false
+	}
+	unit := map[string]float64{"B": 1, "KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12,
+		"KIB": 1 << 10, "MIB": 1 << 20, "GIB": 1 << 30, "TIB": 1 << 40}[strings.TrimSpace(v[i:])]
+	return n * unit, unit > 0
 }
 
 // openSession opens the engine. With blobsDir the tiers are read from a
@@ -323,7 +347,7 @@ func openSession(ctx context.Context, f *sessionFlags, w window) (*session, erro
 	if limit == "" {
 		limit = defaultMemoryLimit
 	}
-	for _, q := range []string{"SET memory_limit = " + sqlString(limit), "SET temp_directory = " + sqlString(s.tmp), "SET preserve_insertion_order = false", fmt.Sprintf("SET threads = %d", engineThreads())} {
+	for _, q := range []string{"SET memory_limit = " + sqlString(limit), "SET temp_directory = " + sqlString(s.tmp), "SET preserve_insertion_order = false", fmt.Sprintf("SET threads = %d", engineThreads(limit))} {
 		if err := s.exec(ctx, q); err != nil {
 			s.close()
 			return nil, err
@@ -484,6 +508,11 @@ func (s *session) wrap(err error) error {
 	switch {
 	case strings.Contains(msg, "HTTP 403") || strings.Contains(msg, "HTTP 401") || strings.Contains(msg, "SignatureDoesNotMatch") || strings.Contains(msg, "InvalidAccessKeyId") || strings.Contains(msg, "ExpiredToken"):
 		return fail(exitAuth, "the store refused the credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN): %s", msg)
+	case strings.Contains(msg, "Out of Memory Error"):
+		if i := strings.Index(msg, " Possible solutions:"); i > 0 {
+			msg = msg[:i]
+		}
+		return fail(exitBudget, "%s; narrow the window or the query, or raise Y_OBS_MEMORY_LIMIT (threads follow it, or set Y_OBS_THREADS lower)", msg)
 	case strings.Contains(msg, "Parser Error"), strings.Contains(msg, "Binder Error"):
 		return fail(exitUsage, "%s; y-obs schema lists the views and their columns", msg)
 	case strings.Contains(msg, "Catalog Error"):
