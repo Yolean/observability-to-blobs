@@ -58,7 +58,7 @@ func cmdKubectl(ctx context.Context, args []string) error {
 	at := fs.String("at", "now", "the time: now, -30m or -2d before now, or UTC 2026-10-11T09:00:00Z or '2026-10-11 09:00'")
 	source := fs.String("source", "auto", "auto, tier (hourly, else daily) or raw; auto is raw while TIME's hourly object is not final")
 	assets := fs.String("assets", os.Getenv("KUBEBUILDER_ASSETS"), "directory with etcd and kube-apiserver of the cluster's release (env KUBEBUILDER_ASSETS)")
-	verbose := fs.Bool("v", false, "pass through the API server's and etcd's output")
+	verbose := fs.Bool("v", false, "pass through the API server's and etcd's output, and say which objects were left out")
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(), kubectlUsage)
 		fs.PrintDefaults()
@@ -105,8 +105,12 @@ func cmdKubectl(ctx context.Context, args []string) error {
 	if err != nil {
 		return fail(exitStore, "the state at %s: %v", t.Format(time.RFC3339), err)
 	}
-	for reason, n := range p.Skipped {
-		fmt.Fprintf(os.Stderr, "y-obs: left out %d objects: %s\n", n, reason)
+	// every cluster with metrics-server has an aggregated APIService:
+	// left out by design (README.md, "kubectl"), so said only with -v
+	if *verbose {
+		for reason, n := range p.Skipped {
+			fmt.Fprintf(os.Stderr, "y-obs: left out %d objects: %s\n", n, reason)
+		}
 	}
 	o := Options{Assets: *assets, Prepared: p, Listen: "127.0.0.1:0", Label: t.Format("2006-01-02T15:04:05Z") + " UTC"}
 	if *verbose {

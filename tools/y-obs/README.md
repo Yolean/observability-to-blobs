@@ -447,6 +447,10 @@ kubeconfig in a temporary directory.
   `--source auto`, reads raw while T's hourly object is not final (its
   hour's end plus 30 min) and the tiers after, so `now` is current and
   not the last final hour.
+- **Left out.** APIServices served by a Service, such as
+  metrics-server's `v1beta1.metrics.k8s.io`, are not loaded: their
+  backends are not there, and every discovery would warn. So
+  `kubectl top` and other aggregated APIs do not answer; `-v` counts them.
 - **The release.** kube-apiserver and etcd are the cluster's release at
   T: `--assets`, `KUBEBUILDER_ASSETS`, or setup-envtest.
 - **Without kubectl arguments** it serves and prints the `KUBECONFIG`.
