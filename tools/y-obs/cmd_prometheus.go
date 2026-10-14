@@ -186,8 +186,12 @@ func cmdPrometheus(ctx context.Context, args []string) error {
 	}
 	asked := windowFlags(fs)
 	if alive && asked != "" && asked != st.Asked {
+		was := st.Asked
+		if was == "" {
+			was = "started without window flags, the default --since 1h"
+		}
 		return fail(exitUsage, "an instance for %s runs with window %s (%s); y-obs prometheus --stop first, or call it without --since/--from/--to to reuse it",
-			key, st.Window, st.Asked)
+			key, st.Window, was)
 	}
 	if alive {
 		// still loading: show it, and return once loaded

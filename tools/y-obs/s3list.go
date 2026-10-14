@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -84,46 +85,110 @@ func (s *session) listPrefixes(ctx context.Context, prefix string) ([]string, er
 }
 
 // explainEmpty is exit 4 for a window no tier has, saying what the bucket
-// does have: the clusters, or the cluster's first and last dates per tier.
+// does have: the clusters, or the cluster's first and last hour of raw
+// and dates of the tiers.
 func (s *session) explainEmpty(ctx context.Context) error {
-	clusters := map[string]bool{}
-	for _, tier := range []string{"raw1/", "hourly/", "daily/"} {
-		names, err := s.listPrefixes(ctx, tier)
+	clusters, err := s.clusters(ctx)
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(clusters, s.cluster) {
+		if len(clusters) == 0 {
+			return fail(exitNotFound, "the bucket holds no cluster's data under raw1/, hourly/ or daily/")
+		}
+		return fail(exitNotFound, "no cluster %q in the bucket; clusters with data: %s", s.cluster, strings.Join(clusters, ", "))
+	}
+	var have []string
+	if dates, err := s.dates(ctx, "raw1/"+s.cluster+"/"); err != nil {
+		return err
+	} else if len(dates) > 0 {
+		first, last := dates[0], dates[len(dates)-1]
+		fh, err := s.hourEdge(ctx, "raw1/"+s.cluster+"/"+first+"/", false)
 		if err != nil {
 			return err
 		}
-		for _, n := range names {
-			clusters[n] = true
+		lh, err := s.hourEdge(ctx, "raw1/"+s.cluster+"/"+last+"/", true)
+		if err != nil {
+			return err
 		}
+		have = append(have, fmt.Sprintf("raw %sT%s..%sT%s", first, fh, last, lh))
 	}
-	if !clusters[s.cluster] {
-		if len(clusters) == 0 {
-			return fail(exitNotFound, "the bucket holds no raw1/, hourly/ or daily/ data")
-		}
-		var names []string
-		for n := range clusters {
-			names = append(names, n)
-		}
-		sort.Strings(names)
-		return fail(exitNotFound, "no cluster %q in the bucket; clusters with data: %s", s.cluster, strings.Join(names, ", "))
-	}
-	var have []string
 	for _, t := range []struct{ name, prefix string }{
-		{"raw", "raw1/" + s.cluster + "/"},
 		{"hourly", "hourly/" + s.cluster + "/logs/"},
 		{"daily", "daily/" + s.cluster + "/logs/"},
 	} {
-		dates, err := s.listPrefixes(ctx, t.prefix)
+		dates, err := s.dates(ctx, t.prefix)
 		if err != nil {
 			return err
 		}
-		dates = slices.DeleteFunc(dates, func(d string) bool { return len(d) != 10 })
-		sort.Strings(dates)
 		if len(dates) > 0 {
 			have = append(have, fmt.Sprintf("%s %s..%s", t.name, dates[0], dates[len(dates)-1]))
 		}
 	}
-	return fail(exitNotFound, "cluster %s has no data in %s; it has %s: move or widen the window", s.cluster, s.w, strings.Join(have, ", "))
+	if len(have) == 0 {
+		return fail(exitNotFound, "cluster %s has no data in %s, and no dated data at all", s.cluster, s.w)
+	}
+	return fail(exitNotFound, "cluster %s has no data in %s; it has %s (UTC): move or widen the window", s.cluster, s.w, strings.Join(have, ", "))
+}
+
+var dateName = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
+// dates are the date names under prefix, sorted.
+func (s *session) dates(ctx context.Context, prefix string) ([]string, error) {
+	names, err := s.listPrefixes(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	names = slices.DeleteFunc(names, func(d string) bool { return !dateName.MatchString(d) })
+	sort.Strings(names)
+	return names, nil
+}
+
+// hourEdge is the first, or with last the last, hour name under a date.
+func (s *session) hourEdge(ctx context.Context, prefix string, last bool) (string, error) {
+	hours, err := s.listPrefixes(ctx, prefix)
+	if err != nil || len(hours) == 0 {
+		return "??", err
+	}
+	sort.Strings(hours)
+	if last {
+		return hours[len(hours)-1], nil
+	}
+	return hours[0], nil
+}
+
+// clusters are the names under raw1/, hourly/ and daily/ that hold a
+// cluster's data: raw dates, or a tier's tables. Other prefixes there,
+// such as an access check's, are not clusters.
+func (s *session) clusters(ctx context.Context) ([]string, error) {
+	found := map[string]bool{}
+	for _, tier := range []string{"raw1/", "hourly/", "daily/"} {
+		names, err := s.listPrefixes(ctx, tier)
+		if err != nil {
+			return nil, err
+		}
+		for _, n := range names {
+			if found[n] {
+				continue
+			}
+			children, err := s.listPrefixes(ctx, tier+n+"/")
+			if err != nil {
+				return nil, err
+			}
+			for _, c := range children {
+				if tier == "raw1/" && dateName.MatchString(c) || tier != "raw1/" && slices.Contains(tierTables, c) {
+					found[n] = true
+					break
+				}
+			}
+		}
+	}
+	var out []string
+	for n := range found {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // noObjects is a plan with nothing to read.
