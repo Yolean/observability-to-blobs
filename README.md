@@ -31,7 +31,8 @@ Every line is one event with a `table` field:
   kernel journal entries with `unit` and `priority`.
 - **metrics**: one line per Prometheus scrape of every pod on the node that
   opts in via `prometheus.io/*` annotations or the OpenTelemetry port-scoped
-  hints (multi-container pods opt in per port), plus node_exporter and the
+  hints (multi-container pods opt in per port; "Scrape annotations"
+  below), plus node_exporter and the
   agent's own metrics, with the samples as an array and the target's
   `pod_uid`.
 - **podindex**: pod and container lifecycle events from the CRI
@@ -59,6 +60,101 @@ producer that does talk to the API server: one replica per cluster that
 ships a fourth table, `apiserver`, with every object and Event under the
 producer segment `_k8sagent`, so that `local/kubectl-at.sh` can run
 kubectl against the cluster as it was at a time, from the blobs alone.
+
+## Scrape annotations
+
+The agent scrapes a pod when the pod's annotations ask for it, in either
+of two conventions. It reads them from the container runtime, which gets
+every pod annotation from the kubelet when it creates the pod's sandbox,
+and never from the Kubernetes API. Both conventions share these rules:
+
+- A target is the pod IP and a port; a `hostNetwork` pod's is the node IP.
+- The **declared ports** are the TCP `containerPort`s of the pod's running
+  containers.
+- Every target is attributed to the container that declares its port. A
+  port that no running container declares is still scraped, with
+  container `""`.
+- Every target is scraped every 15 s with a 10 s timeout, the agent's
+  `scrape_interval` and `scrape_timeout` (`agent/fluent-bit.yaml`), unless
+  a `collection_interval` below says otherwise.
+- A boolean is true when it is `true`, `1` or `yes`, in any case, and
+  false otherwise.
+- When both conventions name the same port, the OpenTelemetry one wins
+  for that port, in full: no field of the `prometheus.io/*` target is
+  kept.
+
+### `prometheus.io/*`
+
+| annotation | value | when absent |
+|---|---|---|
+| `prometheus.io/scrape` | boolean; true opts the pod in | not scraped |
+| `prometheus.io/port` | a port number, or a `containerPort` name: the first container, in name order, that declares it | every declared port |
+| `prometheus.io/path` | the path of every target of the pod | `/metrics` |
+| `prometheus.io/scheme` | `http` or `https`, for every target of the pod | `http` |
+
+A port name that no running container declares gives no target.
+`https` verifies the server's certificate against the image's trusted
+roots, with no TLS settings of its own.
+
+### `io.opentelemetry.discovery.metrics[.<port>]/*`
+
+| key | value |
+|---|---|
+| `…/enabled` | boolean; true opts in |
+| `…/scraper` | `prometheus` (also when absent) or `prometheus_simple`; any other value skips the port, because it names a protocol other than Prometheus exposition |
+| `…/config` | YAML, of which only two fields are read: `metrics_path` (default `/metrics`) and `collection_interval`, a Go duration such as `30s` (default the agent's `scrape_interval`; an invalid value is ignored) |
+
+The **pod-level** keys, `io.opentelemetry.discovery.metrics/*`, enable every
+declared port. The **port-scoped** keys,
+`io.opentelemetry.discovery.metrics.<port>/*`, where `<port>` is a
+`containerPort` number or name, enable that one port. A port-scoped
+number that no container declares is scraped with container `""`; a name
+that no container declares gives no target. For one port, a port-scoped
+field wins over the pod-level one, field by field, and a key scoped by
+number wins over one scoped by the port's name. A port-scoped
+`enabled: "false"` therefore excludes a port that the pod-level keys
+enable.
+
+Multi-container pods use the port-scoped form: each container's port gets
+its own `enabled`, path and interval, and each target is attributed to its
+own container.
+
+The keys follow the hints of the OpenTelemetry Collector's receiver creator
+([`receiver/receivercreator/README.md`, "Generate receiver configurations from provided Hints", at v0.162.0](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.162.0/receiver/receivercreator/README.md#generate-receiver-configurations-from-provided-hints)),
+the only specification of them; no implementation-neutral one exists.
+This agent reads a subset of them, and differs from that reference where it says so:
+
+- There, `scraper` names any receiver and `config` is that receiver's
+  configuration. Here the only scraper is Prometheus exposition, and
+  `config` holds what `prometheus_simple` calls `metrics_path` and
+  `collection_interval`; every other field is ignored, `endpoint`
+  included: the target is always the pod's address and the port.
+- There, `<port>` is a port number. Here it may also be a port's name.
+- The `io.opentelemetry.discovery.logs/*` keys are not read (below).
+
+### What the annotations cannot do
+
+By design, and so permanently:
+
+- **Annotations are read when the sandbox is created.** Annotating a
+  running pod changes nothing until the pod is recreated: the runtime
+  never sees the change, and the agent has no access to the Kubernetes
+  API.
+- **`prometheus.io/*` describes one path and one scheme per pod.** Two
+  ports with different paths need the OpenTelemetry form.
+- **A port that no container declares has no container.** Its samples
+  carry container `""`; declare the port to attribute them.
+- **A container that is not running declares no ports.** While it
+  restarts, a numeric `prometheus.io/port` or port-scoped key resolves to
+  container `""`, and a port name, or a pod that names no port, gives no
+  target for it (Known gaps).
+- **Logs ship for every container**, so there is nothing for
+  `io.opentelemetry.discovery.logs/enabled` to enable, and its `config`
+  (`file_log` operators) has no counterpart in the agent's pipeline.
+
+Not built: a scrape timeout or TLS settings per target, in either form;
+and in the OpenTelemetry form a `scheme` (it is always `http`), auth, URL
+parameters and relabeling.
 
 ## Layout
 
