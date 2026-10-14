@@ -75,7 +75,7 @@ func (f *sessionFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.to, "to", "", "window end, UTC; default now, or --from plus --since")
 	fs.StringVar(&f.blobsDir, "blobs-dir", os.Getenv("BLOBS_DIR"), "read a local directory laid out like the bucket instead of S3 (env BLOBS_DIR)")
 	fs.StringVar(&f.keysDir, "parquet-keys-dir", os.Getenv("PARQUET_KEYS_DIR"), "key files for encrypted tiers, as the compactor mounts them (env PARQUET_KEYS_DIR)")
-	fs.IntVar(&f.maxObjects, "max-objects", 200, "refuse a plan that reads more objects than this")
+	fs.IntVar(&f.maxObjects, "max-objects", 200, "refuse a plan costing more: a tier object counts 1, a raw object a tenth")
 	fs.BoolVar(&f.explain, "explain", false, "print the plan, the objects each view would read, and read nothing")
 }
 
@@ -182,6 +182,7 @@ type session struct {
 	tmp      string
 	plan     map[string][]string // view -> the objects it reads
 	wplan    *windowPlan         // the window views' plan (planner.go)
+	promql   bool                // hints speak of matchers, for remote reads
 	warnings []string
 	// secretStmt is the current CREATE SECRET, read by every new
 	// connection's init; a renewal replaces it
@@ -546,8 +547,81 @@ func (s *session) planRaw(ctx context.Context) error {
 		}
 		files = append(files, fs...)
 	}
-	s.plan["raw"] = files
+	s.plan["raw"] = s.rawInWindow(files)
 	return nil
+}
+
+// A raw key's MMSS is when the agent opened the object, which it uploads
+// within UPLOAD_TIMEOUT (30 s by default). Objects opened from rawBefore
+// before the window to rawAfter past it hold its rows: the margin after
+// takes lines that arrived late, after an outage of up to rawAfter.
+const (
+	rawBefore = 2 * time.Minute
+	rawAfter  = 5 * time.Minute
+)
+
+var rawKeyTime = regexp.MustCompile(`/(\d{4}-\d{2}-\d{2})/(\d{2})/[^/]+/(\d{2})(\d{2})-[^/]*$`)
+
+// rawInWindow keeps the raw objects opened in the window, with its
+// margins; a key without the time is kept.
+func (s *session) rawInWindow(files []string) []string {
+	from, to := s.w.from.Add(-rawBefore), s.w.to.Add(rawAfter)
+	var keep []string
+	for _, f := range files {
+		m := rawKeyTime.FindStringSubmatch(f)
+		if m == nil {
+			keep = append(keep, f)
+			continue
+		}
+		t, err := time.Parse("2006-01-02 15:04:05", m[1]+" "+m[2]+":"+m[3]+":"+m[4])
+		if err != nil || !t.Before(from) && t.Before(to) {
+			keep = append(keep, f)
+		}
+	}
+	return keep
+}
+
+// rawWeight is what a raw object costs against --max-objects: raw objects
+// are small and come one per node per upload, so they count a tenth of a
+// tier object.
+const rawWeight = 10
+
+// cost is the plan against --max-objects.
+func (s *session) cost() int {
+	n := 0
+	for v, fs := range s.plan {
+		if v == "raw" {
+			n += (len(fs) + rawWeight - 1) / rawWeight
+		} else {
+			n += len(fs)
+		}
+	}
+	return n
+}
+
+// overBudget is exit 5 with the plan and what would shrink it: raw objects
+// are per node, the daily tier's logs and metrics per namespace.
+func (s *session) overBudget(maxObjects int, what string) error {
+	raw := len(s.plan["raw"])
+	tier := s.planned() - raw
+	var hints []string
+	node, ns := "--node NODE", "-n NAMESPACE"
+	if s.promql {
+		node, ns = `a node="..." matcher`, `a namespace="..." matcher`
+	}
+	if raw > 0 {
+		hints = append(hints, node+" (raw objects are per node)")
+	}
+	if len(s.plan["daily_logs"])+len(s.plan["daily_metrics"]) > 0 {
+		hints = append(hints, ns+" (the daily tier is per namespace)")
+	}
+	hints = append(hints, "a shorter window", "or a higher --max-objects")
+	src := s.sourcesSummary()
+	if src != "" {
+		src = "; " + src
+	}
+	return fail(exitBudget, "%s costs %d, over --max-objects %d (%d raw objects at a tenth, %d tier objects: %s%s): %s",
+		what, s.cost(), maxObjects, raw, tier, s.planSummary(), src, strings.Join(hints, ", "))
 }
 
 var hourlyName = regexp.MustCompile(`/(\d\d)(?:\.k-([a-z0-9-]+))?\.parquet$`)
@@ -602,6 +676,17 @@ func keyOf(f string) string {
 // and creates them. The raw views always exist: with no raw objects in the
 // plan they read one empty file, so they have their columns and no rows.
 func (s *session) prepare(ctx context.Context, ref map[string]bool, maxObjects int) error {
+	if err := s.planRefs(ctx, ref); err != nil {
+		return err
+	}
+	if s.cost() > maxObjects {
+		return s.overBudget(maxObjects, "the plan")
+	}
+	return s.createViews(ctx)
+}
+
+// planRefs plans the views a query references, without creating them.
+func (s *session) planRefs(ctx context.Context, ref map[string]bool) error {
 	if ref["raw"] {
 		if err := s.planRaw(ctx); err != nil {
 			return err
@@ -616,10 +701,7 @@ func (s *session) prepare(ctx context.Context, ref map[string]bool, maxObjects i
 			}
 		}
 	}
-	if n := s.planned(); n > maxObjects {
-		return fail(exitBudget, "the plan reads %d objects, over --max-objects %d (%s): shorten the window, pass --node, or raise --max-objects", n, maxObjects, s.planSummary())
-	}
-	return s.createViews(ctx)
+	return nil
 }
 
 func (s *session) planned() int {

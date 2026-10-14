@@ -182,7 +182,8 @@ func (s *session) rawHour(ctx context.Context, h time.Time) ([]string, error) {
 	if s.node != "" {
 		node = s.node
 	}
-	return s.glob(ctx, fmt.Sprintf("%s/raw1/%s/%s/%s/*.jsonl.zst", s.root, s.cluster, h.Format("2006-01-02/15"), node))
+	files, err := s.glob(ctx, fmt.Sprintf("%s/raw1/%s/%s/%s/*.jsonl.zst", s.root, s.cluster, h.Format("2006-01-02/15"), node))
+	return s.rawInWindow(files), err
 }
 
 // rawHourOf is the date/HH of a raw key: raw1/{cluster}/{date}/{HH}/...

@@ -100,18 +100,25 @@ func (p *promServer) query(ctx context.Context, q readQuery) ([]*series, error) 
 		return nil, err
 	}
 	w := window{from: msTime(q.startMs), to: msTime(q.endMs + 1)}
-	s, err := openSession(ctx, &p.sf, w)
+	sf := p.sf
+	// a node matcher prunes the raw keys as --node does
+	for _, m := range q.matchers {
+		if m.name == "node" && m.typ == 0 {
+			sf.node = m.value
+		}
+	}
+	s, err := openSession(ctx, &sf, w)
 	if err != nil {
 		return nil, err
 	}
 	defer s.close()
+	s.promql = true
 	if err := s.planWindow(ctx, []string{"metrics"}, namespaceOf(q.matchers), time.Now()); err != nil {
 		return nil, err
 	}
-	n := s.planned()
-	p.readObjects.Add(int64(n))
-	if n > p.sf.maxObjects {
-		return nil, fmt.Errorf("%s over %s reads %d objects, over --max-objects %d (%s): narrow the time range or add a namespace matcher", matchersString(q.matchers), w, n, p.sf.maxObjects, s.sourcesSummary())
+	p.readObjects.Add(int64(s.planned()))
+	if s.cost() > p.sf.maxObjects {
+		return nil, s.overBudget(p.sf.maxObjects, matchersString(q.matchers)+" over "+w.String())
 	}
 	if err := s.createWindowViews(ctx); err != nil {
 		return nil, err
@@ -176,8 +183,8 @@ func (p *promServer) push(ctx context.Context, promURL string, w window, initial
 	if err := s.planWindow(ctx, []string{"metrics"}, "", time.Now()); err != nil {
 		return err
 	}
-	if n := s.planned(); n > p.sf.maxObjects {
-		return fail(exitBudget, "loading %s reads %d objects, over --max-objects %d (%s): a shorter --since, or raise --max-objects", w, n, p.sf.maxObjects, s.sourcesSummary())
+	if s.cost() > p.sf.maxObjects {
+		return s.overBudget(p.sf.maxObjects, "loading "+w.String())
 	}
 	if initial {
 		p.report(func(l *loadProgress) { l.Stage, l.Objects = "reading", s.planned() })

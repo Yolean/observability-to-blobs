@@ -119,3 +119,38 @@ func TestPlanWindowPartialDayAndKeys(t *testing.T) {
 		t.Errorf("w_logs: %v %v", got, err)
 	}
 }
+
+// Raw keys are cut to the window by their open time, with its margins;
+// a raw object costs a tenth.
+func TestRawInWindow(t *testing.T) {
+	s := &session{w: window{from: time.Date(2026, 10, 11, 9, 10, 0, 0, time.UTC), to: time.Date(2026, 10, 11, 9, 20, 0, 0, time.UTC)}, plan: map[string][]string{}}
+	files := []string{
+		"s3://b/raw1/c/2026-10-11/09/n1/0700-a.jsonl.zst", // before the margin
+		"s3://b/raw1/c/2026-10-11/09/n1/0815-a.jsonl.zst", // in the margin before
+		"s3://b/raw1/c/2026-10-11/09/n1/1500-a.jsonl.zst",
+		"s3://b/raw1/c/2026-10-11/09/n1/2430-a.jsonl.zst", // in the margin after
+		"s3://b/raw1/c/2026-10-11/09/n1/2500-a.jsonl.zst", // past it
+		"s3://b/raw1/c/2026-10-11/09/n1/x.jsonl.zst",      // no time: kept
+	}
+	got := s.rawInWindow(files)
+	if strings.Join(got, " ") != strings.Join([]string{files[1], files[2], files[3], files[5]}, " ") {
+		t.Errorf("%v", got)
+	}
+	s.plan["raw"] = make([]string, 21)
+	s.plan["hourly_logs"] = make([]string, 3)
+	if c := s.cost(); c != 6 {
+		t.Errorf("cost %d, want 3 + ceil(21/10) = 6", c)
+	}
+	err := s.overBudget(5, "the plan")
+	if exitOf(err) != exitBudget || !strings.Contains(err.Error(), "--node NODE") || strings.Contains(err.Error(), "-n NAMESPACE") {
+		t.Errorf("%v", err)
+	}
+}
+
+func TestExplainOverBudget(t *testing.T) {
+	dir := fixture(t)
+	out, _, err := runSQLTest(t, dir, "--explain", "--max-objects", "0", "SELECT * FROM logs")
+	if exitOf(err) != exitBudget || !strings.Contains(out, "raw\t1 objects") {
+		t.Errorf("explain over budget: %q %v", out, err)
+	}
+}

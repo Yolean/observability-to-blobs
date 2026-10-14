@@ -142,14 +142,24 @@ func runSQL(ctx context.Context, args []string, stdout, stderr io.Writer, now ti
 		}
 		defer s.close()
 		ref := referenced(query)
-		if err := s.prepare(ctx, ref, c.sf.maxObjects); err != nil {
+		if err := s.planRefs(ctx, ref); err != nil {
+			return err
+		}
+		if c.sf.explain {
+			s.printPlan(stdout)
+			if s.cost() > c.sf.maxObjects {
+				return s.overBudget(c.sf.maxObjects, "the plan")
+			}
+			return nil
+		}
+		if s.cost() > c.sf.maxObjects {
+			return s.overBudget(c.sf.maxObjects, "the plan")
+		}
+		if err := s.createViews(ctx); err != nil {
 			return err
 		}
 		for _, msg := range s.warnings {
 			fmt.Fprintln(stderr, "y-obs: "+msg)
-		}
-		if c.sf.explain {
-			return s.printPlan(stdout)
 		}
 		if miss := s.missingViews(ref); len(miss) > 0 {
 			return fail(exitNoRows, "%s: no objects in the window %s; widen --since/--from/--to, or read the raw views for the last hours", strings.Join(miss, ", "), w)
@@ -211,7 +221,7 @@ func (s *session) summary(w io.Writer, n int, more bool, limit int) {
 }
 
 func (s *session) printPlan(w io.Writer) error {
-	fmt.Fprintf(w, "cluster %s, window %s, %d objects\n", s.cluster, s.w, s.planned())
+	fmt.Fprintf(w, "cluster %s, window %s, %d objects, cost %d (a raw object counts a tenth)\n", s.cluster, s.w, s.planned(), s.cost())
 	for _, v := range s.planViews() {
 		fs := s.plan[v]
 		fmt.Fprintf(w, "%s\t%d objects\n", v, len(fs))

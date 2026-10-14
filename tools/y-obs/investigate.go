@@ -31,12 +31,18 @@ func runInvestigation(ctx context.Context, c *sessionCommand, args []string, tab
 	if err := s.planWindow(ctx, tables, ns, now); err != nil {
 		return err
 	}
-	if n := s.planned(); n > c.sf.maxObjects {
-		return fail(exitBudget, "the plan reads %d objects, over --max-objects %d (%s; %s): shorten the window, add -n or --node, or raise --max-objects", n, c.sf.maxObjects, s.planSummary(), s.sourcesSummary())
-	}
+	over := s.cost() > c.sf.maxObjects
 	if c.sf.explain {
+		// the plan is worth seeing most when it is too big
 		fmt.Fprintln(stdout, s.sourcesSummary())
-		return s.printPlan(stdout)
+		s.printPlan(stdout)
+		if over {
+			return s.overBudget(c.sf.maxObjects, "the plan")
+		}
+		return nil
+	}
+	if over {
+		return s.overBudget(c.sf.maxObjects, "the plan")
 	}
 	if err := s.createWindowViews(ctx); err != nil {
 		return err
