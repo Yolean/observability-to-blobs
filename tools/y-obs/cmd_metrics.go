@@ -233,12 +233,12 @@ GROUP BY ALL ORDER BY ` + strings.Join(byKeys, ", ") + `, time`
 		if name == "" {
 			return nil
 		}
-		n, err := s.strings(ctx, "SELECT CAST(count(*) AS VARCHAR) FROM w_metrics WHERE name = "+sqlString(name))
-		if err != nil || len(n) == 0 || n[0] != "0" {
+		// one read: the name itself ranks first when it is there
+		near, err := s.strings(ctx, "SELECT name FROM (SELECT DISTINCT name FROM w_metrics) ORDER BY name = "+sqlString(name)+" DESC, jaro_winkler_similarity(name, "+sqlString(name)+") DESC LIMIT 5")
+		if err != nil || len(near) > 0 && near[0] == name {
 			return nil
 		}
-		near, err := s.strings(ctx, "SELECT name FROM (SELECT DISTINCT name FROM w_metrics) ORDER BY jaro_winkler_similarity(name, "+sqlString(name)+") DESC LIMIT 5")
-		if err != nil || len(near) == 0 {
+		if len(near) == 0 {
 			return fail(exitNotFound, "no samples of any metric in %s", s.w)
 		}
 		return fail(exitNotFound, "no metric %s in %s; closest names: %s", name, s.w, strings.Join(near, ", "))

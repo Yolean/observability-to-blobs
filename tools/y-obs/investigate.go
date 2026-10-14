@@ -47,6 +47,15 @@ func runInvestigation(ctx context.Context, c *sessionCommand, args []string, tab
 	if err := s.createWindowViews(ctx); err != nil {
 		return err
 	}
+	// read the window once: a temp table shadows the view of its name, so
+	// the query and the hooks read the scoped rows, not the objects again
+	for _, t := range tables {
+		if cond, ok := h.scope[t]; ok {
+			if err := s.exec(ctx, "CREATE TEMP TABLE w_"+t+" AS SELECT * FROM main.w_"+t+" WHERE "+cond); err != nil {
+				return err
+			}
+		}
+	}
 	for _, msg := range s.warnings {
 		fmt.Fprintln(stderr, "y-obs: "+msg)
 	}
@@ -122,6 +131,10 @@ type hook struct {
 	// empty explains an empty result, for example with exit 4 and the
 	// names that do exist; nil error keeps exit 1
 	empty func(ctx context.Context, s *session) error
+	// scope, per table, is a condition that every query of the command
+	// (its own and the hooks') keeps to: the window's rows are read once,
+	// into a temp table of the rows that meet it
+	scope map[string]string
 }
 
 // strings runs a query of one text column.

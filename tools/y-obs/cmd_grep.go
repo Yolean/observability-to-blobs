@@ -134,7 +134,7 @@ FROM t ORDER BY time, namespace, pod, container, message`
 			q = last + "SELECT time, namespace, pod, pod_uid, container, restart, message FROM t ORDER BY time, namespace, pod, container, message"
 		}
 	}
-	h := hook{cut: func(ctx context.Context, s *session, printed int) string {
+	h := hook{scope: map[string]string{"logs": strings.Join(where, " AND ")}, cut: func(ctx context.Context, s *session, printed int) string {
 		if count || limit == 0 || printed < limit {
 			return ""
 		}

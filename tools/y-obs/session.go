@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -236,6 +237,18 @@ func clusterFor(flagValue string, scope []string) (string, error) {
 	return cluster, nil
 }
 
+// defaultMemoryLimit bounds the engine's memory (Y_OBS_MEMORY_LIMIT).
+const defaultMemoryLimit = "2GB"
+
+// engineThreads caps the engine's threads (Y_OBS_THREADS): its memory
+// grows with them, and the reads are bound by the store, not the CPU.
+func engineThreads() int {
+	if n, err := strconv.Atoi(os.Getenv("Y_OBS_THREADS")); err == nil && n > 0 {
+		return n
+	}
+	return min(runtime.NumCPU(), 8)
+}
+
 // openSession opens the engine. With blobsDir the tiers are read from a
 // local directory and no extension is loaded; otherwise httpfs is loaded,
 // from HTTPFS_EXTENSION when set, else installed from DuckDB's signed
@@ -280,7 +293,7 @@ func openSession(ctx context.Context, f *sessionFlags, w window) (*session, erro
 		}
 		s.setSecret(st)
 	}
-	init = append(init, "SET TimeZone = 'UTC'", "SET enable_object_cache = true")
+	init = append(init, "SET TimeZone = 'UTC'", "SET enable_object_cache = true", "SET enable_http_metadata_cache = true")
 	if f.keysDir != "" {
 		stmts, err := s.parquetKeys(f.keysDir)
 		if err != nil {
@@ -300,6 +313,18 @@ func openSession(ctx context.Context, f *sessionFlags, w window) (*session, erro
 	if s.tmp, err = os.MkdirTemp("", "y-obs-"); err != nil {
 		s.close()
 		return nil, err
+	}
+	// a bounded engine that spills to the session's directory: a two-day
+	// window ran to 4.4 GB of memory without a limit
+	limit := os.Getenv("Y_OBS_MEMORY_LIMIT")
+	if limit == "" {
+		limit = defaultMemoryLimit
+	}
+	for _, q := range []string{"SET memory_limit = " + sqlString(limit), "SET temp_directory = " + sqlString(s.tmp), "SET preserve_insertion_order = false", fmt.Sprintf("SET threads = %d", engineThreads())} {
+		if err := s.exec(ctx, q); err != nil {
+			s.close()
+			return nil, err
+		}
 	}
 	return s, nil
 }

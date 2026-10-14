@@ -154,6 +154,9 @@ t AS (SELECT * FROM g ORDER BY time DESC, container, restart, message`
 			}
 			return fmt.Sprintf("%d earlier lines not shown: --tail 0 for every line, or narrow with --grep, --since or a container", total-printed)
 		},
+		// the namespace's rows: the query, the cut count and the closest
+		// pods all come from them
+		scope: map[string]string{"logs": "namespace = " + sqlString(ns)},
 		empty: func(ctx context.Context, s *session) error {
 			return logsMissing(ctx, s, ns, pod, container, who, part, match != "" || uid != "" || restart >= 0 || previous)
 		},

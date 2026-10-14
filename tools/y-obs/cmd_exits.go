@@ -86,5 +86,7 @@ SELECT e.time, e.namespace, e.pod, e.pod_uid, e.container, e.restart, e.exit_cod
   r.memory_limit, r.cpu_quota, e.node
 FROM e LEFT JOIN r ON r.pod_uid = e.pod_uid AND r.container = e.container AND r.restart IS NOT DISTINCT FROM e.restart
 ORDER BY e.time DESC`
-	return runInvestigation(ctx, c, args, []string{"podindex"}, ns, q, "exits", stdout, stderr, now)
+	// the query reads the exits and the container rows: once
+	return runInvestigation(ctx, c, args, []string{"podindex"}, ns, q, "exits", stdout, stderr, now,
+		hook{scope: map[string]string{"podindex": "kind IN ('container-exit', 'container')"}})
 }
