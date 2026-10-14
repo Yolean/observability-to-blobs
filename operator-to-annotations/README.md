@@ -68,12 +68,21 @@ and the controller together:
 kubectl apply --server-side -k operator-to-annotations
 ```
 
+`controller/` alone has no CRDs: compose it with the CRD bases the
+cluster lacks. It needs the PodMonitor CRD; without the ServiceMonitor
+CRD it does not watch ServiceMonitors (checked at start).
+
 It needs [cert-manager](https://cert-manager.io/): a self-signed Issuer
 and a Certificate for the webhook's Service write the serving Secret, and
 cert-manager injects the CA into the MutatingWebhookConfiguration
 (`cert-manager.io/inject-ca-from`). The CRDs alone do not need it. The
-namespace is `observability`; see `controller/kustomization.yaml` for
-what another one must patch.
+certificate is its own CA, so each renewal (every 60 days) changes the CA:
+until cert-manager has injected the new one and the controller has reloaded
+the files, the API server cannot reach the webhook, and pods created in
+that window are admitted unannotated (failure policy `Ignore`, below).
+
+The **namespace is fixed** at `observability`: an overlay that sets another
+must also patch what `controller/kustomization.yaml` lists.
 
 ### What it does
 
@@ -123,16 +132,32 @@ io.opentelemetry.discovery.metrics.<containerPort number>/config: |  # when path
   lists the PodMonitors applied. It has no scrape meaning; the report
   reads it.
 
-Warnings go to the controller's log, as JSON lines, and to the client
-that created the pod as admission warnings (for a ReplicaSet's pods that
-is the controller manager, so the log is the place to look).
+Warnings about a pod (ports, pre-existing annotations) go to the
+controller's log, as JSON lines, and to the client that created the pod as
+admission warnings (for a ReplicaSet's pods that is the controller
+manager, so the log is the place to look). Fields that are not
+translated are in the report, not in admission warnings. A server-side
+dry run gets the same answer, but is not logged.
 
 **Existing pods are left alone**: the runtime reads annotations only when
 it creates the pod's sandbox, so a PodMonitor applies to pods created
 after it. The **failure policy is `Ignore`**: a webhook that is down, or
 not yet up, never blocks pod creation, and the pods created meanwhile are
 not annotated until they are recreated. The report (below) lists such
-pods. The webhook skips its own pods.
+pods.
+
+**Not in `kube-system` or the controller's own namespace.** The API server
+calls the webhook for every pod created where the webhook configuration
+selects, PodMonitor or not: it knows nothing about PodMonitors. A webhook
+that hangs adds up to its timeout (5 s) to each of those pod creations, so
+its `namespaceSelector` leaves out `kube-system` and `observability`;
+PodMonitors of pods there do not apply.
+
+**Where a sidecar starts before the main container**, the main
+container's port is briefly a target with container `""`: until a
+container runs, the agent does not know its declared ports (root README,
+"What the annotations cannot do"). With numeric keys, which this
+controller always writes, that window is common.
 
 **ServiceMonitor is not supported** yet: the controller logs "ServiceMonitor
 is not supported, its targets are not scraped" for each, once per
@@ -157,8 +182,17 @@ the agent does anyway, and are not.
 | `scrapeTimeout` | the agent has one timeout for every target |
 | `params` | no URL parameters in the annotations |
 | `relabelings`, `metricRelabelings`, `honorLabels: true`, `honorTimestamps`, `trackTimestampsStaleness` | the agent ships samples as scraped, with the pod's identity; selection and relabeling belong to the consumers |
-| spec `jobLabel`, `podTargetLabels`, `attachMetadata` | the agent attaches the pod's identity, and the podindex has the labels |
 | spec `sampleLimit`, `targetLimit`, label limits, `bodySizeLimit`, `keepDroppedTargets`, scrape protocols, native histogram settings, `scrapeClass` | settings of a Prometheus server, not of a scrape target |
+
+`jobLabel`, `podTargetLabels` and `attachMetadata` are not counted as
+untranslated: they copy pod metadata onto each target, and the agent's rows
+carry the pod's identity (namespace, pod, `pod_uid`, container) instead,
+with the pod's labels in the podindex. A consumer that expects the
+operator's `job` label or label copies on each sample joins for them.
+
+**Volume.** A PodMonitor written for prometheus-operator may count on its
+`metricRelabelings` to drop series. They are not applied here (the report
+lists them as untranslated), so every series of its targets is shipped.
 
 ### Reporting
 

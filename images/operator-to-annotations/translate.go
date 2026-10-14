@@ -177,8 +177,15 @@ var (
 	// endpoint fields the translation carries
 	translatedEndpointFields = map[string]bool{"port": true, "portNumber": true, "targetPort": true, "path": true, "interval": true}
 	// spec fields the selection carries; selectorMechanism only chooses
-	// how the operator implements the same selection
-	translatedSpecFields = map[string]bool{"selector": true, "namespaceSelector": true, "podMetricsEndpoints": true, "selectorMechanism": true}
+	// how the operator implements the same selection. jobLabel,
+	// podTargetLabels and attachMetadata label a target with pod metadata:
+	// the agent's rows carry the pod's identity (namespace, pod, pod_uid,
+	// container) instead, and its podindex the pod's labels, so a consumer
+	// joins for them. That is a gap only for a consumer that expects the
+	// operator's job label or label copies on each sample; they do not
+	// count as untranslated.
+	translatedSpecFields = map[string]bool{"selector": true, "namespaceSelector": true, "podMetricsEndpoints": true, "selectorMechanism": true,
+		"jobLabel": true, "podTargetLabels": true, "attachMetadata": true}
 )
 
 // untranslated lists the fields set in v (a spec or an endpoint) that

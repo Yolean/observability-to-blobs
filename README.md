@@ -109,7 +109,11 @@ declared port. The **port-scoped** keys,
 `io.opentelemetry.discovery.metrics.<port>/*`, where `<port>` is a
 `containerPort` number or name, enable that one port. A port-scoped
 number that no container declares is scraped with container `""`; a name
-that no container declares gives no target. For one port, a port-scoped
+that no container declares gives no target, and a name that several
+containers declare scrapes the first of them, in name order, only. (The
+PodMonitor webhook, `operator-to-annotations/`, resolves a name to every
+container that declares it and writes a key per port number, so its pods
+do not meet this.) For one port, a port-scoped
 field wins over the pod-level one, field by field, and a key scoped by
 number wins over one scoped by the port's name. A port-scoped
 `enabled: "false"` therefore excludes a port that the pod-level keys

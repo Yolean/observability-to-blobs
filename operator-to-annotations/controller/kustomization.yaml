@@ -7,8 +7,8 @@ kind: Kustomization
 # certificate and injects its CA. Overlays set the image tag. The
 # namespace is observability, as for the agents; another one must also be
 # patched into the ClusterRoleBinding's subject, the webhook's
-# clientConfig.service, the Certificate's dnsNames and the webhook's
-# cert-manager.io/inject-ca-from annotation.
+# clientConfig.service and namespaceSelector, the Certificate's dnsNames
+# and the webhook's cert-manager.io/inject-ca-from annotation.
 namespace: observability
 
 resources:

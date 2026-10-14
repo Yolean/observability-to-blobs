@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"log/slog"
-	"net/http"
 	"sort"
 	"strings"
 
@@ -26,7 +25,9 @@ type podAnnotator struct {
 func (a *podAnnotator) Handle(ctx context.Context, req admission.Request) admission.Response {
 	pod := &corev1.Pod{}
 	if err := a.decoder.Decode(req, pod); err != nil {
-		return admission.Errored(http.StatusBadRequest, err)
+		// an error response is a denial, whatever the failure policy
+		a.log.Error("decoding the pod, admitted unannotated", "namespace", req.Namespace, "err", err)
+		return admission.Allowed("")
 	}
 	name := pod.Name
 	if name == "" {
@@ -52,13 +53,20 @@ func (a *podAnnotator) Handle(ctx context.Context, req admission.Request) admiss
 		}
 	}
 	res := Translate(podName, pod, selecting)
-	for _, w := range res.Warnings {
-		a.log.Warn(w, "pod", podName)
+	// a server-side dry run gets the same answer, but creates no pod:
+	// nothing to log
+	dryRun := req.DryRun != nil && *req.DryRun
+	if !dryRun {
+		for _, w := range res.Warnings {
+			a.log.Warn(w, "pod", podName)
+		}
 	}
 	if len(res.Annotations) == 0 {
 		return admission.Allowed("").WithWarnings(res.Warnings...)
 	}
-	a.log.Info("annotated", "pod", podName, "podMonitors", res.Annotations[Marker], "annotations", len(res.Annotations)-1)
+	if !dryRun {
+		a.log.Info("annotated", "pod", podName, "podMonitors", res.Annotations[Marker], "annotations", len(res.Annotations)-1)
+	}
 	resp := admission.Allowed("")
 	resp.Patches = annotationPatch(pod.Annotations, res.Annotations)
 	return resp.WithWarnings(res.Warnings...)

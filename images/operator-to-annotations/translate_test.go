@@ -245,7 +245,8 @@ podMetricsEndpoints:
   basicAuth: {username: {name: s, key: u}}
 `)
 	spec, eps := Untranslated(pm)
-	if want := []string{"jobLabel", "podTargetLabels", "sampleLimit"}; !reflect.DeepEqual(spec, want) {
+	// jobLabel and podTargetLabels are covered by the pod's identity
+	if want := []string{"sampleLimit"}; !reflect.DeepEqual(spec, want) {
 		t.Fatalf("spec %v", spec)
 	}
 	if len(eps[0]) != 0 {

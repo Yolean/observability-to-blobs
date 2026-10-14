@@ -27,6 +27,16 @@ webhooks:
     apiVersions: [v1]
     resources: [pods]
     scope: Namespaced
+  # The API server calls the webhook for every pod created where these
+  # select, whether or not a PodMonitor selects it: not kube-system, nor
+  # the controller's own namespace, so that a webhook that hangs cannot
+  # slow those down (timeoutSeconds each). PodMonitors of pods there do
+  # not apply.
+  namespaceSelector:
+    matchExpressions:
+    - key: kubernetes.io/metadata.name
+      operator: NotIn
+      values: [kube-system, observability]
   # not its own pods: it cannot answer before it runs
   objectSelector:
     matchExpressions:
