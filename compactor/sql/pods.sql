@@ -48,7 +48,16 @@ CREATE OR REPLACE VIEW pods AS
   keys AS (
     SELECT pod_uid, container, restart FROM l
     UNION SELECT pod_uid, container, restart FROM c
-    UNION SELECT pod_uid, container, restart FROM m)
+    UNION SELECT pod_uid, container, restart FROM m),
+  -- a pod whose only rows are its own (a pod-checkpoint of a pod that
+  -- logged nothing, started no container and was not scraped in the
+  -- range) is one row without a container: absent, it would read as a pod
+  -- that did not run
+  pod_keys AS (
+    SELECT * FROM keys
+    UNION ALL
+    SELECT pod_uid, NULL::VARCHAR AS container, NULL::INTEGER AS restart FROM p
+    ANTI JOIN keys USING (pod_uid))
   SELECT coalesce(p.namespace, l.namespace, m.namespace) AS namespace,
          coalesce(p.pod, l.pod, m.pod) AS pod, k.pod_uid,
          coalesce(p.node, l.node, m.node) AS node,
@@ -85,7 +94,7 @@ CREATE OR REPLACE VIEW pods AS
          c.memory_limit, c.cpu_quota, c.cpu_shares,
          l.first_log, l.last_log, l.lines, l.bytes,
          c.container_exited, c.exit_code, c.exit_reason, c.exit_message, p.pod_deleted, m.metric_names
-  FROM keys k
+  FROM pod_keys k
   LEFT JOIN l USING (pod_uid, container, restart)
   LEFT JOIN c USING (pod_uid, container, restart)
   LEFT JOIN p USING (pod_uid)
