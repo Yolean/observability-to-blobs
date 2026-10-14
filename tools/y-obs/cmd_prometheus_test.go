@@ -65,6 +65,16 @@ func TestWaitLoaded(t *testing.T) {
 	if err := waitLoaded(t.Context(), path, make(chan struct{}), func(string) {}); exitOf(err) != exitStore || !strings.Contains(err.Error(), "HTTP 400") {
 		t.Errorf("failed: %v", err)
 	}
+	write(loadProgress{Stage: "failed", Error: "loading costs 27, over --max-objects 20", Code: exitBudget})
+	if err := waitLoaded(t.Context(), path, make(chan struct{}), func(string) {}); exitOf(err) != exitBudget {
+		t.Errorf("over budget: %v", err)
+	}
+	// a reused, loaded instance: no catalog line, no callback
+	write(loadProgress{Stage: "loaded", URL: "http://x"})
+	called := false
+	if err := waitLoaded(t.Context(), path, nil, func(string) { called = true }); err != nil || called {
+		t.Errorf("reused and loaded: %v, callback %v", err, called)
+	}
 	// a reused instance of an older y-obs has no progress file
 	if err := waitLoaded(t.Context(), filepath.Join(t.TempDir(), "none"), nil, func(string) {}); err != nil {
 		t.Errorf("no progress file on reuse: %v", err)

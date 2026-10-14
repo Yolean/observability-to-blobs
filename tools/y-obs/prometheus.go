@@ -147,6 +147,7 @@ type loadProgress struct {
 	Pushed  int       `json:"pushed"`
 	URL     string    `json:"url,omitempty"`
 	Error   string    `json:"error,omitempty"`
+	Code    int       `json:"code,omitempty"` // the exit code of a failed load
 	Updated time.Time `json:"updated"`
 }
 
@@ -481,7 +482,12 @@ func cmdPrometheusServe(ctx context.Context, args []string) error {
 		}
 	}
 	if err := p.push(ctx, url, w, true, writeReady); err != nil {
-		p.report(func(l *loadProgress) { l.Stage, l.Error = "failed", err.Error() })
+		code := exitStore
+		var ee *exitError
+		if errors.As(err, &ee) {
+			code = ee.code
+		}
+		p.report(func(l *loadProgress) { l.Stage, l.Error, l.Code = "failed", err.Error(), code })
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "y-obs: loaded in %s; %s\n", time.Since(pushStart).Round(time.Millisecond), url)

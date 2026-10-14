@@ -293,6 +293,10 @@ func waitLoaded(ctx context.Context, progressPath string, exited <-chan struct{}
 			// a reused instance without progress (an older y-obs) is loaded
 			return nil
 		}
+		if exited == nil && l.Stage == "loaded" && !called {
+			// a reused instance that finished loading: nothing to show
+			return nil
+		}
 		if l.URL != "" && !called && (l.Stage == "loading" || l.Stage == "loaded") {
 			called = true
 			if tty {
@@ -305,7 +309,12 @@ func waitLoaded(ctx context.Context, progressPath string, exited <-chan struct{}
 		case "loaded":
 			return nil
 		case "failed":
-			return fail(exitStore, "loading failed: %s", l.Error)
+			// the server's own exit code: 5 over budget, 4 nothing there
+			code := l.Code
+			if code == 0 {
+				code = exitStore
+			}
+			return fail(code, "%s", l.Error)
 		}
 		if line := progressLine(l); line != "" {
 			switch {
