@@ -117,3 +117,35 @@ func TestLimitNoteBeforeSummary(t *testing.T) {
 		t.Errorf("stderr: %q", e)
 	}
 }
+
+// Without a window flag pods lists the pods alive now; --at takes now
+// and a duration before now.
+func TestPodsAtDefaultsToNow(t *testing.T) {
+	dir := podsFixture(t)
+	for _, c := range []struct {
+		args []string
+		pods string
+	}{
+		{nil, "web-abc-x1y2z"},
+		{[]string{"--at", "now"}, "web-abc-x1y2z"},
+		{[]string{"--at", "-40m"}, "job-1,web-abc-x1y2z"},
+		{[]string{"--at=-55m"}, "web-abc-x1y2z"},
+		{[]string{"--since", "1h"}, "job-1,web-abc-x1y2z"},
+	} {
+		var o, e bytes.Buffer
+		err := pods(context.Background(), append([]string{"--cluster", "c", "--blobs-dir", dir, "--format", "csv"}, c.args...), &o, &e)
+		var got []string
+		for i, l := range strings.Split(strings.TrimSpace(o.String()), "\n") {
+			if i > 0 && l != "" {
+				got = append(got, strings.Split(l, ",")[1])
+			}
+		}
+		if strings.Join(got, ",") != c.pods {
+			t.Errorf("%v: %v (%v) %s", c.args, got, err, e.String())
+		}
+	}
+	var o, e bytes.Buffer
+	if err := pods(context.Background(), []string{"--cluster", "c", "--blobs-dir", dir, "--at", "-soon"}, &o, &e); exitOf(err) != exitUsage || !strings.Contains(err.Error(), "-30m") {
+		t.Errorf("bad --at: %v", err)
+	}
+}

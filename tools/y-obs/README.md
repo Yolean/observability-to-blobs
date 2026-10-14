@@ -198,8 +198,9 @@ Shared flags of the commands that read the bucket:
 - `--blobs-dir` (a local directory laid out like the bucket) and
   `--parquet-keys-dir`.
 
-`sql` also takes `--db=FILE.duckdb`, and `kubectl` takes `--at=T`. T is
-RFC 3339 or `2026-10-11 09:00`, always UTC.
+`sql` also takes `--db=FILE.duckdb`, and `pods` and `kubectl` take
+`--at=T`. T is RFC 3339 or `2026-10-11 09:00`, always UTC. `--at` also
+takes `now`, its default, and a duration before now: `-30m`, `-2d`.
 
 **Which tier.** `pods`, `exits`, `logs`, `grep` and `metrics` read each
 hour of the window from exactly one tier. It is the hourly tier when the
@@ -268,7 +269,11 @@ Filters: `-n`, `--name` (RE2), `--label k=v` (repeatable), `--node`,
 
 `--at` keeps the pods alive at that instant: started by then, and ended
 after it, or, with no deletion seen, seen in the hour before it (the gap
-rule). The window then defaults to T±1h.
+rule). The window then defaults to T±1h, up to now.
+
+Without `--at` and without a window flag (`--since`, `--from`, `--to`),
+`pods` lists the pods alive now, like `kubectl get pods`. With a window
+flag and no `--at` it lists every pod seen in the window.
 
 ### exits
 
@@ -423,6 +428,8 @@ prints the URL (stdout) and opens it in the browser.
 ### kubectl
 
 ```
+y-obs kubectl -- get pods -A
+y-obs kubectl --at -2h -- get deploy -n qa
 y-obs kubectl --at '2026-10-11 09:00' -- get pods -A
 y-obs kubectl --at '2026-10-11 09:00' -- describe deploy -n qa web
 y-obs kubectl --at '2026-10-11 11:58' --source raw -- get events -n qa
@@ -432,10 +439,14 @@ This is `local/kubectl-at.sh` as a subcommand, in-process: `apiserver_at(T)`
 in the embedded engine, the state served by apiserver-at, with the
 kubeconfig in a temporary directory.
 
+- **The time.** `--at` is now by default, or `-30m`, `-2d`, or a time.
 - **Objects.** They come from the hourly tier (T's hour and the two
   before), else the daily tier (T's day and the day before), or the raw
   tier with `--source raw`: the cluster agent's objects only (node
-  `_k8sagent`, K8SAGENT.md), unless `--node` says otherwise.
+  `_k8sagent`, K8SAGENT.md), unless `--node` says otherwise. The default,
+  `--source auto`, reads raw while T's hourly object is not final (its
+  hour's end plus 30 min) and the tiers after, so `now` is current and
+  not the last final hour.
 - **The release.** kube-apiserver and etcd are the cluster's release at
   T: `--assets`, `KUBEBUILDER_ASSETS`, or setup-envtest.
 - **Without kubectl arguments** it serves and prints the `KUBECONFIG`.

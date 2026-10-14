@@ -90,6 +90,26 @@ func parseTime(s string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("%q is not a time: use 2026-10-11T09:00:00Z or '2026-10-11 09:00' (UTC)", s)
 }
 
+// parseAt reads --at: empty or "now" is now, "-30m" or "-2d" that long
+// before now, else a time as parseTime takes it.
+func parseAt(s string, now time.Time) (time.Time, error) {
+	switch {
+	case s == "" || s == "now":
+		return now.UTC(), nil
+	case strings.HasPrefix(s, "-"):
+		d, err := parseSince(s[1:])
+		if err != nil || d <= 0 {
+			return time.Time{}, fmt.Errorf("%q is not a time: use now, -30m, -2d, 2026-10-11T09:00:00Z or '2026-10-11 09:00' (UTC)", s)
+		}
+		return now.UTC().Add(-d), nil
+	}
+	t, err := parseTime(s)
+	if err != nil {
+		return t, fmt.Errorf("%q is not a time: use now, -30m, -2d, 2026-10-11T09:00:00Z or '2026-10-11 09:00' (UTC)", s)
+	}
+	return t, nil
+}
+
 // parseSince is time.ParseDuration plus days: 2d, 1d12h.
 func parseSince(s string) (time.Duration, error) {
 	if m := regexp.MustCompile(`^(\d+)d(.*)$`).FindStringSubmatch(s); m != nil {

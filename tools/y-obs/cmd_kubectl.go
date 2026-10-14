@@ -13,24 +13,31 @@ import (
 	"time"
 )
 
-const kubectlUsage = `Usage: y-obs kubectl --at TIME [flags] [-- KUBECTL ARGS]
+const kubectlUsage = `Usage: y-obs kubectl [--at TIME] [flags] [-- KUBECTL ARGS]
 
-kubectl against the cluster as it was at TIME (UTC), read-only: the
+kubectl against the cluster as it was at TIME, read-only: the
 cluster agent's objects from the bucket (K8SAGENT.md, "Reading") served by
 a stock kube-apiserver of the cluster's release. Without kubectl args it
 keeps serving and prints the KUBECONFIG to use, until interrupted.
 
+TIME is now by default, -30m or -2d before now, or a time in UTC:
+2026-10-11T09:00:00Z or '2026-10-11 09:00'.
+
 The objects come from the hourly tier, the hour of TIME and the two before
 (a snapshot's rows can sit in the hour before its own), else the daily
 tier, the day of TIME and the day before. --source raw reads the raw tier
-of those hours instead, for times the tiers do not have yet: the cluster
-agent's objects only (node _k8sagent), unless --node says otherwise.
+of those hours instead: the cluster agent's objects only (node _k8sagent),
+unless --node says otherwise. By default (--source auto) a TIME whose
+hourly object is not final yet, its hour's end plus 30 min, reads raw,
+and an older one the tiers.
 
 The API server and etcd are the cluster's release at TIME, from its Nodes'
 kubelet version: --assets or KUBEBUILDER_ASSETS, else setup-envtest
 (on PATH, or with go) downloads them.
 
 Examples:
+  y-obs kubectl --cluster prod -- get pods -A
+  y-obs kubectl --cluster prod --at -2h -- get deploy -n qa
   y-obs kubectl --cluster prod --at '2026-10-11 09:00' -- get pods -A
   y-obs kubectl --cluster prod --at '2026-10-11 09:00' -- describe deploy -n qa web
   y-obs kubectl --cluster prod --at '2026-10-11 11:58' --source raw -- get events -n qa
@@ -48,8 +55,8 @@ func cmdKubectl(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("kubectl", flag.ContinueOnError)
 	var sf sessionFlags
 	sf.register(fs)
-	at := fs.String("at", "", "the time, UTC: 2026-10-11T09:00:00Z or '2026-10-11 09:00'")
-	source := fs.String("source", "tier", "tier (hourly, else daily) or raw")
+	at := fs.String("at", "now", "the time: now, -30m or -2d before now, or UTC 2026-10-11T09:00:00Z or '2026-10-11 09:00'")
+	source := fs.String("source", "auto", "auto, tier (hourly, else daily) or raw; auto is raw while TIME's hourly object is not final")
 	assets := fs.String("assets", os.Getenv("KUBEBUILDER_ASSETS"), "directory with etcd and kube-apiserver of the cluster's release (env KUBEBUILDER_ASSETS)")
 	verbose := fs.Bool("v", false, "pass through the API server's and etcd's output")
 	fs.Usage = func() {
@@ -70,16 +77,22 @@ func cmdKubectl(ctx context.Context, args []string) error {
 		return fail(exitUsage, "%v; run y-obs kubectl -h", err)
 	}
 	if fs.NArg() > 0 {
-		return fail(exitUsage, "kubectl's arguments go after --: y-obs kubectl --at T -- %s", strings.Join(fs.Args(), " "))
+		return fail(exitUsage, "kubectl's arguments go after --: y-obs kubectl -- %s", strings.Join(fs.Args(), " "))
 	}
-	if *at == "" {
-		return fail(exitUsage, "--at is required: the time to read the cluster at, UTC")
-	}
-	t, err := parseTime(*at)
+	now := time.Now()
+	t, err := parseAt(*at, now)
 	if err != nil {
 		return fail(exitUsage, "--at: %v", err)
 	}
+	auto := *source == "auto"
+	if auto {
+		*source = autoSource(t, now)
+	}
 	lines, minor, err := stateAt(ctx, &sf, t, *source)
+	var ee *exitError
+	if auto && *source == "raw" && errors.As(err, &ee) && ee.code == exitNoRows && strings.HasPrefix(ee.Error(), "no raw objects") {
+		return fail(exitNoRows, "no raw objects of %s around %s, which is too recent for the tiers: nothing was uploaded then; y-obs status shows each tier's newest upload", sf.cluster, t.Format(time.RFC3339))
+	}
 	if err != nil {
 		return err
 	}
@@ -133,6 +146,15 @@ func cmdKubectl(ctx context.Context, args []string) error {
 		return fail(exitUsage, "kubectl: %v", err)
 	}
 	return nil
+}
+
+// autoSource is raw while t's hourly object is not final (finalAfter past
+// its hour's end), else tier: the hourly tier would serve an older hour.
+func autoSource(t, now time.Time) string {
+	if t.Truncate(time.Hour).Add(time.Hour + finalAfter).After(now) {
+		return "raw"
+	}
+	return "tier"
 }
 
 // stateAt reads the objects of local/apiserver_at.sql at t, and the

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"io"
 	"os"
 	"regexp"
@@ -30,10 +31,17 @@ from labels, when the window has the pod's labels.
 
 --at T keeps the pods alive at T: started at or before it, and ended
 after it, or, without a deletion seen, seen within the hour before it
-(the gap rule). Without --from/--to the window is then T-1h..T+1h.
+(the gap rule). Without --from/--to the window is then T-1h..T+1h, up to
+now. T is now, -30m or -2d before now, or a time in UTC.
+
+Without --at and without a window flag (--since, --from, --to) it lists
+the pods alive now, as --at now. With a window flag and no --at it lists
+every pod seen in the window.
 
 Examples:
-  y-obs pods -n qa --name '^web-' --since 6h
+  y-obs pods -n qa                                    # alive now
+  y-obs pods -n qa --at -2h
+  y-obs pods -n qa --name '^web-' --since 6h          # all seen in 6h
   y-obs pods --label app=gateway --at '2026-10-11 09:00'
   y-obs pods --node worker-3 --since 1d --phase failed
   y-obs pods -n qa --since 1d --out inv.duckdb
@@ -56,7 +64,7 @@ func runPods(ctx context.Context, args []string, stdout, stderr io.Writer, now t
 	c.fs.StringVar(&uid, "uid", "", "only this incarnation")
 	c.fs.StringVar(&workload, "workload", "", "only this workload (Deployment, StatefulSet, Job name)")
 	c.fs.StringVar(&phase, "phase", "", "running, succeeded, failed or unknown")
-	c.fs.StringVar(&at, "at", "", "only pods alive at this time, UTC")
+	c.fs.StringVar(&at, "at", "", "only pods alive at this time: now, -30m or -2d before now, or UTC; default now without --since/--from/--to")
 	if err := c.parse(args); err != nil {
 		return err
 	}
@@ -96,13 +104,21 @@ func runPods(ctx context.Context, args []string, stdout, stderr io.Writer, now t
 	default:
 		return fail(exitUsage, "--phase %q: running, succeeded, failed or unknown", phase)
 	}
-	if at != "" {
-		t, err := parseTime(at)
+	windowSet := false
+	c.fs.Visit(func(f *flag.Flag) {
+		windowSet = windowSet || f.Name == "since" || f.Name == "from" || f.Name == "to"
+	})
+	if at != "" || !windowSet {
+		t, err := parseAt(at, now)
 		if err != nil {
 			return fail(exitUsage, "--at: %v", err)
 		}
 		if c.sf.from == "" && c.sf.to == "" {
-			c.sf.from, c.sf.to = t.Add(-time.Hour).Format(time.RFC3339), t.Add(time.Hour).Format(time.RFC3339)
+			to := t.Add(time.Hour)
+			if to.After(now) {
+				to = now.UTC()
+			}
+			c.sf.from, c.sf.to = t.Add(-time.Hour).Format(time.RFC3339Nano), to.Format(time.RFC3339Nano)
 		}
 		ts := "TIMESTAMP_NS " + sqlString(t.Format("2006-01-02 15:04:05.000000000"))
 		having = append(having, "started <= "+ts, "coalesce(ended, last_seen + INTERVAL 1 HOUR) >= "+ts)

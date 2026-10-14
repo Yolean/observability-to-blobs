@@ -207,3 +207,37 @@ func TestEngineThreads(t *testing.T) {
 		t.Errorf("Y_OBS_THREADS=3 gave %d", got)
 	}
 }
+
+func TestParseAt(t *testing.T) {
+	now := time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)
+	for in, want := range map[string]time.Time{
+		"":                     now,
+		"now":                  now,
+		"-5m":                  now.Add(-5 * time.Minute),
+		"-1d2h":                now.Add(-26 * time.Hour),
+		"2026-10-11 09:00":     time.Date(2026, 10, 11, 9, 0, 0, 0, time.UTC),
+		"2026-10-11T09:00:00Z": time.Date(2026, 10, 11, 9, 0, 0, 0, time.UTC),
+	} {
+		if got, err := parseAt(in, now); err != nil || !got.Equal(want) {
+			t.Errorf("parseAt(%q) = %v, %v; want %v", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"-", "-0m", "-later", "yesterday"} {
+		if _, err := parseAt(in, now); err == nil {
+			t.Errorf("parseAt(%q) took it", in)
+		}
+	}
+}
+
+func TestAutoSource(t *testing.T) {
+	now := time.Date(2026, 10, 11, 10, 20, 0, 0, time.UTC)
+	for at, want := range map[time.Time]string{
+		now:                        "raw",
+		now.Add(-50 * time.Minute): "raw",  // 09:30: hour 09 is final at 10:30
+		now.Add(-81 * time.Minute): "tier", // 08:59: hour 08 was final at 09:30
+	} {
+		if got := autoSource(at, now); got != want {
+			t.Errorf("autoSource(%v) = %s, want %s", at, got, want)
+		}
+	}
+}

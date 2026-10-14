@@ -30,7 +30,7 @@ reaches back to the time you are asked about.
 | only a log pattern | `y-obs grep PATTERN -n NS --count` | drop `--count` for the lines |
 | a metric name | `y-obs metrics series/rate/latest NAME` | `metrics names` if unsure |
 | a PromQL expression, or a human who wants the Prometheus UI | `U=$(y-obs prometheus --no-open)` | `curl "$U/api/v1/query" --data-urlencode query=...` |
-| "what was deployed / configured at T" | `y-obs kubectl --at T -- get ...` | `describe` |
+| "what is deployed / configured", now or at T | `y-obs kubectl [--at T] -- get ...` | `describe` |
 | none of the above | `y-obs schema`, then `y-obs sql` | |
 
 Always pass a window (`--since 2h`, or `--from`/`--to` in UTC) that
@@ -69,6 +69,7 @@ anything older.
 
 ```bash
 y-obs pods -n qa --name '^web-' --since 6h            # incarnations: pod_uid, node, workload, started, ended, phase, restarts, last_exit
+y-obs pods -n qa                                      # alive now; --at -2h or --at T for another instant
 y-obs pods --label app=gateway --at '2026-10-11 09:00' # alive at an instant
 y-obs exits -n qa --since 1d                           # exit_code, exit_reason, exit_message, limits in force
 y-obs exits --reason OOMKilled --since 7d
@@ -82,7 +83,7 @@ y-obs metrics series container_memory_working_set_bytes --pod '^web-1$' --since 
 y-obs metrics rate http_requests_total -n qa --by code --since 1h --step 5m
 y-obs prometheus                                      # Prometheus UI over the bucket: the last hour loaded, older on query
 y-obs prometheus --stop                               # ends it; a repeated call reuses it
-y-obs kubectl --at '2026-10-11 09:00' -- get deploy -n qa -o yaml
+y-obs kubectl --at '2026-10-11 09:00' -- get deploy -n qa -o yaml   # --at defaults to now; -2h is two hours ago
 y-obs sql "SELECT ..." --since 1h                     # views: y-obs schema
 ```
 
