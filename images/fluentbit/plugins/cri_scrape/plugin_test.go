@@ -293,3 +293,68 @@ func TestRunningRestartIsTheRunningRun(t *testing.T) {
 		t.Fatal("no running run should give no restart")
 	}
 }
+
+// Port-scoped keys by number and by the same port's name: the number wins
+// field by field, the same at every call; with no pod-level hint too.
+func TestExpandTargetsOtelNumberOverNameDeterministic(t *testing.T) {
+	d := declared(container("app", `[{"name":"http","containerPort":8080,"protocol":"TCP"}]`))
+	ann := map[string]string{
+		"io.opentelemetry.discovery.metrics.8080/enabled": "true",
+		"io.opentelemetry.discovery.metrics.8080/config":  "metrics_path: /by-number",
+		"io.opentelemetry.discovery.metrics.http/enabled": "true",
+		"io.opentelemetry.discovery.metrics.http/config":  "metrics_path: /by-name" + "\n" + "collection_interval: 30s",
+	}
+	for i := 0; i < 100; i++ {
+		got := expandTargets(ann, d)
+		if len(got) != 1 || got[0].path != "/by-number" || got[0].interval != 30*time.Second {
+			t.Fatalf("call %d: %+v", i, got)
+		}
+	}
+	for _, pod := range []string{"", "true"} {
+		ann := map[string]string{
+			"io.opentelemetry.discovery.metrics.8080/enabled": "false",
+			"io.opentelemetry.discovery.metrics.http/enabled": "true",
+		}
+		if pod != "" {
+			ann["io.opentelemetry.discovery.metrics/enabled"] = pod
+		}
+		for i := 0; i < 100; i++ {
+			if got := expandTargets(ann, d); len(got) != 0 {
+				t.Fatalf("pod-level %q, disabled by number: %+v", pod, got)
+			}
+		}
+	}
+}
+
+// A port-scoped entry without a scraper falls back to the pod-level one,
+// as its other fields do.
+func TestExpandTargetsOtelPortScopedScraperFallsBack(t *testing.T) {
+	d := declared(container("app", `[{"containerPort":9101,"protocol":"TCP"}]`))
+	got := expandTargets(map[string]string{
+		"io.opentelemetry.discovery.metrics/scraper":      "nginx",
+		"io.opentelemetry.discovery.metrics.9101/enabled": "true",
+	}, d)
+	if len(got) != 0 {
+		t.Fatalf("unexpected %+v", got)
+	}
+}
+
+// Under a pod-level hint, a port-scoped number that no container declares
+// is scraped only when its own enabled says so.
+func TestExpandTargetsOtelUndeclaredNeedsOwnEnabled(t *testing.T) {
+	d := declared(container("app", `[{"containerPort":9101,"protocol":"TCP"}]`))
+	got := expandTargets(map[string]string{
+		"io.opentelemetry.discovery.metrics/enabled":     "true",
+		"io.opentelemetry.discovery.metrics.9999/config": "metrics_path: /x",
+	}, d)
+	if len(got) != 1 || got[0].port != 9101 {
+		t.Fatalf("unexpected %+v", got)
+	}
+	got = expandTargets(map[string]string{
+		"io.opentelemetry.discovery.metrics/enabled":      "true",
+		"io.opentelemetry.discovery.metrics.9999/enabled": "true",
+	}, d)
+	if len(got) != 2 || got[1].port != 9999 || got[1].container != "" {
+		t.Fatalf("unexpected %+v", got)
+	}
+}

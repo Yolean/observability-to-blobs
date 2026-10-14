@@ -331,36 +331,58 @@ func expandTargets(ann map[string]string, declared []declaredPort) []target {
 		}
 	}
 
-	// 2. OpenTelemetry hints; port-scoped entries override anything above
+	// 2. OpenTelemetry hints; port-scoped entries override anything above.
+	// A port's hint is its port-scoped fields over the pod-level ones, field
+	// by field, the key scoped by number over the one scoped by its name.
+	// The candidates are the declared ports when the pod level enables them,
+	// and every port a port-scoped entry enables or disables.
 	pod, ports := otelHints(ann)
-	if pod.enabled != nil && *pod.enabled && scraperIsPrometheus(pod.scraper) {
+	byName := map[int]otelHint{}
+	byNumber := map[int]otelHint{}
+	at := map[int]declaredPort{}
+	if pod.enabled != nil && *pod.enabled {
 		for _, dp := range declared {
-			// a port-scoped entry wins field by field, also when it only
-			// carries config; by number over by name
-			h := pod
-			for _, spec := range []string{dp.port.Name, strconv.Itoa(dp.port.ContainerPort)} {
-				if s, scoped := ports[spec]; scoped && spec != "" {
-					h = s.over(h)
-				}
+			if _, seen := at[dp.port.ContainerPort]; !seen {
+				at[dp.port.ContainerPort] = dp
 			}
-			if !*h.enabled || !scraperIsPrometheus(h.scraper) {
-				continue
-			}
-			add(otelTarget(dp, h))
 		}
 	}
-	for spec, h := range ports {
+	specs := make([]string, 0, len(ports))
+	for spec := range ports {
+		specs = append(specs, spec)
+	}
+	sort.Strings(specs)
+	for _, spec := range specs {
+		h := ports[spec]
+		var dp declaredPort
+		if n, err := strconv.Atoi(spec); err == nil && n > 0 {
+			byNumber[n] = h
+			dp = declaredPort{container: containerDeclaring(declared, n), port: containerPort{ContainerPort: n}}
+		} else if named, ok := portByName(declared, spec); ok {
+			if _, seen := byName[named.port.ContainerPort]; seen {
+				continue
+			}
+			byName[named.port.ContainerPort] = h
+			dp = named
+		} else {
+			continue
+		}
+		if _, seen := at[dp.port.ContainerPort]; !seen && h.enabled != nil {
+			at[dp.port.ContainerPort] = dp
+		}
+	}
+	for port, dp := range at {
+		h := pod
+		if s, ok := byName[port]; ok {
+			h = s.over(h)
+		}
+		if s, ok := byNumber[port]; ok {
+			h = s.over(h)
+		}
 		if h.enabled == nil || !*h.enabled || !scraperIsPrometheus(h.scraper) {
 			continue
 		}
-		// config falls back to the pod-level hint field by field
-		h.config = h.config.over(pod.config)
-		if n, err := strconv.Atoi(spec); err == nil && n > 0 {
-			dp := declaredPort{container: containerDeclaring(declared, n), port: containerPort{ContainerPort: n}}
-			add(otelTarget(dp, h))
-		} else if dp, ok := portByName(declared, spec); ok {
-			add(otelTarget(dp, h))
-		}
+		add(otelTarget(dp, h))
 	}
 
 	out := make([]target, 0, len(byPort))
