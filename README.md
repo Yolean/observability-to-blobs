@@ -168,7 +168,7 @@ parameters and relabeling.
 | `images/fluentbit/host/` | host mode: the pipeline, heartbeat script and systemd unit, and `build.sh`, which builds them with the same Fluent Bit into the host tarball ([HOST_MODE.md](HOST_MODE.md)) |
 | `agent/` | kustomize base: DaemonSet, `fluent-bit.yaml` pipeline (stock processors, no Lua), the `pipeline-extra.yaml` composition hook |
 | `k8sagent/`, `images/fluentbit/plugins/k8s_objects/` | the cluster agent: a one-replica Deployment of the same image with the `k8s_objects` Go input plugin ([K8SAGENT.md](K8SAGENT.md)) |
-| `tools/apiserver-at/`, `local/apiserver_at.sql`, `local/kubectl-at.sh` | a cluster at a time: the objects state SQL, and a stock kube-apiserver serving it read-only to kubectl |
+| `tools/y-obs/`, `local/apiserver_at.sql`, `local/kubectl-at.sh` | a cluster at a time: the objects state SQL, and a stock kube-apiserver serving it read-only to kubectl |
 | `itest/` | y-cluster configs for a local k3s node (qemu and docker), versitygw, the workloads that exercise each path, the compactor's overlays (bucket mode, and spool mode with stock Fluent Bit as a second shipper); `itest/host/` the host phase |
 | `images/blobs-to-prometheus/`, `tools/rules-manifest/`, `local/`, `alerts-cf/` | the alerting consumer: the tailer from `raw1/` into a Prometheus remote-write receiver, the selectors manifest of a rule set, the local stacks and the Cloudflare container |
 | `compactor/` | `blobs-compactor` (fold, rollup and the loop that runs them, and the logs API), its design (`README.md`), its SQL (`sql/raw.sql` is the raw line contract every consumer reads), its build script and `deploy/` |
@@ -222,12 +222,12 @@ local/kubectl-at.sh <cluster> '2026-10-07 10:12:00'               # serve until 
 
 The credentials need read access only: GET and LIST under `hourly/` and
 `daily/` (and `raw1/` with `SOURCE=raw`). They reach DuckDB through a secret
-in a private temporary directory, never the command line. `tools/apiserver-at`
+in a private temporary directory, never the command line. `y-obs apiserver-at`
 itself takes no credentials: it serves a state file on 127.0.0.1 and writes
 a kubeconfig for that endpoint. It runs with `go run`, without a build step:
 
 ```bash
-go -C tools/apiserver-at run . -objects state.jsonl -kubeconfig at.kubeconfig
+go -C tools/y-obs run . apiserver-at -objects state.jsonl -kubeconfig at.kubeconfig
 ```
 
 where `state.jsonl` is `local/apiserver_at.sql`'s rows for a time, and

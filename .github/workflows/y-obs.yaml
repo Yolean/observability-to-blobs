@@ -1,0 +1,66 @@
+name: y-obs
+
+# Release binaries of tools/y-obs (tools/y-obs/README.md, "Release"): a
+# tag y-obs-v* builds each platform on a native runner with
+# tools/y-obs/release.sh, smoke-tests the binary, and attaches it and its
+# .sha256 to the tag's release as obs-{os}-{arch}: ystack's y-bin entry
+# adds the y- prefix. duckdb-go links prebuilt static libraries
+# through cgo, so there is no cross compiling. workflow_dispatch builds
+# without releasing.
+on:
+  push:
+    tags: ['y-obs-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: tools/y-obs/go.mod
+        cache-dependency-path: tools/y-obs/go.sum
+    - name: Build
+      run: tools/y-obs/release.sh dist "${GITHUB_REF_NAME#y-obs-}"
+    - name: Smoke test
+      # the engine, the embedded extension and the embedded views, without
+      # a bucket: version loads nothing, schema reads an empty raw tier
+      run: |
+        bin=$(ls dist/obs-* | grep -v sha256)
+        "$bin" version
+        "$bin" version | grep -q '^httpfs embedded'
+        "$bin" schema logs | grep -q '^message'
+        "$bin" sql --blobs-dir "$RUNNER_TEMP" --cluster smoke "SELECT count(*) AS n FROM logs"
+    - uses: actions/upload-artifact@v7
+      with:
+        name: obs-${{ matrix.runner }}
+        path: dist/
+        if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/y-obs-v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@v8
+      with:
+        path: dist
+        merge-multiple: true
+    - name: Release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        ls -l dist
+        gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+          || gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "tools/y-obs at $GITHUB_SHA"
+        gh release upload "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --clobber dist/*

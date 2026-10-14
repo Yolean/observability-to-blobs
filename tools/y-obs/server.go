@@ -33,6 +33,9 @@ type Options struct {
 	ServiceCIDR string
 	// Label names the state in the read-only endpoint's refusals
 	Label string
+	// At, when set, is the state's time: the age columns of kubectl get's
+	// tables count to it instead of to now
+	At time.Time
 	// Log gets the API server's and etcd's output; nil discards it
 	Log io.Writer
 }
@@ -130,7 +133,7 @@ func Start(ctx context.Context, o Options) (*Server, error) {
 		s.Stop()
 		return nil, err
 	}
-	h, err := readOnly(s.Admin, o.Label)
+	h, err := readOnly(s.Admin, o.Label, o.At)
 	if err != nil {
 		ln.Close()
 		s.Stop()
@@ -172,8 +175,9 @@ func load(ctx context.Context, endpoint string, kvs []KV) error {
 }
 
 // readOnly proxies GET and HEAD to the API server as admin and refuses
-// everything else the way the API server refuses: a Status object.
-func readOnly(admin *rest.Config, label string) (http.Handler, error) {
+// everything else the way the API server refuses: a Status object. With
+// at set, tables' age columns count to at.
+func readOnly(admin *rest.Config, label string, at time.Time) (http.Handler, error) {
 	target, err := url.Parse(admin.Host)
 	if err != nil {
 		return nil, err
@@ -186,6 +190,9 @@ func readOnly(admin *rest.Config, label string) (http.Handler, error) {
 	p.Transport = tr
 	// watches stream
 	p.FlushInterval = -1
+	if !at.IsZero() {
+		p.ModifyResponse = ageTablesAt(at, time.Now)
+	}
 	msg := "apiserver-at serves the cluster as it was"
 	if label != "" {
 		msg += " at " + label
@@ -196,6 +203,10 @@ func readOnly(admin *rest.Config, label string) (http.Handler, error) {
 			// the proxy authenticates as admin; a client's own credentials
 			// and impersonation do not pass
 			r.Header.Del("Authorization")
+			if !at.IsZero() {
+				// a table is rewritten as it comes, not compressed
+				r.Header.Del("Accept-Encoding")
+			}
 			for k := range r.Header {
 				if strings.HasPrefix(k, "Impersonate-") {
 					r.Header.Del(k)

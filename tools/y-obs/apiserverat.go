@@ -1,13 +1,3 @@
-// apiserver-at serves a cluster as it was at a time, read-only, to kubectl
-// and anything else that speaks the Kubernetes API: a stock kube-apiserver
-// over an etcd that holds the objects of local/apiserver_at.sql and nothing
-// else (K8SAGENT.md, "Reading").
-//
-//	duckdb ... -c "COPY (SELECT * FROM apiserver_at(TIMESTAMP '...')) TO 'state.jsonl' (FORMAT json)"
-//	apiserver-at -objects state.jsonl -kubeconfig at.kubeconfig
-//	kubectl --kubeconfig at.kubeconfig get pods -A
-//
-// local/kubectl-at.sh does both steps against a bucket.
 package main
 
 import (
@@ -21,7 +11,17 @@ import (
 	"syscall"
 )
 
-func main() {
+// cmdApiserverAt serves a cluster as it was at a time, read-only, to kubectl
+// and anything else that speaks the Kubernetes API: a stock kube-apiserver
+// over an etcd that holds the objects of local/apiserver_at.sql and nothing
+// else (K8SAGENT.md, "Reading").
+//
+//	duckdb ... -c "COPY (SELECT * FROM apiserver_at(TIMESTAMP '...')) TO 'state.jsonl' (FORMAT json)"
+//	y-obs apiserver-at -objects state.jsonl -kubeconfig at.kubeconfig
+//	kubectl --kubeconfig at.kubeconfig get pods -A
+//
+// local/kubectl-at.sh does both steps against a bucket.
+func cmdApiserverAt(args []string) {
 	// a FlagSet of its own: controller-runtime registers -kubeconfig on the
 	// default one
 	fs := flag.NewFlagSet("apiserver-at", flag.ExitOnError)
@@ -33,7 +33,7 @@ func main() {
 	label := fs.String("label", "", "what the state is, e.g. its time, for messages")
 	cidr := fs.String("service-cidr", "", "the cluster's service range; default: from the state's ServiceCIDR")
 	verbose := fs.Bool("v", false, "pass through the API server's and etcd's output")
-	_ = fs.Parse(os.Args[1:])
+	_ = fs.Parse(args)
 	log.SetFlags(0)
 	if *assets == "" {
 		log.Fatal("-assets or KUBEBUILDER_ASSETS: the directory with etcd and kube-apiserver")

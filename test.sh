@@ -35,7 +35,7 @@
 #                        the other itest's cluster.
 #   IMAGE_BUILD_ARGS     extra docker buildx flags, e.g. a CI cache
 #   KUBEBUILDER_ASSETS   etcd, kube-apiserver and kubectl at ENVTEST_K8S for
-#                        tools/apiserver-at's tests (default: setup-envtest
+#                        tools/y-obs's tests (default: setup-envtest
 #                        downloads them; the itest's are the cluster's release)
 #   IMAGE_BUILDER        docker (default when docker is installed), buildkit
 #                        (buildctl against BUILDKIT_HOST) or cluster (buildctl
@@ -100,7 +100,7 @@ port_free() {
 need() {
   command -v "$1" >/dev/null 2>&1 || fail "missing tool: $1 ($2)"
 }
-# The Kubernetes release of the API servers in tools/apiserver-at's
+# The Kubernetes release of the API servers in tools/y-obs's
 # acceptance test, the source and apiserver-at both. The itest's
 # apiserver-at runs the itest cluster's own release instead (at_assets).
 ENVTEST_K8S=1.37.0
@@ -153,14 +153,14 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
   need go "https://go.dev/dl/"
   need shellcheck "https://github.com/koalaman/shellcheck"
   phase "checks: shell"
-  shellcheck -x -P SCRIPTDIR test.sh compactor/build.sh local/kubectl-at.sh operator-to-annotations/crds/vendor.sh
+  shellcheck -x -P SCRIPTDIR test.sh compactor/build.sh local/kubectl-at.sh operator-to-annotations/crds/vendor.sh tools/y-obs/release.sh
 
-  # tools/apiserver-at's acceptance test runs a source API server, the
+  # tools/y-obs's acceptance test runs a source API server, the
   # watcher, compactor/sql/ in DuckDB and apiserver-at
   need duckdb "https://duckdb.org/docs/installation/"
   envtest_assets
   for mod in images/fluentbit/plugins/cri_scrape images/fluentbit/plugins/k8s_objects images/blobs-to-prometheus \
-    images/operator-to-annotations tools/rules-manifest tools/apiserver-at; do
+    images/operator-to-annotations tools/rules-manifest tools/y-obs; do
     phase "checks: go ($mod)"
     (
       cd "$mod"
@@ -1177,7 +1177,7 @@ assert "pod 'reused': three incarnations added, the first two deleted" \
 
 # kubectl at a time, from the raw tier alone: apiserver-at, a stock
 # kube-apiserver at the cluster's release over etcd holding apiserver_at(t)
-phase "assert: kubectl at a time (tools/apiserver-at)"
+phase "assert: kubectl at a time (y-obs apiserver-at)"
 # apiserver-at at the cluster's own release: another release's API server
 # prints other columns, and its RBAC bootstrap adds its release's system
 # roles to the state (seen: 1.37 against a 1.35 cluster, 2026-10-07)
@@ -1186,7 +1186,7 @@ AT_K8S=$($KUBECTL version -o json | jq -r .serverVersion.gitVersion | sed -E 's/
 AT_ASSETS=$(GOFLAGS='' go run "sigs.k8s.io/controller-runtime/tools/setup-envtest@$SETUP_ENVTEST" use "$AT_K8S" -p path) \
   || fail "setup-envtest could not provide Kubernetes $AT_K8S"
 echo "  apiserver-at runs Kubernetes $AT_K8S: $AT_ASSETS"
-(cd tools/apiserver-at && go build -o ../../target/bin/apiserver-at .) || fail "build tools/apiserver-at"
+(cd tools/y-obs && go build -o ../../target/bin/y-obs .) || fail "build tools/y-obs"
 # at_serve <UTC time>: apiserver-at serving the raw tier's objects as they
 # were then, in the background, reached with at_kubectl
 at_serve() {
@@ -1194,7 +1194,7 @@ at_serve() {
   q "COPY (SELECT api_version, resource, namespace, name, apijson FROM apiserver_at(TIMESTAMP_NS '$1')) TO '$INIT.at.jsonl' (FORMAT json)" >/dev/null \
     || fail "apiserver_at($1)"
   rm -f "$INIT.at.kubeconfig"
-  target/bin/apiserver-at -assets "$AT_ASSETS" -objects "$INIT.at.jsonl" -kubeconfig "$INIT.at.kubeconfig" -label "$1" >"$INIT.at.log" 2>&1 &
+  target/bin/y-obs apiserver-at -assets "$AT_ASSETS" -objects "$INIT.at.jsonl" -kubeconfig "$INIT.at.kubeconfig" -label "$1" >"$INIT.at.log" 2>&1 &
   AT_PID=$!
   local deadline=$((SECONDS + 120))
   until grep -q '^serving ' "$INIT.at.log"; do
@@ -1280,6 +1280,101 @@ for a in "${LIVE_ARGS[@]}"; do
   i=$((i + 1))
 done
 at_stop
+
+# y-obs's investigation commands against what the agents shipped: the
+# bucket alone, through the binary the kubectl phase built. The window's
+# hours are recent, so the planner reads raw; sql reads the encrypted
+# hourly tier with the compactor's keys.
+phase "assert: y-obs over the bucket (tools/y-obs)"
+yobs() {
+  env Y_OBS_CONTEXT= S3_ENDPOINT="127.0.0.1:$S3_PORT" S3_BUCKET="$BUCKET" S3_TLS=off \
+    AWS_ACCESS_KEY_ID=demoaccess AWS_SECRET_ACCESS_KEY=demosecret CLUSTER_NAME="$CLUSTER" \
+    target/bin/y-obs "$@" --since 3h --max-objects 2000 2>"$INIT.yobs.err"
+}
+yobs_expect() {
+  local what=$1 want=$2 out
+  shift 2
+  if out=$(yobs "$@") && grep -qE -- "$want" <<<"$out"; then
+    echo "  PASS: y-obs $what"
+  else
+    echo "  FAIL: y-obs $what: no line matches $want in:" >&2
+    { echo "$out"; cat "$INIT.yobs.err"; } | sed 's/^/    /' | head -20 >&2
+    ERRORS=$((ERRORS + 1))
+  fi
+}
+GEN_POD=$(yobs pods -n default --name '^log-generator-' --phase running --format csv | sed -n '2p' | cut -d, -f2)
+GEN_NODE=$(yobs pods -n default --name '^log-generator-' --phase running --format csv | sed -n '2p' | cut -d, -f4)
+yobs_expect "pods: a running log-generator incarnation" ",running," pods -n default --name '^log-generator-' --format csv
+yobs_expect "pods --at -1m: the log-generator alive a minute ago" ",running," pods -n default --name '^log-generator-' --at -1m --format csv
+yobs_expect "grep --count: the restart marker exactly once" $'\t1\t' grep "$MARKER" -n default --count
+yobs_expect "logs: the generator's lines, with timestamps" "Z [{].*hello from log-generator" logs default "${GEN_POD:-none}" app --grep 'hello from log-generator' --tail 3 --timestamps
+yobs_expect "logs _node: the kernel marker in the node's journal" "$KMSG_MARKER" logs _node "${GEN_NODE:-none}" --grep "$KMSG_MARKER" --tail 0
+yobs_expect "exits: the restarter's exit code 1" "^[^,]*,default,restarter,[^,]*,[^,]*,[0-9]+,1," exits -n default --name '^restarter$' --format csv
+yobs_expect "metrics latest: app_requests_total code 200 is 42" '"value":42' metrics latest app_requests_total --pod '^metrics-multi$' --where code=200 --format jsonl
+yobs_status() {
+  env Y_OBS_CONTEXT= S3_ENDPOINT="127.0.0.1:$S3_PORT" S3_BUCKET="$BUCKET" S3_TLS=off \
+    AWS_ACCESS_KEY_ID=demoaccess AWS_SECRET_ACCESS_KEY=demosecret target/bin/y-obs status --cluster "$CLUSTER" 2>"$INIT.yobs.err"
+}
+if out=$(yobs_status) && grep -qE "^$CLUSTER	raw	[0-9-]+T[0-9]{2}	" <<<"$out" && grep -qE "^$CLUSTER	hourly	" <<<"$out"; then
+  echo "  PASS: y-obs status: the cluster's raw and hourly tiers with their spans"
+else
+  echo "  FAIL: y-obs status: no raw and hourly rows for $CLUSTER in:" >&2
+  { echo "$out"; cat "$INIT.yobs.err"; } | sed 's/^/    /' | head -20 >&2
+  ERRORS=$((ERRORS + 1))
+fi
+yobs_expect "sql: the encrypted hourly tier with the parquet keys" "^true$" sql --parquet-keys-dir "$PARQUET_KEYS" --format csv "SELECT count(*) > 0 AS rows FROM hourly_logs"
+
+# y-obs prometheus: the last two minutes loaded, older ranges through
+# remote read, following, reuse and stop. The bucket was purged earlier in
+# the run, so "older" is minutes, not hours. Needs the Prometheus server.
+PROM_BIN=${PROMETHEUS:-$(command -v y-prometheus || command -v prometheus || true)}
+if [ -z "$PROM_BIN" ]; then
+  echo "  SKIP: y-obs prometheus (no PROMETHEUS, y-prometheus or prometheus)"
+else
+  YOBS_RUN=$(mktemp -d "${TMPDIR:-/tmp}/itest-yobs.XXXXXX")
+  yobs_prom() {
+    env Y_OBS_CONTEXT= XDG_RUNTIME_DIR="$YOBS_RUN" PROMETHEUS="$PROM_BIN" S3_ENDPOINT="127.0.0.1:$S3_PORT" S3_BUCKET="$BUCKET" S3_TLS=off \
+      AWS_ACCESS_KEY_ID=demoaccess AWS_SECRET_ACCESS_KEY=demosecret CLUSTER_NAME="$CLUSTER" \
+      target/bin/y-obs prometheus --no-open --max-objects 2000 "$@"
+  }
+  promq() { curl -s "$PROM_URL/api/v1/$1" --data-urlencode "query=$2" "${@:3}"; }
+  # the loaded window's bounds, as y-obs reports them on its target
+  prom_pushed() { promq query "yobs_pushed_window_seconds{bound=\"$1\"}" | grep -o '"[0-9]*"\]' | tr -dc 0-9 || true; }
+  prom_names() { curl -s "$PROM_URL/api/v1/label/__name__/values" | grep -q '"app_requests_total"'; }
+  prom_value() { promq query 'app_requests_total{pod="metrics-multi",container="app",code="200"}' | grep -q '"42"'; }
+  # five minutes ending before the loaded window: only remote read has them
+  prom_older() {
+    local from
+    from=$(prom_pushed from)
+    [ -n "$from" ] && promq query_range 'count(node_load1)' --data-urlencode start=$((from - 300)) \
+      --data-urlencode end=$((from - 30)) --data-urlencode step=30 | grep -q '"values":\[\['
+  }
+  prom_reused() { [ "$(yobs_prom 2>/dev/null)" = "$PROM_URL" ]; }
+  prom_gone() { ! curl -sf "$PROM_URL/-/ready" >/dev/null; }
+  if PROM_URL=$(yobs_prom --since 2m 2>"$INIT.yobs.err") && [ -n "$PROM_URL" ]; then
+    echo "  PASS: y-obs prometheus: started at $PROM_URL ($(grep -o 'loaded [0-9]* samples[^:]*' "$INIT.yobs.err"))"
+    expect "y-obs prometheus: progress shown, names autocompleting before the samples load" \
+      grep -q 'names autocomplete; loading the samples' "$INIT.yobs.err"
+    expect "y-obs prometheus: autocomplete knows app_requests_total" prom_names
+    expect "y-obs prometheus: app_requests_total{code=\"200\"} of metrics-multi is 42" prom_value
+    # Prometheus scrapes y-obs every 15 s: the bounds are there after one
+    sleep 20
+    expect "y-obs prometheus: minutes before the loaded window, through remote read" prom_older
+    PUSHED_TO=$(prom_pushed to)
+    sleep 45
+    PUSHED_TO2=$(prom_pushed to)
+    expect "y-obs prometheus: following moves the loaded window's end ($PUSHED_TO to $PUSHED_TO2)" test "${PUSHED_TO2:-0}" -gt "${PUSHED_TO:-0}"
+    expect "y-obs prometheus: a repeated call reuses the instance" prom_reused
+    expect "y-obs prometheus --stop ends it" yobs_prom --stop
+    expect "y-obs prometheus: stopped, Prometheus answers no more" prom_gone
+  else
+    echo "  FAIL: y-obs prometheus did not start:" >&2
+    sed 's/^/    /' "$INIT.yobs.err" | head -20 >&2
+    ERRORS=$((ERRORS + 1))
+  fi
+  yobs_prom --stop >/dev/null 2>&1 || true
+  rm -rf "$YOBS_RUN"
+fi
 
 phase "assert: compactor"
 # The key rotation: the hourly objects so far, then PARQUET_KEY_ID
