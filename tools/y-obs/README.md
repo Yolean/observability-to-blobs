@@ -64,8 +64,9 @@ Two things make this possible now:
   `TestSigV4Copied`).
 - **The engine is bounded.** Memory is capped at 2 GB
   (`Y_OBS_MEMORY_LIMIT`), spilling to a temporary directory, and threads
-  at 8 (`Y_OBS_THREADS`): DuckDB's memory grows with its threads, and
-  the reads are bound by the store. Each command reads its window once,
+  at 32 (`Y_OBS_THREADS`): DuckDB's memory grows with its threads. Under
+  the limit 56 threads ran out of memory and 32 did not, while 8 made
+  one- and two-day windows 3.5x slower against a remote store. Each command reads its window once,
   into a temporary table of the rows it scopes to, which its query and
   its follow-up questions (a cut count, the closest names) then read.
 

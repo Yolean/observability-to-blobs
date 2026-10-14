@@ -241,12 +241,14 @@ func clusterFor(flagValue string, scope []string) (string, error) {
 const defaultMemoryLimit = "2GB"
 
 // engineThreads caps the engine's threads (Y_OBS_THREADS): its memory
-// grows with them, and the reads are bound by the store, not the CPU.
+// grows with them. Under the 2 GB limit, 56 threads ran out of memory and
+// 32 did not; 8 made one- and two-day windows 3.5x slower against a
+// remote store, where more threads read more objects at once.
 func engineThreads() int {
 	if n, err := strconv.Atoi(os.Getenv("Y_OBS_THREADS")); err == nil && n > 0 {
 		return n
 	}
-	return min(runtime.NumCPU(), 8)
+	return min(runtime.NumCPU(), 32)
 }
 
 // openSession opens the engine. With blobsDir the tiers are read from a
