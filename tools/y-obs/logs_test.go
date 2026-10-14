@@ -49,7 +49,7 @@ func TestLogs(t *testing.T) {
 		t.Errorf("cut note: %q %v", e, err)
 	}
 	if out, _, err := runCmd(t, logsRun, dir, "qa", "web-1", "app", "--tail", "1", "--format", "jsonl"); err != nil ||
-		out != `{"time":"2026-10-11T09:04:00.000000000Z","container":"app","restart":1,"pod_uid":"u1","message":"\u001b[31merror: two\u001b[0m"}`+"\n" {
+		out != `{"time":"2026-10-11T09:04:00.000000000Z","namespace":"qa","pod":"web-1","pod_uid":"u1","container":"app","restart":1,"stream":"stdout","message":"\u001b[31merror: two\u001b[0m"}`+"\n" {
 		t.Errorf("jsonl: %q %v", out, err)
 	}
 	if _, _, err := runCmd(t, logsRun, dir, "qa", "web-1", "nope"); exitOf(err) != exitNotFound || !strings.Contains(err.Error(), "it has: app, side") {
@@ -63,5 +63,11 @@ func TestLogs(t *testing.T) {
 	}
 	if _, _, err := runCmd(t, logsRun, dir, "qa"); exitOf(err) != exitUsage {
 		t.Errorf("no pod: %v", err)
+	}
+	// --out keeps the typed columns, not the line
+	db := filepath.Join(t.TempDir(), "l.duckdb")
+	if out, _, err := runCmd(t, logsRun, dir, "qa", "web-1", "--out", db); err != nil ||
+		!strings.Contains(out, "columns: time TIMESTAMP_NS, namespace VARCHAR, pod VARCHAR, pod_uid VARCHAR, container VARCHAR, restart INTEGER, stream VARCHAR, message VARCHAR") {
+		t.Errorf("--out: %q %v", out, err)
 	}
 }

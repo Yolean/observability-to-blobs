@@ -22,8 +22,9 @@ systemd unit as CONTAINER: y-obs logs _node worker-3 kubelet.service
 
 --tail applies after --grep: the last N matching lines. Lines are
 '[pod/POD/CONTAINER] TIMESTAMP MESSAGE', the first two parts with
---prefix and --timestamps; --format jsonl gives time, container, restart,
-pod_uid and message as fields instead.
+--prefix and --timestamps; --format jsonl gives time, namespace, pod,
+pod_uid, container, restart, stream and message as fields instead, and
+--out keeps those typed columns.
 
 Examples:
   y-obs logs qa web-1 --tail 200 --timestamps
@@ -100,7 +101,7 @@ func runLogs(ctx context.Context, args []string, stdout, stderr io.Writer, now t
 	}
 	// a retried upload repeats lines: each once
 	sel := `WITH l AS (
-  SELECT DISTINCT time, ` + part + ` AS container, restart, pod_uid, ` + message + ` AS message
+  SELECT DISTINCT time, namespace, ` + who + ` AS pod, pod_uid, ` + part + ` AS container, restart, stream, ` + message + ` AS message
   FROM w_logs WHERE ` + strings.Join(where, " AND ") + `)`
 	if previous {
 		sel += `,
@@ -124,7 +125,8 @@ t AS (SELECT * FROM g ORDER BY time DESC, container, restart, message`
 	}
 	last += ")\n"
 	var q string
-	if c.format == "text" {
+	// the line format is for reading; --out keeps the typed columns
+	if c.format == "text" && c.of.out == "" {
 		var parts []string
 		if prefix {
 			parts = append(parts, "'["+who+"/' || "+sqlString(pod)+" || '/' || coalesce(container, '') || ']'")
@@ -135,7 +137,7 @@ t AS (SELECT * FROM g ORDER BY time DESC, container, restart, message`
 		parts = append(parts, "message")
 		q = last + "SELECT concat_ws(' ', " + strings.Join(parts, ", ") + ") AS line FROM t ORDER BY time, container, restart, message"
 	} else {
-		q = last + "SELECT time, container, restart, pod_uid, message FROM t ORDER BY time, container, restart, message"
+		q = last + "SELECT time, namespace, pod, pod_uid, container, restart, stream, message FROM t ORDER BY time, container, restart, message"
 	}
 	h := hook{
 		cut: func(ctx context.Context, s *session, printed int) string {
