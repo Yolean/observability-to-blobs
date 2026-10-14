@@ -5,6 +5,6 @@ RUN go mod download
 COPY *.go ./
 RUN CGO_ENABLED=0 go build -trimpath -o /out/blobs-to-prometheus .
 
-FROM gcr.io/distroless/static-debian13:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
 COPY --from=build /out/blobs-to-prometheus /usr/local/bin/blobs-to-prometheus
 ENTRYPOINT ["/usr/local/bin/blobs-to-prometheus"]
