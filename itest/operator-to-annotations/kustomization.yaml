@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The controller of operator-to-annotations at the image test.sh builds.
+# The CRDs are applied on their own, server-side; cert-manager before this.
+resources:
+- ../../operator-to-annotations/controller
+
+images:
+- name: ghcr.io/yolean/observability-operator-to-annotations
+  newName: operator-to-annotations
+  newTag: itest

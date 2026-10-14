@@ -1,0 +1,87 @@
+# The model case: a main container and a worker sidecar, each serving its
+# own /metrics on its own declared port, and one PodMonitor with an
+# endpoint for each. The webhook writes one port-scoped group per
+# container, so each is a target of its own, attributed to its container.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: podmonitored
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: podmonitored
+  template:
+    metadata:
+      labels:
+        app: podmonitored
+    spec:
+      containers:
+      - name: main
+        image: busybox:1.37
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          mkdir -p /www && printf '# TYPE podmonitored_main_up gauge\npodmonitored_main_up 1\n' > /www/metrics
+          exec httpd -f -p 9201 -h /www
+        ports:
+        - name: metrics
+          containerPort: 9201
+      - name: worker
+        image: busybox:1.37
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          mkdir -p /www && printf '# TYPE podmonitored_worker_up gauge\npodmonitored_worker_up 1\n' > /www/metrics
+          exec httpd -f -p 9202 -h /www
+        ports:
+        - name: worker-metrics
+          containerPort: 9202
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: podmonitored
+spec:
+  selector:
+    matchLabels:
+      app: podmonitored
+  podMetricsEndpoints:
+  - port: metrics
+    interval: 20s
+  - port: worker-metrics
+    path: /metrics
+    # not translated: a warning, and the rest of the endpoint is
+    scrapeTimeout: 5s
+---
+# Selected by the PodMonitor, but annotated by its author: the webhook
+# leaves it alone and warns
+apiVersion: v1
+kind: Pod
+metadata:
+  name: podmonitored-preannotated
+  labels:
+    app: podmonitored
+  annotations:
+    prometheus.io/scrape: "false"
+spec:
+  terminationGracePeriodSeconds: 1
+  containers:
+  - name: main
+    image: busybox:1.37
+    command: ["sleep", "infinity"]
+    ports:
+    - name: metrics
+      containerPort: 9201
+---
+# Not supported: the controller logs that its targets are not scraped
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: podmonitored
+spec:
+  selector:
+    matchLabels:
+      app: podmonitored
+  endpoints:
+  - port: metrics

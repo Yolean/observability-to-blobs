@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: operator-to-annotations
+spec:
+  # one: every replica logs every report; the webhook's failure policy is
+  # Ignore, so a rollout's gap admits pods unannotated (../README.md)
+  replicas: 1
+  selector:
+    matchLabels:
+      app: operator-to-annotations
+  template:
+    metadata:
+      labels:
+        app: operator-to-annotations
+      annotations:
+        # the controller's own metrics, for the node agent
+        io.opentelemetry.discovery.metrics.8080/enabled: "true"
+    spec:
+      serviceAccountName: operator-to-annotations
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: controller
+        image: ghcr.io/yolean/observability-operator-to-annotations
+        imagePullPolicy: IfNotPresent
+        env:
+        # comma-separated namespaces whose PodMonitors count; empty for all
+        - name: WATCH_NAMESPACES
+          value: ""
+        ports:
+        - name: webhook
+          containerPort: 9443
+        - name: metrics
+          containerPort: 8080
+        - name: probes
+          containerPort: 8081
+        readinessProbe:
+          httpGet: {path: /readyz, port: probes}
+        livenessProbe:
+          httpGet: {path: /healthz, port: probes}
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]
+        resources:
+          requests:
+            cpu: 10m
+            memory: 64Mi
+          limits:
+            memory: 256Mi
+        volumeMounts:
+        - name: tls
+          mountPath: /tls
+          readOnly: true
+      volumes:
+      - name: tls
+        secret:
+          secretName: operator-to-annotations-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: operator-to-annotations
+spec:
+  selector:
+    app: operator-to-annotations
+  ports:
+  - name: webhook
+    port: 443
+    targetPort: webhook

@@ -1,0 +1,35 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: operator-to-annotations
+  annotations:
+    # <namespace>/<Certificate>: cert-manager writes its CA to caBundle
+    cert-manager.io/inject-ca-from: observability/operator-to-annotations
+webhooks:
+- name: pods.operator-to-annotations.yolean.se
+  admissionReviewVersions: [v1]
+  sideEffects: None
+  # a webhook that is down never blocks pod creation; such pods are not
+  # annotated until they are recreated (../README.md)
+  failurePolicy: Ignore
+  timeoutSeconds: 5
+  reinvocationPolicy: Never
+  matchPolicy: Equivalent
+  clientConfig:
+    service:
+      name: operator-to-annotations
+      namespace: observability
+      path: /mutate-pod
+      port: 443
+  rules:
+  - operations: [CREATE]
+    apiGroups: [""]
+    apiVersions: [v1]
+    resources: [pods]
+    scope: Namespaced
+  # not its own pods: it cannot answer before it runs
+  objectSelector:
+    matchExpressions:
+    - key: app
+      operator: NotIn
+      values: [operator-to-annotations]

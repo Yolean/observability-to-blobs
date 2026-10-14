@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: operator-to-annotations
+---
+# Pods for the reports of pods admitted while the webhook was down or
+# before it; PodMonitors to translate; ServiceMonitors to say they are
+# not. Nothing is written, and nothing on Secrets: the serving
+# certificate is a mounted volume.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: operator-to-annotations
+rules:
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [list, watch]
+- apiGroups: [monitoring.coreos.com]
+  resources: [podmonitors, servicemonitors]
+  verbs: [list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: operator-to-annotations
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: operator-to-annotations
+subjects:
+- kind: ServiceAccount
+  name: operator-to-annotations
+  namespace: observability

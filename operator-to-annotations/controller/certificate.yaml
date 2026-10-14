@@ -1,0 +1,21 @@
+# The webhook's serving certificate, self-signed: the API server trusts it
+# through the CA that cert-manager injects into the webhook configuration
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: operator-to-annotations
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: operator-to-annotations
+spec:
+  secretName: operator-to-annotations-tls
+  dnsNames:
+  - operator-to-annotations.observability.svc
+  - operator-to-annotations.observability.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: operator-to-annotations

@@ -153,3 +153,17 @@ jobs:
         labels: ${{ steps.meta-sidecar.outputs.labels }}
         cache-from: type=gha,scope=blobs-to-prometheus
         cache-to: type=gha,mode=max,scope=blobs-to-prometheus
+    - uses: docker/metadata-action@v6
+      id: meta-operator-to-annotations
+      with:
+        images: ghcr.io/${{ github.repository_owner }}/observability-operator-to-annotations
+        tags: type=raw,value=${{ github.sha }}
+    - uses: docker/build-push-action@v7
+      with:
+        context: images/operator-to-annotations
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta-operator-to-annotations.outputs.tags }}
+        labels: ${{ steps.meta-operator-to-annotations.outputs.labels }}
+        cache-from: type=gha,scope=operator-to-annotations
+        cache-to: type=gha,mode=max,scope=operator-to-annotations

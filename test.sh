@@ -160,7 +160,7 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
   need duckdb "https://duckdb.org/docs/installation/"
   envtest_assets
   for mod in images/fluentbit/plugins/cri_scrape images/fluentbit/plugins/k8s_objects images/blobs-to-prometheus \
-    tools/rules-manifest tools/apiserver-at; do
+    images/operator-to-annotations tools/rules-manifest tools/apiserver-at; do
     phase "checks: go ($mod)"
     (
       cd "$mod"
@@ -190,6 +190,9 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
   kubectl kustomize compactor/deploy/spool-networkpolicy >/dev/null
   kubectl kustomize itest/buildkit >/dev/null
   operator-to-annotations/crds/vendor.sh check
+  kubectl kustomize operator-to-annotations >/dev/null
+  kubectl kustomize itest/operator-to-annotations >/dev/null
+  kubectl kustomize itest/operator-to-annotations/workloads >/dev/null
 fi
 
 [ "$MODE" != checks ] || exit 0
@@ -241,6 +244,23 @@ build_image() {
   fi
 }
 
+# operator-to-annotations' controller (operator-to-annotations/README.md)
+CONTROLLER_IMAGE=operator-to-annotations:itest
+build_controller() {
+  phase "image: build $CONTROLLER_IMAGE ($IMAGE_BUILDER)"
+  if [ "${SKIP_BUILD:-}" = 1 ] && [ -f target/images/operator-to-annotations.tar ]; then
+    echo "SKIP_BUILD=1, reusing target/images/operator-to-annotations.tar"
+  elif [ "$IMAGE_BUILDER" = docker ]; then
+    docker buildx build \
+      --output "type=oci,dest=target/images/operator-to-annotations.tar,name=docker.io/library/$CONTROLLER_IMAGE" \
+      images/operator-to-annotations
+  else
+    buildctl build --frontend dockerfile.v0 \
+      --local context=images/operator-to-annotations --local dockerfile=images/operator-to-annotations \
+      --output "type=oci,dest=target/images/operator-to-annotations.tar,name=docker.io/library/$CONTROLLER_IMAGE"
+  fi
+}
+
 # BuildKit in the itest cluster, reached through a port-forward, so a host
 # with neither docker nor a BuildKit daemon can build
 cluster_builder() {
@@ -275,6 +295,7 @@ build_compactor() {
 if [ "$IMAGE_BUILDER" != cluster ]; then
   build_image
   build_compactor
+  build_controller
 fi
 
 # --------------------------------------------------------------- cluster --
@@ -303,11 +324,13 @@ else
 fi
 
 if [ "$IMAGE_BUILDER" = cluster ]; then
-  if [ "$BUILD" = yes ] || [ "${SKIP_BUILD:-}" != 1 ] || [ ! -f target/images/compactor-oci/index.json ]; then
+  if [ "$BUILD" = yes ] || [ "${SKIP_BUILD:-}" != 1 ] || [ ! -f target/images/compactor-oci/index.json ] \
+    || [ ! -f target/images/operator-to-annotations.tar ]; then
     cluster_builder
   fi
   build_image
   build_compactor
+  build_controller
 fi
 
 phase "cluster: load image"
@@ -324,6 +347,8 @@ else
 fi
 y-cluster ctr --context "$CONTEXT" -- -n k8s.io images rm "$COMPACTOR_IMAGE" </dev/null >/dev/null 2>&1 || true
 y-cluster images load --context "$CONTEXT" ./target/images/compactor-oci
+y-cluster ctr --context "$CONTEXT" -- -n k8s.io images rm "docker.io/library/$CONTROLLER_IMAGE" </dev/null >/dev/null 2>&1 || true
+y-cluster images load --context "$CONTEXT" ./target/images/operator-to-annotations.tar
 
 phase "cluster: apply"
 # bare test pods are immutable in most fields; on a reused cluster a changed
@@ -347,6 +372,49 @@ $KUBECTL wait --for=condition=complete job/create-bucket --timeout=180s
 $KUBECTL -n observability rollout restart daemonset/node-agent deployment/k8sagent >/dev/null
 $KUBECTL -n observability rollout status daemonset/node-agent --timeout=180s >/dev/null
 $KUBECTL -n observability rollout status deployment/k8sagent --timeout=180s >/dev/null
+
+# operator-to-annotations: cert-manager for the webhook's certificate, the
+# controller, then pods that only a PodMonitor asks to scrape
+# (operator-to-annotations/README.md)
+phase "cluster: operator-to-annotations"
+# (recent y-cluster releases install it with the cluster: then that one)
+CERT_MANAGER=v1.21.2
+CERT_MANAGER_SHA256=e03b668ec8675214af6b0a671699d088f2601fa3878e0dbe1b41d3feafd1879f
+CERT_MANAGER_YAML=target/itest/cert-manager-$CERT_MANAGER.yaml
+if ! $KUBECTL get crd certificates.cert-manager.io >/dev/null 2>&1; then
+  if [ ! -f "$CERT_MANAGER_YAML" ]; then
+    mkdir -p target/itest
+    curl -sSfLo "$CERT_MANAGER_YAML.tmp" "https://github.com/cert-manager/cert-manager/releases/download/$CERT_MANAGER/cert-manager.yaml"
+    mv "$CERT_MANAGER_YAML.tmp" "$CERT_MANAGER_YAML"
+  fi
+  echo "$CERT_MANAGER_SHA256  $CERT_MANAGER_YAML" | sha256sum -c --quiet || fail "$CERT_MANAGER_YAML is not cert-manager $CERT_MANAGER"
+  $KUBECTL apply --server-side -f "$CERT_MANAGER_YAML" >/dev/null
+fi
+for d in cert-manager cert-manager-cainjector cert-manager-webhook; do
+  $KUBECTL -n cert-manager rollout status "deployment/$d" --timeout=300s >/dev/null
+done
+# cert-manager's own webhook refuses Certificates until its CA is injected
+for _ in $(seq 1 30); do $KUBECTL apply -k itest/operator-to-annotations >/dev/null 2>&1 && break; sleep 2; done
+$KUBECTL apply -k itest/operator-to-annotations >/dev/null
+$KUBECTL -n observability rollout restart deployment/operator-to-annotations >/dev/null
+$KUBECTL -n observability rollout status deployment/operator-to-annotations --timeout=180s
+$KUBECTL apply -k itest/operator-to-annotations/workloads >/dev/null
+# The webhook answers once cert-manager has injected its CA and the
+# Service has the new pod: until then pods are admitted unannotated
+# (failurePolicy Ignore). A server-side dry run that the PodMonitor
+# selects comes back annotated when it does.
+webhook_probe() {
+  $KUBECTL run webhook-probe --dry-run=server --restart=Never --image=busybox:1.37 --labels=app=podmonitored \
+    --overrides='{"apiVersion": "v1", "spec": {"containers": [{"name": "probe", "image": "busybox:1.37", "ports": [{"name": "metrics", "containerPort": 9201}]}]}}' \
+    -o go-template='{{ with .metadata.annotations }}{{ with index . "observability-to-blobs/podmonitors" }}{{ . }}{{ end }}{{ end }}' 2>/dev/null
+}
+for _ in $(seq 1 60); do [ "$(webhook_probe)" = default/podmonitored ] && break; sleep 2; done
+[ "$(webhook_probe)" = default/podmonitored ] || fail "the operator-to-annotations webhook does not annotate a pod its PodMonitor selects"
+# the pods start over, admitted by the webhook as it is now
+$KUBECTL delete pod podmonitored-preannotated --ignore-not-found --grace-period=1 >/dev/null
+$KUBECTL apply -k itest/operator-to-annotations/workloads >/dev/null
+$KUBECTL rollout restart deployment/podmonitored >/dev/null
+$KUBECTL rollout status deployment/podmonitored --timeout=120s
 
 # Objects from earlier runs would make every assertion scan an unbounded
 # corpus. The bucket is test state; start empty. In up mode the bucket is
@@ -999,6 +1067,58 @@ expect "a ScrapeConfig, which the base leaves out, fails at apply" \
   eval "! dry_run monitoring.coreos.com/v1alpha1 ScrapeConfig '{}'"
 
 # -------------------------------------------------------------- compactor --
+
+phase "assert: operator-to-annotations"
+# the newest pod of the Deployment, and its annotation <key>
+PODMONITORED=$($KUBECTL get pod -l app=podmonitored,pod-template-hash --sort-by=.metadata.creationTimestamp -o name | tail -n 1)
+annotation() { # <pod> <key>
+  $KUBECTL get "$1" -o go-template="{{ with .metadata.annotations }}{{ with index . \"$2\" }}{{ . }}{{ end }}{{ end }}"
+}
+annotation_is() { [ "$(annotation "$1" "$2")" = "$3" ]; }
+OTA_LOGS=$($KUBECTL -n observability logs deployment/operator-to-annotations)
+logged() { grep -F "$1" <<< "$OTA_LOGS" | grep -qF "$2"; }
+ota_ports() {
+  annotation_is "$PODMONITORED" io.opentelemetry.discovery.metrics.9201/enabled true &&
+    annotation_is "$PODMONITORED" io.opentelemetry.discovery.metrics.9202/enabled true
+}
+ota_config() {
+  annotation_is "$PODMONITORED" io.opentelemetry.discovery.metrics.9201/config "collection_interval: 20s" &&
+    annotation_is "$PODMONITORED" io.opentelemetry.discovery.metrics.9202/config "metrics_path: /metrics"
+}
+ota_marker_only() {
+  annotation_is "$PODMONITORED" io.opentelemetry.discovery.metrics/enabled "" &&
+    annotation_is "$PODMONITORED" observability-to-blobs/podmonitors default/podmonitored
+}
+ota_preannotated() {
+  annotation_is pod/podmonitored-preannotated observability-to-blobs/podmonitors "" &&
+    annotation_is pod/podmonitored-preannotated io.opentelemetry.discovery.metrics.9201/enabled "" &&
+    annotation_is pod/podmonitored-preannotated prometheus.io/scrape false
+}
+ota_report() {
+  local pm='"podMonitor":"default/podmonitored"'
+  logged "$pm" '"condition":"PartiallyTranslated"' && logged "$pm" 'podMetricsEndpoints[1].scrapeTimeout' &&
+    logged "$pm" '"reason":"pre-existing scrape annotations"'
+}
+expect "the webhook enables each endpoint's port by number: the main container's 9201, the worker's 9202" ota_ports
+expect "each port's config carries its endpoint's interval and path" ota_config
+expect "no pod-level key, and the marker names the PodMonitor" ota_marker_only
+expect "a selected pod with its own scrape annotations is left as it is" ota_preannotated
+expect "the webhook warns about it, naming the pod and the PodMonitor" \
+  logged default/podmonitored-preannotated "not applying PodMonitor default/podmonitored"
+expect "the report: partially translated, scrapeTimeout untranslated, the pre-annotated pod skipped" ota_report
+expect "a ServiceMonitor is logged as not supported" \
+  logged "ServiceMonitor is not supported" default/podmonitored
+assert "the main container's metrics, attributed to it" \
+  "SELECT count(*) > 0 FROM metrics WHERE pod LIKE 'podmonitored-%' AND container = 'main' AND name = 'podmonitored_main_up' AND value = 1"
+assert "the worker's metrics, attributed to it" \
+  "SELECT count(*) > 0 FROM metrics WHERE pod LIKE 'podmonitored-%' AND container = 'worker' AND name = 'podmonitored_worker_up' AND value = 1"
+assert "neither container's series in the other's" \
+  "SELECT count(*) = 0 FROM metrics WHERE pod LIKE 'podmonitored-%' AND ((container = 'main' AND name = 'podmonitored_worker_up') OR (container = 'worker' AND name = 'podmonitored_main_up'))"
+assert "main is scraped every 20 s (its endpoint's interval), the worker every 15 s (the default)" \
+  "WITH g AS (SELECT container, epoch(time) - epoch(lag(time) OVER (PARTITION BY pod, container ORDER BY time)) AS gap
+              FROM metrics WHERE pod LIKE 'podmonitored-%' AND name = 'up')
+   SELECT bool_and(CASE container WHEN 'main' THEN m BETWEEN 19 AND 21 WHEN 'worker' THEN m BETWEEN 14 AND 16 END) AND count(*) = 2
+   FROM (SELECT container, median(gap) AS m FROM g WHERE gap IS NOT NULL GROUP BY container)"
 
 phase "assert: cluster objects (K8SAGENT.md)"
 assert "the cluster agent's keys hold apiserver lines, and only they do" \
