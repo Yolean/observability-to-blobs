@@ -93,6 +93,17 @@ func (s *session) planWindow(ctx context.Context, tables []string, ns string, no
 			dailyDays[h.Format("2006-01-02")] = true
 		}
 	}
+	// a window that starts within rawBefore of an hour also takes the
+	// previous hour's objects opened in that margin: the hour's last object
+	// holds the window's first rows
+	var margin []string
+	if first := s.w.from.Truncate(time.Hour); s.w.from.Add(-rawBefore).Before(first) && p.sources[first.Format("2006-01-02/15")] == fromRaw {
+		fs, err := s.rawHour(ctx, first.Add(-time.Hour))
+		if err != nil {
+			return err
+		}
+		margin = fs
+	}
 	// a finished day with an hour no other tier has reads the daily tier,
 	// if it has the day, for all its hours; a day not yet finished has at
 	// most a partial rollup, and keeps its hours' sources
@@ -135,7 +146,7 @@ func (s *session) planWindow(ctx context.Context, tables []string, ns string, no
 			kept = append(kept, f)
 		}
 	}
-	p.raw = kept
+	p.raw = append(kept, margin...)
 	for _, t := range tables {
 		for key, src := range p.sources {
 			if src == fromHourly {

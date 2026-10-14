@@ -568,7 +568,9 @@ func (s *session) planRaw(ctx context.Context) error {
 		node = s.node
 	}
 	var files []string
-	for _, h := range s.w.hours() {
+	// from the hour of the margin before the window: the previous hour's
+	// last object holds the window's first rows when it starts on the hour
+	for _, h := range (window{from: s.w.from.Add(-rawBefore), to: s.w.to}).hours() {
 		fs, err := s.glob(ctx, fmt.Sprintf("%s/raw1/%s/%s/%s/*.jsonl.zst", s.root, s.cluster, h.Format("2006-01-02/15"), node))
 		if err != nil {
 			return err

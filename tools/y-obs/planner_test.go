@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -152,5 +153,26 @@ func TestExplainOverBudget(t *testing.T) {
 	out, _, err := runSQLTest(t, dir, "--explain", "--max-objects", "0", "SELECT * FROM logs")
 	if exitOf(err) != exitBudget || !strings.Contains(out, "raw\t1 objects") {
 		t.Errorf("explain over budget: %q %v", out, err)
+	}
+}
+
+// A window starting on the hour reads the previous hour's last object,
+// which holds its first rows: through the window planner and sql's raw view.
+func TestWindowOnTheHour(t *testing.T) {
+	dir := t.TempDir()
+	writeRaw(t, filepath.Join(dir, "raw1/c/2026-10-11/09/n1/5945-a.jsonl.zst"), []map[string]interface{}{
+		logLine("2026-10-11T09:59:50Z", "before the window"), logLine("2026-10-11T10:00:10Z", "first in the window")})
+	writeRaw(t, filepath.Join(dir, "raw1/c/2026-10-11/10/n1/0015-a.jsonl.zst"), []map[string]interface{}{logLine("2026-10-11T10:00:20Z", "second")})
+	now := time.Date(2026, 10, 11, 10, 30, 0, 0, time.UTC)
+	var o, e bytes.Buffer
+	if err := runLogs(context.Background(), []string{"--cluster", "c", "--blobs-dir", dir, "--from", "2026-10-11 10:00", "--to", "2026-10-11 10:30", "qa", "web-1"}, &o, &e, now); err != nil {
+		t.Fatal(err, e.String())
+	}
+	if o.String() != "first in the window\nsecond\n" {
+		t.Errorf("logs: %q", o.String())
+	}
+	out, _, err := runSQLTestAt(t, dir, "2026-10-11 10:00", "2026-10-11 10:30", "SELECT count(*) AS n FROM logs WHERE time >= '2026-10-11 10:00:00'")
+	if err != nil || out != "n\n2\n" {
+		t.Errorf("sql: %q %v", out, err)
 	}
 }

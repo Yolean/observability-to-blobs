@@ -185,3 +185,11 @@ func TestReferenced(t *testing.T) {
 		t.Errorf("daily_metrics planned raw: %v", ref)
 	}
 }
+
+func runSQLTestAt(t *testing.T, dir, from, to string, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	var o, e bytes.Buffer
+	args = append([]string{"--cluster", "c", "--blobs-dir", dir, "--from", from, "--to", to}, args...)
+	err = runSQL(context.Background(), args, &o, &e, time.Now())
+	return o.String(), e.String(), err
+}

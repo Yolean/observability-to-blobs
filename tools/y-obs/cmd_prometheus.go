@@ -336,6 +336,17 @@ func waitLoaded(ctx context.Context, progressPath string, exited <-chan struct{}
 		last = l
 		select {
 		case <-exited:
+			// the server may have written its failure just before exiting
+			if b, err := os.ReadFile(progressPath); err == nil {
+				var f loadProgress
+				if json.Unmarshal(b, &f) == nil && f.Stage == "failed" {
+					code := f.Code
+					if code == 0 {
+						code = exitStore
+					}
+					return fail(code, "%s", f.Error)
+				}
+			}
 			return errServerExited
 		case <-ctx.Done():
 			return &exitError{code: exitStore, msg: "interrupted while loading; stopped"}

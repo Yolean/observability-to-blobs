@@ -70,6 +70,13 @@ func TestWaitLoaded(t *testing.T) {
 	if err := waitLoaded(t.Context(), path, make(chan struct{}), func(string) {}); exitOf(err) != exitBudget {
 		t.Errorf("over budget: %v", err)
 	}
+	// the server wrote its failure and exited within one poll: its code
+	write(loadProgress{Stage: "failed", Error: "over budget", Code: exitBudget})
+	gone := make(chan struct{})
+	close(gone)
+	if err := waitLoaded(t.Context(), path, gone, func(string) {}); exitOf(err) != exitBudget {
+		t.Errorf("failed, then exited: %v", err)
+	}
 	// a reused, loaded instance: no catalog line, no callback
 	write(loadProgress{Stage: "loaded", URL: "http://x"})
 	called := false
