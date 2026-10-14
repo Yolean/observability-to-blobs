@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The prometheus-operator CRDs that shared manifests commonly carry, v1
+# only, so that those manifests apply on a cluster without the operator
+# (../README.md, "CRDs"). Usable on its own: nothing here runs. The
+# Prometheus and Alertmanager CRDs exceed the annotation limit of a
+# client-side apply, so apply with --server-side.
+#
+# The files are the release's, unmodified; vendor.sh moves the pins below
+# and `vendor.sh check` (part of ./test.sh checks) verifies them.
+#
+# release: v0.94.1
+# sha256: 3134036ea60b59ee10e46c60075cf08facbb89bdc8a7bc8f02bbe7d7c14378a1  monitoring.coreos.com_alertmanagers.yaml
+# sha256: 62a3dd743ae8ea13f6817be3e8ab74e97e22fd59effc0704e1524dff8869fb43  monitoring.coreos.com_podmonitors.yaml
+# sha256: 0aadc58268beb77ac067d57dddde8592a5f35a6c7d262935c1a6b03d8ef67de5  monitoring.coreos.com_prometheuses.yaml
+# sha256: 8e29b30e9353d593821ba4e61dc189ed7b3c4cf50a665e95d8c3d3aad3c4d484  monitoring.coreos.com_prometheusrules.yaml
+# sha256: 31bdff398b54ac2bc993a33f5dcb0472792a77104a6a609d264c8f1f17829769  monitoring.coreos.com_servicemonitors.yaml
+
+resources:
+- monitoring.coreos.com_alertmanagers.yaml
+- monitoring.coreos.com_podmonitors.yaml
+- monitoring.coreos.com_prometheuses.yaml
+- monitoring.coreos.com_prometheusrules.yaml
+- monitoring.coreos.com_servicemonitors.yaml

@@ -72,6 +72,7 @@ kubectl against the cluster as it was at a time, from the blobs alone.
 | `itest/` | y-cluster configs for a local k3s node (qemu and docker), versitygw, the workloads that exercise each path, the compactor's overlays (bucket mode, and spool mode with stock Fluent Bit as a second shipper); `itest/host/` the host phase |
 | `images/blobs-to-prometheus/`, `tools/rules-manifest/`, `local/`, `alerts-cf/` | the alerting consumer: the tailer from `raw1/` into a Prometheus remote-write receiver, the selectors manifest of a rule set, the local stacks and the Cloudflare container |
 | `compactor/` | `blobs-compactor` (fold, rollup and the loop that runs them, and the logs API), its design (`README.md`), its SQL (`sql/raw.sql` is the raw line contract every consumer reads), its build script and `deploy/` |
+| `operator-to-annotations/` | for clusters whose manifests carry prometheus-operator resources but that run no operator: `crds/`, the five common prometheus-operator CRDs at `v1` only, vendored as released ([its README](operator-to-annotations/README.md)) |
 | `examples/gke/` | sketch of a production overlay |
 | `test.sh` | the one command |
 

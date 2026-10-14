@@ -153,7 +153,7 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
   need go "https://go.dev/dl/"
   need shellcheck "https://github.com/koalaman/shellcheck"
   phase "checks: shell"
-  shellcheck -x -P SCRIPTDIR test.sh compactor/build.sh local/kubectl-at.sh
+  shellcheck -x -P SCRIPTDIR test.sh compactor/build.sh local/kubectl-at.sh operator-to-annotations/crds/vendor.sh
 
   # tools/apiserver-at's acceptance test runs a source API server, the
   # watcher, compactor/sql/ in DuckDB and apiserver-at
@@ -189,6 +189,7 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
   kubectl kustomize itest/compactor-put >/dev/null
   kubectl kustomize compactor/deploy/spool-networkpolicy >/dev/null
   kubectl kustomize itest/buildkit >/dev/null
+  operator-to-annotations/crds/vendor.sh check
 fi
 
 [ "$MODE" != checks ] || exit 0
@@ -329,6 +330,12 @@ phase "cluster: apply"
 # manifest must recreate them, so apply always starts from absence
 $KUBECTL delete pod metrics-multi metrics-classic metrics-numeric metrics-optout \
   --ignore-not-found --grace-period=1 >/dev/null
+# the prometheus-operator CRDs, as a cluster without the operator gets them
+# (operator-to-annotations/README.md); too large for a client-side apply
+$KUBECTL apply --server-side -k operator-to-annotations/crds >/dev/null
+# shellcheck disable=SC2046 # one crd/<name> per word
+$KUBECTL wait --for condition=established --timeout=60s \
+  $(sed -n 's/^  name: \(.*\.monitoring\.coreos\.com\)$/crd\/\1/p' operator-to-annotations/crds/*.yaml) >/dev/null
 $KUBECTL apply -k "$MANIFESTS"
 $KUBECTL rollout status statefulset/versitygw --timeout=180s
 $KUBECTL wait --for=condition=complete job/create-bucket --timeout=180s
@@ -966,6 +973,30 @@ assert "agent self metrics arrive via the static target" \
   "SELECT count(*) > 0 FROM metrics WHERE job = 'node' AND name LIKE 'fluentbit_%' AND pod LIKE 'node-agent-%'"
 assert "healthy targets are scraped about every 15s" \
   "SELECT bool_and(coalesce(n, 0) BETWEEN 3 AND 5) FROM $MINUTES LEFT JOIN (SELECT date_trunc('minute', time) AS m, count(*) AS n FROM metrics WHERE pod = 'metrics-multi' AND container = 'app' AND name = 'up' AND time > $SINCE + INTERVAL 3 MINUTE AND time < $NOW - INTERVAL 2 MINUTE GROUP BY m) USING (m)"
+
+phase "assert: prometheus-operator CRDs (operator-to-annotations/crds)"
+# a manifest at v1 applies; any other version, or a kind the base leaves
+# out, fails at apply instead of being stored and read by nothing
+dry_run() { # <apiVersion> <kind> <spec>
+  $KUBECTL apply --dry-run=server -f - >/dev/null 2>&1 <<YAML
+apiVersion: $1
+kind: $2
+metadata: {name: itest-dry-run, namespace: default}
+spec: $3
+YAML
+}
+expect "a v1 PodMonitor applies" \
+  dry_run monitoring.coreos.com/v1 PodMonitor '{selector: {matchLabels: {app: x}}, podMetricsEndpoints: [{port: metrics}]}'
+expect "a v1 ServiceMonitor applies" \
+  dry_run monitoring.coreos.com/v1 ServiceMonitor '{selector: {matchLabels: {app: x}}, endpoints: [{port: metrics}]}'
+expect "a v1 PrometheusRule applies" \
+  dry_run monitoring.coreos.com/v1 PrometheusRule '{groups: [{name: g, rules: [{alert: A, expr: vector(1)}]}]}'
+expect "a v1 Prometheus and a v1 Alertmanager apply" \
+  eval "dry_run monitoring.coreos.com/v1 Prometheus '{}' && dry_run monitoring.coreos.com/v1 Alertmanager '{}'"
+expect "a v1alpha1 PodMonitor fails at apply" \
+  eval "! dry_run monitoring.coreos.com/v1alpha1 PodMonitor '{}'"
+expect "a ScrapeConfig, which the base leaves out, fails at apply" \
+  eval "! dry_run monitoring.coreos.com/v1alpha1 ScrapeConfig '{}'"
 
 # -------------------------------------------------------------- compactor --
 
