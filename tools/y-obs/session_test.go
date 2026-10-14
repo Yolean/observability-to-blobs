@@ -103,7 +103,7 @@ func TestSQLRawAndHourly(t *testing.T) {
 	if out != want {
 		t.Errorf("tsv:\n%q\nwant\n%q", out, want)
 	}
-	if !strings.Contains(errOut, "objects raw=1 rows=3") {
+	if !strings.Contains(errOut, "objects raw=1 rows=3 fresh-to=2026-10-11T09:01:00Z") {
 		t.Errorf("summary: %s", errOut)
 	}
 	out, _, err = runSQLTest(t, dir, "--format", "jsonl", "SELECT time, labels, value FROM metrics")

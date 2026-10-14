@@ -32,22 +32,30 @@ anything older.
 ## Reading the output
 
 - stderr ends with a summary line:
-  `y-obs: cluster=... window=... hours raw=1 hourly=5 objects ... rows=N`.
+  `y-obs: cluster=... window=... hours raw=1 hourly=5 objects ... rows=N fresh-to=...`.
   Read it before you conclude anything from an empty result.
-  - It names the window actually read and the tier of each hour. The
-    raw tier lags production by 30–60 s, so an event in the last minute
-    may not be there yet: ask again.
+  - It names the window actually read and the tier of each hour.
+  - `fresh-to` is when the newest raw object read was opened; its rows
+    reach about 30 s later. An event after it is not in what was read
+    yet: ask again in a minute.
   - Exit code 1 means the window was read and nothing matched. That is
     evidence of absence for that window only.
-- A cut result says so on stderr, with how to narrow it. Narrow first:
-  `--grep`, a container, a shorter window. Raise `--limit` only after.
-- Exit 5 means the plan was too broad (the cost guard). Add `-n`, `--name`
-  or a shorter window. `--explain` shows the plan without reading.
+- A cut result says so on stderr, before the summary, with how to narrow
+  it. Narrow first: `--grep`, a container, a shorter window. Raise
+  `--limit` only after.
+- Exit 5 means the plan was too broad (the cost guard). The message says
+  what shrinks it: `--node` for the raw tier (the last hours), `-n` when
+  the daily tier is read, or a shorter window. `--explain` shows the plan
+  without reading.
 - Exit 3 means credentials: run `y-obs auth`. Credentials last minutes,
   and y-obs renews them itself, so this only happens when the login
   behind them has expired.
-- Exit 4 means not in the bucket. The message names what does exist,
-  such as the pod's containers or the closest pod names.
+- Exit 4 means not in the bucket, and the message names what is: the
+  pod's containers, the closest pod or metric names, or, when the window
+  has no data at all, the clusters with data or the cluster's dates.
+  Move the window or fix the name it points at.
+- Exit 2 is usage, a SQL syntax error included: `y-obs <command> -h` and
+  `y-obs schema` show what is accepted.
 
 ## Commands
 

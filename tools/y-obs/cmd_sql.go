@@ -220,10 +220,30 @@ func (s *session) summary(w io.Writer, n int, more bool, limit int) {
 	} else if s.wplan != nil {
 		line = fmt.Sprintf("y-obs: cluster=%s window=%s %s objects %s rows=%d", s.cluster, s.w, s.sourcesSummary(), s.planSummary(), n)
 	}
+	if t, ok := s.freshTo(); ok {
+		line += " fresh-to=" + t.Format(time.RFC3339)
+	}
 	if more {
 		line += fmt.Sprintf("; more rows than --limit %d: narrow the query (WHERE, a shorter window) or raise --limit", limit)
 	}
 	fmt.Fprintln(w, line)
+}
+
+// freshTo is when the newest raw object read was opened, from its key: its
+// rows reach up to UPLOAD_TIMEOUT (30 s) later. An event after it is not
+// in what was read.
+func (s *session) freshTo() (time.Time, bool) {
+	var newest time.Time
+	for _, f := range s.plan["raw"] {
+		m := rawKeyTime.FindStringSubmatch(f)
+		if m == nil {
+			continue
+		}
+		if t, err := time.Parse("2006-01-02 15:04:05", m[1]+" "+m[2]+":"+m[3]+":"+m[4]); err == nil && t.After(newest) {
+			newest = t
+		}
+	}
+	return newest, !newest.IsZero()
 }
 
 func (s *session) printPlan(w io.Writer) error {

@@ -56,11 +56,18 @@ Two things make this possible now:
 - It embeds the httpfs extension, sha256-pinned per platform as the
   compactor's `build.env` does. On first use the binary writes it to the
   cache directory and `LOAD`s it by path, with autoinstall off.
-- **Not built yet.** It will reuse the stdlib S3 client
-  (`images/blobs-to-prometheus/s3.go` with `sigv4.go`, once merged) for
-  listings with upload times: `fresh-to`, and the clusters present in a
-  bucket. Until then DuckDB's glob lists, and DuckDB reads the
-  objects.
+- It lists the bucket by DuckDB's glob, and DuckDB reads the objects.
+  For the delimiter listings that say what a bucket holds (the clusters,
+  and a cluster's dates per tier, for exit 4), it has a third
+  byte-identical copy of the compactor's SigV4 signer, as
+  `images/blobs-to-prometheus` has (`go generate` and
+  `TestSigV4Copied`).
+- **The engine is bounded.** Memory is capped at 2 GB
+  (`Y_OBS_MEMORY_LIMIT`), spilling to a temporary directory, and threads
+  at 8 (`Y_OBS_THREADS`): DuckDB's memory grows with its threads, and
+  the reads are bound by the store. Each command reads its window once,
+  into a temporary table of the rows it scopes to, which its query and
+  its follow-up questions (a cut count, the closest names) then read.
 
 **Release.** A tag `y-obs-v*` runs `.github/workflows/y-obs.yaml`. It
 builds four binaries, linux/amd64, linux/arm64, darwin/arm64 and
@@ -100,9 +107,18 @@ output into its context, and cannot see a progress bar. So:
    When output is cut, stderr says so and how to narrow:
    `y-obs: 412 earlier lines not shown: --tail 0 for every line, or narrow with --grep, --since or a container`.
 2. **Cost guard.** Before reading anything, `y-obs` plans the objects
-   each view reads. If the plan exceeds `--max-objects` (default 200), it
-   refuses with exit 5 and the plan's counts. `--explain` prints the plan
-   without reading: the hours per tier and the objects per view.
+   each view reads.
+   - Raw keys are cut to the window by when the agent opened them, from
+     2 minutes before it to 5 minutes past it, the margin after taking
+     lines that arrived late.
+   - A tier object costs 1 and a raw object a tenth: raw objects are
+     small and come one per node per 30 s, so the default `--max-objects`
+     of 200 fits an hour of raw on about 15 nodes.
+   - A plan over budget is exit 5 with its counts and what would shrink
+     it: `--node` for raw, `-n` for the daily tier, a shorter window.
+   - `--explain` prints the plan (the hours per tier, the objects per
+     view and the cost) without reading, and exits 5 after printing when
+     the plan is over budget.
 3. **Stable, parseable output.** `--format text|tsv|csv|json|jsonl`.
    text is the default for `logs` and `grep`, tsv for everything else.
    Columns come in a fixed order with a header line. Timestamps are
@@ -111,17 +127,21 @@ output into its context, and cannot see a progress bar. So:
    terminal width.
 4. **Says where the data came from.** On exit, stderr gets one summary
    line:
-   `y-obs: cluster=prod window=2026-10-11T08:00:00Z..2026-10-11T10:00:00Z hours raw=1 hourly=1 objects hourly_logs=1 raw=40 rows=12`.
-   **Not built yet:** `fresh-to`, the newest upload, which needs upload
-   times from a listing (the stdlib S3 client).
+   `y-obs: cluster=prod window=2026-10-11T08:00:00Z..2026-10-11T10:00:00Z hours raw=1 hourly=1 objects hourly_logs=1 raw=40 rows=12 fresh-to=2026-10-11T09:59:30Z`.
+   `fresh-to` is when the newest raw object read was opened, from its
+   key; its rows reach up to 30 s later. An event after it is not in
+   what was read. Notes, such as how many lines a cut left out, come
+   before the summary, which is always the last line.
 5. **Errors are one line with a next step**, plus documented exit codes:
    - 0: ok, results printed;
    - 1: ok, nothing matched;
-   - 2: usage;
+   - 2: usage, a SQL syntax error or unknown column included;
    - 3: credentials (the token command, the mint, or the store refusing
      the key; also a cluster outside the credential's scope);
-   - 4: not in the bucket, with what is (the pod's containers, the
-     closest pod or metric names, DuckDB's "did you mean" for a view);
+   - 4: not in the bucket, with what is: the pod's containers, the
+     closest pod or metric names, DuckDB's "did you mean" for a view;
+     and when the window has no object at all, the clusters with data,
+     or the cluster's dates per tier;
    - 5: the plan exceeds the budget;
    - 6: the store or the engine failed.
 6. **Self-describing.**
@@ -310,18 +330,24 @@ prints the URL (stdout) and opens it in the browser.
   the window, and its range is local. It loads in two steps, measured on
   one hour of a single-node cluster (1.6 M samples):
   1. **Catalog.** The oldest sample of every series. Every name
-     autocompletes after about 2.5 s, and the browser opens then.
+     autocompletes after about 4 s, and the browser opens then.
   2. **Samples.** The rest of each series in order; the hour is in
-     after about 5 s. In order matters: sending a series' newest sample
+     after about 6.5 s (4.9 s before the engine's memory and thread
+     caps). In order matters: sending a series' newest sample
      first made Prometheus take the rest out of order, at less than half
      the speed.
+
+  A window with no object is exit 4 with what the bucket has, and one
+  whose objects hold no metrics exit 1; a load over budget exits 5.
 
   Progress goes to stderr, as one updating line on a terminal or a line
   per step otherwise. The command returns, and prints the URL to stdout,
   once the whole window is in, so a script's first query sees all of
   it. A repeated call while it loads shows the same progress. Without
-  `--to` it follows: every `--poll` (30 s) it loads what arrived,
-  overlapping by two minutes for late uploads.
+  `--to` it follows: every `--poll` (30 s) it lists the raw keys from 10
+  minutes before the last poll, and loads only those no load has read.
+  Raw objects never change, so that is about one object per node per
+  poll.
 - **Older ranges load on query.** Prometheus is configured with
   `remote_read` to y-obs, which answers from the bucket through the
   window planner. A namespace matcher prunes the daily tier.
@@ -333,7 +359,9 @@ prints the URL (stdout) and opens it in the browser.
   - A read over `--max-objects` or `--max-samples` comes back as a
     warning in the UI, with y-obs's message.
 - **One instance per context and cluster.** A repeated call reuses it
-  (its process alive and Prometheus ready). `--stop` ends it, and
+  (its process alive and Prometheus ready). A call with other `--since`,
+  `--from` or `--to` than it was started with is exit 2, rather than an
+  answer for the old window. `--stop` ends it, and
   `--status` lists the running ones. State and logs are in
   `$XDG_RUNTIME_DIR/y-obs/prometheus/`, and Prometheus's data is in a
   temporary directory removed at stop.
@@ -362,7 +390,8 @@ kubeconfig in a temporary directory.
 
 - **Objects.** They come from the hourly tier (T's hour and the two
   before), else the daily tier (T's day and the day before), or the raw
-  tier with `--source raw`.
+  tier with `--source raw`: the cluster agent's objects only (node
+  `_k8sagent`, K8SAGENT.md), unless `--node` says otherwise.
 - **The release.** kube-apiserver and etcd are the cluster's release at
   T: `--assets`, `KUBEBUILDER_ASSETS`, or setup-envtest.
 - **Without kubectl arguments** it serves and prints the `KUBECONFIG`.
@@ -402,8 +431,8 @@ y-obs sql --db inv.duckdb "SELECT pod, max(value) FROM mem GROUP BY 1"  # local 
 - **Provenance.** Each write adds a row to the file's `y_obs_runs`
   table: the table, the mode (created, replaced or appended), the command
   line, cluster, window, the objects read per view, the rows that run
-  wrote, and the time written. `fresh-to` joins them once the planner
-  knows upload times. A later reader can then see
+  wrote, and the time written. (`fresh-to` is in the summary line, not
+  yet in this table.) A later reader can then see
   what a table covers and how fresh it was. Credentials are never
   written.
 - **Querying a file.** `--db FILE` makes `sql` work on the file alone,
@@ -544,8 +573,8 @@ of y-obs, so the deployment documents it.
 
 1. Done: `apiserver-at` became `y-obs`, with embedded DuckDB and SQL,
    and `sql`, `schema` and `kubectl`. The itest runs `y-obs
-   apiserver-at`. Using `y-obs sql` in place of the duckdb CLI in some
-   itest assertions is still to do.
+   apiserver-at`, and a phase of its own runs the investigation commands
+   and `prometheus` against what the agents shipped.
 2. Done: the window planner, then `pods`, `exits`, `logs`, `grep` and
    `metrics`, each with its rules for LLM callers.
 3. Done: the release workflow and `release.sh`. The `y-bin` entry
@@ -557,5 +586,5 @@ of y-obs, so the deployment documents it.
    skills. The old skills point at it for clusters that have moved, and
    stay until every cluster has. Each cluster gets a context line in
    the skill when it moves.
-6. To do: `fresh-to` and the clusters of a bucket, with the stdlib S3
-   client.
+6. Done: `fresh-to` (from the raw keys), and the clusters and dates of
+   a bucket for exit 4 (delimiter listings).
