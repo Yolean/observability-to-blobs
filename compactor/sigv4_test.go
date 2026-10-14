@@ -1,3 +1,5 @@
+// The tests of sigv4.go, copied with it (see there).
+
 package main
 
 import (

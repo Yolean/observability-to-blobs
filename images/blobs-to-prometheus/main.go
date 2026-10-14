@@ -30,7 +30,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -40,9 +39,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 type config struct {
@@ -94,16 +90,10 @@ func main() {
 		log.Fatal("S3_ENDPOINT, S3_BUCKET and CLUSTER_NAME are required")
 	}
 	endpoint = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(endpoint, "https://"), "http://"), "/")
-	mc, err := minio.New(endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(os.Getenv("AWS_ACCESS_KEY_ID"), os.Getenv("AWS_SECRET_ACCESS_KEY"), ""),
-		Secure: envDefault("S3_TLS", "off") == "on",
-		Region: envDefault("S3_REGION", "us-east-1"),
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-	t := newTailer(cfg, &minioStore{mc: mc, bucket: bucket, timeout: cfg.timeout},
-		&remoteWriter{url: cfg.remoteWrite, client: &http.Client{Timeout: cfg.timeout}}, keep)
+	st := &s3Store{bucket: bucket, endpoint: endpoint, tls: envDefault("S3_TLS", "off") == "on",
+		region: envDefault("S3_REGION", "us-east-1"), keyID: os.Getenv("AWS_ACCESS_KEY_ID"),
+		secret: os.Getenv("AWS_SECRET_ACCESS_KEY"), timeout: cfg.timeout, http: &http.Client{}}
+	t := newTailer(cfg, st, &remoteWriter{url: cfg.remoteWrite, client: &http.Client{Timeout: cfg.timeout}}, keep)
 	if cfg.metricsAddr != "off" {
 		go func() {
 			mux := http.NewServeMux()
@@ -126,48 +116,6 @@ type store interface {
 }
 
 var errNotFound = errors.New("not found")
-
-type minioStore struct {
-	mc      *minio.Client
-	bucket  string
-	timeout time.Duration
-}
-
-func (s *minioStore) list(ctx context.Context, prefix string) ([]string, error) {
-	ctx, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-	var keys []string
-	for obj := range s.mc.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
-		if obj.Err != nil {
-			return nil, obj.Err
-		}
-		keys = append(keys, obj.Key)
-	}
-	return keys, nil
-}
-
-func (s *minioStore) get(ctx context.Context, key string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-	obj, err := s.mc.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
-	if err != nil {
-		return nil, notFound(err)
-	}
-	defer obj.Close()
-	data, err := io.ReadAll(obj)
-	if err != nil {
-		return nil, notFound(err)
-	}
-	return data, nil
-}
-
-func notFound(err error) error {
-	resp := minio.ToErrorResponse(err)
-	if resp.Code == "NoSuchKey" || resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("%w: %v", errNotFound, err)
-	}
-	return err
-}
 
 type tailer struct {
 	cfg  config
