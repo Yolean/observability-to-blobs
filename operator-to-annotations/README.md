@@ -12,27 +12,35 @@ which it reads from the container runtime, at sandbox creation.
 `crds/` is a kustomize base with the five prometheus-operator CRDs that
 shared manifests commonly carry, all in `monitoring.coreos.com`:
 
-| CRD | kind |
+| base | kind |
 |---|---|
-| `podmonitors` | PodMonitor |
-| `servicemonitors` | ServiceMonitor |
-| `prometheusrules` | PrometheusRule |
-| `prometheuses` | Prometheus |
-| `alertmanagers` | Alertmanager |
+| `crds/podmonitors` | PodMonitor |
+| `crds/servicemonitors` | ServiceMonitor |
+| `crds/prometheusrules` | PrometheusRule |
+| `crds/prometheuses` | Prometheus |
+| `crds/alertmanagers` | Alertmanager |
 
-It runs nothing and needs nothing else, so a cluster that only needs its
-manifests to apply uses it on its own. The Prometheus and Alertmanager
-CRDs are larger than a client-side apply can store in its annotation, so
-apply with `--server-side`:
+Each CRD is a base of its own, and `crds/` is all five. They run nothing
+and need nothing else, so a cluster that only needs its manifests to
+apply uses them on their own. The Prometheus and Alertmanager CRDs are
+larger than a client-side apply can store in its annotation, so apply
+with `--server-side`:
 
 ```bash
 kubectl apply --server-side -k operator-to-annotations/crds
 ```
 
+**A CRD the cluster already gets elsewhere** (another chart, an operator
+installed for some other purpose): take it over or leave it out. The
+server-side apply fails with a conflict where another field manager owns
+the CRD. Forcing it (`--force-conflicts`) leaves two owners that flip
+its version on every converge. Rather compose the CRD bases you need and
+leave out the ones the cluster has.
+
 - **Only `v1`.** A manifest at any other version of these kinds fails at
   apply instead of being stored and ignored. The pinned release serves
   only `v1`; if a later one adds a version, `vendor.sh check` fails until a
-  patch in `crds/kustomization.yaml` strips it.
+  patch in that CRD's `kustomization.yaml` strips it.
 - **No other prometheus-operator CRD**: Probe, ScrapeConfig,
   AlertmanagerConfig, PrometheusAgent and ThanosRuler are left out, so
   manifests that use them fail at apply. A cluster that needs them runs

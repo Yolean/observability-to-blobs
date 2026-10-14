@@ -21,7 +21,9 @@ import (
 	"github.com/go-logr/logr"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -84,7 +86,16 @@ func main() {
 		Complete(newReporter(mgr.GetCache(), log.With("component", "report"))); err != nil {
 		fatal(log, "PodMonitor controller", err)
 	}
-	if err := ctrl.NewControllerManagedBy(mgr).
+	pmKind := schema.GroupKind{Group: monitoringv1.SchemeGroupVersion.Group, Kind: monitoringv1.PodMonitorsKind}
+	if _, err := mgr.GetRESTMapper().RESTMapping(pmKind, monitoringv1.Version); err != nil {
+		fatal(log, "the PodMonitor CRD (operator-to-annotations/crds/podmonitors)", err)
+	}
+	// The ServiceMonitor CRD may be left out (operator-to-annotations/crds
+	// has a base per CRD); then there is nothing to warn about.
+	smKind := schema.GroupKind{Group: monitoringv1.SchemeGroupVersion.Group, Kind: monitoringv1.ServiceMonitorsKind}
+	if _, err := mgr.GetRESTMapper().RESTMapping(smKind, monitoringv1.Version); meta.IsNoMatchError(err) {
+		log.Info("no ServiceMonitor CRD, ServiceMonitors are not watched")
+	} else if err := ctrl.NewControllerManagedBy(mgr).
 		For(&monitoringv1.ServiceMonitor{}).
 		Complete(&serviceMonitors{client: mgr.GetCache(), log: log.With("component", "servicemonitor"), seen: map[types.NamespacedName]int64{}}); err != nil {
 		fatal(log, "ServiceMonitor controller", err)

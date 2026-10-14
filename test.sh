@@ -360,7 +360,7 @@ $KUBECTL delete pod metrics-multi metrics-classic metrics-numeric metrics-optout
 $KUBECTL apply --server-side -k operator-to-annotations/crds >/dev/null
 # shellcheck disable=SC2046 # one crd/<name> per word
 $KUBECTL wait --for condition=established --timeout=60s \
-  $(sed -n 's/^  name: \(.*\.monitoring\.coreos\.com\)$/crd\/\1/p' operator-to-annotations/crds/*.yaml) >/dev/null
+  $(sed -n 's/^  name: \(.*\.monitoring\.coreos\.com\)$/crd\/\1/p' operator-to-annotations/crds/*/*.yaml) >/dev/null
 $KUBECTL apply -k "$MANIFESTS"
 $KUBECTL rollout status statefulset/versitygw --timeout=180s
 $KUBECTL wait --for=condition=complete job/create-bucket --timeout=180s
