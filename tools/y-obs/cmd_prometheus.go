@@ -58,6 +58,9 @@ type promState struct {
 	Window  string    `json:"window"`
 	Started time.Time `json:"started"`
 	Log     string    `json:"log"`
+	// Asked is the window flags it was started with, to tell a reuse
+	// from a request for another window
+	Asked string `json:"asked,omitempty"`
 }
 
 func promStateDir() string { return filepath.Join(cacheDir(), "prometheus") }
@@ -181,6 +184,11 @@ func cmdPrometheus(ctx context.Context, args []string) error {
 		fmt.Fprintf(os.Stderr, "y-obs: stopped %s (%s); its log stays in %s\n", key, st.URL, st.Log)
 		return nil
 	}
+	asked := windowFlags(fs)
+	if alive && asked != "" && asked != st.Asked {
+		return fail(exitUsage, "an instance for %s runs with window %s (%s); y-obs prometheus --stop first, or call it without --since/--from/--to to reuse it",
+			key, st.Window, st.Asked)
+	}
 	if alive {
 		// still loading: show it, and return once loaded
 		if err := waitLoaded(ctx, filepath.Join(promStateDir(), key+".progress"), nil, func(string) {}); err != nil {
@@ -225,7 +233,7 @@ func cmdPrometheus(ctx context.Context, args []string) error {
 		return err
 	}
 	logf.Close()
-	st = &promState{PID: cmd.Process.Pid, Cluster: cluster, Context: contextName, Window: w.String(), Started: time.Now().UTC(), Log: logPath}
+	st = &promState{PID: cmd.Process.Pid, Cluster: cluster, Context: contextName, Window: w.String(), Started: time.Now().UTC(), Log: logPath, Asked: asked}
 	if err := writePromState(statePath, st); err != nil {
 		return err
 	}
@@ -357,6 +365,19 @@ func progressLine(l loadProgress) string {
 func isTerminal(f *os.File) bool {
 	fi, err := f.Stat()
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+// windowFlags are the window flags given, as written: "" when none was.
+func windowFlags(fs *flag.FlagSet) string {
+	var parts []string
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "since", "from", "to":
+			parts = append(parts, "--"+f.Name+"="+f.Value.String())
+		}
+	})
+	sort.Strings(parts)
+	return strings.Join(parts, " ")
 }
 
 func promStatus() error {

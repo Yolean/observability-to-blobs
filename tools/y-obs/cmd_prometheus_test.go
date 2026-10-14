@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,5 +79,21 @@ func TestWaitLoaded(t *testing.T) {
 	// a reused instance of an older y-obs has no progress file
 	if err := waitLoaded(t.Context(), filepath.Join(t.TempDir(), "none"), nil, func(string) {}); err != nil {
 		t.Errorf("no progress file on reuse: %v", err)
+	}
+}
+
+func TestWindowFlags(t *testing.T) {
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	var sf sessionFlags
+	sf.register(fs)
+	fs.Parse([]string{"--to", "2026-10-11 10:00", "--since", "2h", "--cluster", "c"})
+	if got := windowFlags(fs); got != "--since=2h --to=2026-10-11 10:00" {
+		t.Errorf("%q", got)
+	}
+	fs2 := flag.NewFlagSet("t", flag.ContinueOnError)
+	sf.register(fs2)
+	fs2.Parse([]string{"--cluster", "c"})
+	if got := windowFlags(fs2); got != "" {
+		t.Errorf("no window flags: %q", got)
 	}
 }
