@@ -447,6 +447,13 @@ kubeconfig in a temporary directory.
   `--source auto`, reads raw while T's hourly object is not final (its
   hour's end plus 30 min) and the tiers after, so `now` is current and
   not the last final hour.
+- **Ages count to T.** The API server prints `kubectl get`'s tables and
+  computes their ages from its own clock. y-obs's read-only proxy
+  rewrites them to count to T: `AGE` from each object's
+  creationTimestamp, and `LAST SEEN`, `LAST SCHEDULE` and a custom
+  resource's date columns shifted back by now minus T. `kubectl
+  describe` computes its event ages itself, from now; its timestamps are
+  absolute.
 - **Left out.** APIServices served by a Service, such as
   metrics-server's `v1beta1.metrics.k8s.io`, are not loaded: their
   backends are not there, and every discovery would warn. So

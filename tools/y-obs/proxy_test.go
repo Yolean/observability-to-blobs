@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/client-go/rest"
 )
@@ -16,7 +17,7 @@ func TestReadOnlyProxy(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer upstream.Close()
-	h, err := readOnly(&rest.Config{Host: upstream.URL}, "t1")
+	h, err := readOnly(&rest.Config{Host: upstream.URL}, "t1", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,5 +52,46 @@ func TestReadOnlyProxy(t *testing.T) {
 		if seen != nil {
 			t.Errorf("%s reached the API server", m)
 		}
+	}
+}
+
+// A table's age columns count to the state's time, not to now: Age from
+// the row's creationTimestamp, Last Seen shifted by now minus at.
+func TestReadOnlyProxyAgesAt(t *testing.T) {
+	at := time.Now().Add(-time.Hour).UTC()
+	created := at.Add(-6*time.Hour - 24*time.Minute).Format(time.RFC3339)
+	table := `{"kind":"Table","apiVersion":"meta.k8s.io/v1","metadata":{},
+"columnDefinitions":[{"name":"Name","type":"string"},{"name":"Age","type":"string"},{"name":"Last Seen","type":"string"},{"name":"Started","type":"date"},{"name":"Restarts","type":"integer"}],
+"rows":[{"cells":["buckety-controller","7h24m","3h","<unknown>",2],"object":{"kind":"PartialObjectMetadata","apiVersion":"meta.k8s.io/v1","metadata":{"name":"buckety-controller","creationTimestamp":"` + created + `"}}},
+{"cells":["no-object","90m","30m","2d",0]}]}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept-Encoding") != "" && r.Header.Get("Accept-Encoding") != "gzip" {
+			t.Errorf("Accept-Encoding %q", r.Header.Get("Accept-Encoding"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(table))
+	}))
+	defer upstream.Close()
+	h, err := readOnly(&rest.Config{Host: upstream.URL}, "t1", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/pods", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	req.Header.Set("Accept", "application/json;as=Table;v=v1;g=meta.k8s.io,application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	for _, want := range []string{`["buckety-controller","6h24m","120m","<unknown>",2]`, `["no-object","30m","<invalid>","47h",0]}`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("want %s in %s", want, body)
+		}
+	}
+	if strings.Contains(body, `"object":null`) || !strings.Contains(body, `"type":"date"}`) {
+		t.Errorf("other fields changed: %s", body)
+	}
+	// a plain object is not touched
+	if got := shiftDuration("not-a-duration", time.Hour); got != "" {
+		t.Errorf("shiftDuration took %q", got)
 	}
 }

@@ -112,7 +112,7 @@ func cmdKubectl(ctx context.Context, args []string) error {
 			fmt.Fprintf(os.Stderr, "y-obs: left out %d objects: %s\n", n, reason)
 		}
 	}
-	o := Options{Assets: *assets, Prepared: p, Listen: "127.0.0.1:0", Label: t.Format("2006-01-02T15:04:05Z") + " UTC"}
+	o := Options{Assets: *assets, Prepared: p, Listen: "127.0.0.1:0", Label: t.Format("2006-01-02T15:04:05Z") + " UTC", At: t}
 	if *verbose {
 		o.Log = os.Stderr
 	}
