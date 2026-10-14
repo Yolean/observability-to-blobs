@@ -72,6 +72,9 @@ func runInvestigation(ctx context.Context, c *sessionCommand, args []string, tab
 		}
 		s.summary(stderr, int(n), false, 0)
 		if n == 0 {
+			if s.noObjects() {
+				return s.explainEmpty(ctx)
+			}
 			return &exitError{code: exitNoRows}
 		}
 		return nil
@@ -96,6 +99,10 @@ func runInvestigation(ctx context.Context, c *sessionCommand, args []string, tab
 		}
 	}
 	if n == 0 {
+		if s.noObjects() {
+			// nothing in the window at all: say what the bucket has
+			return s.explainEmpty(ctx)
+		}
 		if h.empty != nil {
 			if err := h.empty(ctx, s); err != nil {
 				return err

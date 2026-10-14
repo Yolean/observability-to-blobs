@@ -201,6 +201,9 @@ func runSQL(ctx context.Context, args []string, stdout, stderr io.Writer, now ti
 	}
 	s.summary(stderr, n, more, c.limit)
 	if n == 0 {
+		if s.cluster != "" && s.noObjects() {
+			return s.explainEmpty(ctx)
+		}
 		return &exitError{code: exitNoRows}
 	}
 	return nil

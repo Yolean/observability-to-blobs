@@ -187,6 +187,9 @@ func (p *promServer) push(ctx context.Context, promURL string, w window, initial
 	if s.cost() > p.sf.maxObjects {
 		return s.overBudget(p.sf.maxObjects, "loading "+w.String())
 	}
+	if initial && s.noObjects() {
+		return s.explainEmpty(ctx)
+	}
 	if initial {
 		p.report(func(l *loadProgress) { l.Stage, l.Objects = "reading", s.planned() })
 	}
@@ -198,6 +201,9 @@ func (p *promServer) push(ctx context.Context, promURL string, w window, initial
 	ss, n, err := collectSeries(ctx, s, q, 0)
 	if err != nil {
 		return err
+	}
+	if initial && len(ss) == 0 {
+		return fail(exitNoRows, "no metric samples in %s (%d objects read): no target was scraped then", w, s.planned())
 	}
 	readTook, pushStart := time.Since(readStart), time.Now()
 	sender := &remoteSender{url: promURL, client: &http.Client{Timeout: 2 * time.Minute}, ctx: ctx}

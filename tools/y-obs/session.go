@@ -173,6 +173,7 @@ type session struct {
 	db       *sql.DB
 	conn     *sql.Conn
 	root     string // s3://bucket or a local directory
+	store    storeConfig
 	local    string // the .duckdb file attached as local, if any
 	cluster  string
 	w        window
@@ -252,7 +253,7 @@ func openSession(ctx context.Context, f *sessionFlags, w window) (*session, erro
 	if err != nil {
 		return nil, err
 	}
-	s := &session{cluster: cluster, w: w, node: f.node, keyIDs: map[string]bool{}, plan: map[string][]string{}}
+	s := &session{cluster: cluster, w: w, node: f.node, keyIDs: map[string]bool{}, plan: map[string][]string{}, store: st}
 	var init []string
 	if f.blobsDir != "" {
 		abs, err := filepath.Abs(f.blobsDir)
@@ -718,6 +719,9 @@ func (s *session) planSummary() string {
 		if len(s.plan[v]) > 0 || v != "raw" || s.wplan == nil {
 			parts = append(parts, fmt.Sprintf("%s=%d", v, len(s.plan[v])))
 		}
+	}
+	if len(parts) == 0 {
+		return "none"
 	}
 	return strings.Join(parts, " ")
 }

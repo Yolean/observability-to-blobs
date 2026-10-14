@@ -28,3 +28,22 @@ func TestSQLCopied(t *testing.T) {
 		}
 	}
 }
+
+func TestSigV4Copied(t *testing.T) {
+	for _, name := range []string{"sigv4.go", "sigv4_test.go"} {
+		want, err := os.ReadFile("../../compactor/" + name)
+		if errors.Is(err, fs.ErrNotExist) {
+			t.Skipf("no compactor/%s to compare with", name)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("%s differs from compactor/%s: edit the compactor's, then run go generate in tools/y-obs", name, name)
+		}
+	}
+}
