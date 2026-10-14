@@ -112,7 +112,7 @@ func runPods(ctx context.Context, args []string, stdout, stderr io.Writer, now t
   coalesce(min(pod_started), min(first_log)) AS started, max(pod_deleted) AS ended,
   max_by(phase, last_seen) AS phase, max(restart) AS restarts,
   max_by(CASE WHEN exit_reason IS NOT NULL THEN exit_reason || ' ' || exit_code END, container_exited) AS last_exit,
-  string_agg(DISTINCT container, ',' ORDER BY container) FILTER (WHERE coalesce(container, '') <> '') AS containers,
+  list(DISTINCT container ORDER BY container) FILTER (WHERE coalesce(container, '') <> '') AS containers,
   coalesce(max(last_seen), max(last_log)) AS last_seen
 FROM w_pods`
 	if len(where) > 0 {

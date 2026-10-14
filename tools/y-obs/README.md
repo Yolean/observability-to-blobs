@@ -123,16 +123,19 @@ output into its context, and cannot see a progress bar. So:
 3. **Stable, parseable output.** `--format text|tsv|csv|json|jsonl`.
    text is the default for `logs` and `grep`, tsv for everything else.
    Columns come in a fixed order with a header line. Timestamps are
-   always UTC RFC 3339 with nine fractional digits. A MAP (labels) is
-   JSON in a cell. There is no colour, and none of the output depends on
+   always UTC RFC 3339 with nine fractional digits. A MAP (labels) or a
+   list (`pods.containers`) is JSON in a cell. Floats are plain decimals
+   to 12 significant digits in the text formats (`0.00433333333333`);
+   JSON keeps every digit. There is no colour, and none of the output depends on
    terminal width.
 4. **Says where the data came from.** On exit, stderr gets one summary
    line:
    `y-obs: cluster=prod window=2026-10-11T08:00:00Z..2026-10-11T10:00:00Z hours raw=1 hourly=1 objects hourly_logs=1 raw=40 rows=12 fresh-to=2026-10-11T09:59:30Z`.
    `fresh-to` is when the newest raw object read was opened, from its
    key; its rows reach up to 30 s later. An event after it is not in
-   what was read. Notes, such as how many lines a cut left out, come
-   before the summary, which is always the last line.
+   what was read. Notes, such as how many lines a cut left out or that
+   there are more rows than `--limit` (with what narrows that command's
+   rows), come before the summary, which is always the last line.
 5. **Errors are one line with a next step**, plus documented exit codes:
    - 0: ok, results printed;
    - 1: ok, nothing matched;
@@ -501,9 +504,14 @@ contexts:
   program with the credential in its environment (the `AWS_*` and `S3_*`
   variables of `local/blobs.sh`).
 - **Listing contexts.** `y-obs contexts` lists the contexts with the
-  clusters their cached credential covers. Listing the clusters present
-  in the bucket, with their newest upload, needs a delimiter listing; it
-  comes with the stdlib S3 client.
+  clusters their cached credential covers. The clusters present in a
+  bucket are listed (delimiter listings) when a command names one that
+  is not there, with exit 4; `contexts` does not list them.
+- **Static keys.** Without a context, `S3_BUCKET` and the `AWS_*` keys in
+  the environment are used as they are, as `local/blobs.sh` does.
+  `y-obs auth` then says so (bucket, endpoint, whether a key is set, no
+  expiry) and exits 0, and `y-obs auth -- cmd` runs the command with that
+  environment.
 - **The stub mint.** `y-obs mint-stub` is a mint for development. It
   hands out the static keys it was started with, under an expiry: the
   protocol of a real mint, none of its security.

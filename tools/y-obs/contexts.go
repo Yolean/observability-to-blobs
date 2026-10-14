@@ -294,6 +294,29 @@ func cmdAuth(ctx context.Context, args []string) error {
 		return err
 	}
 	name := contextName(*contextFlag, cfg)
+	if name == "" && os.Getenv("S3_BUCKET") != "" {
+		// static keys from the environment: nothing to mint or renew
+		st := storeFromEnv()
+		key := "AWS_ACCESS_KEY_ID unset"
+		if st.keyID != "" {
+			key = "AWS_ACCESS_KEY_ID set"
+		}
+		fmt.Fprintf(os.Stderr, "y-obs: no context: static keys from the environment, bucket %s at %s, %s, no expiry; contexts (%s) are for short-lived credentials\n",
+			st.bucket, st.endpoint, key, path)
+		if len(command) == 0 {
+			return nil
+		}
+		cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		if err := cmd.Run(); err != nil {
+			var ee *exec.ExitError
+			if errors.As(err, &ee) {
+				return &exitError{code: ee.ExitCode()}
+			}
+			return fail(exitUsage, "%s: %v", command[0], err)
+		}
+		return nil
+	}
 	if name == "" {
 		return fail(exitUsage, "no context: pass --context, or add one to %s (y-obs contexts -h shows the format)", path)
 	}

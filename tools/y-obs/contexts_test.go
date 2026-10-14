@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -134,5 +136,26 @@ func TestContextName(t *testing.T) {
 	t.Setenv("Y_OBS_CONTEXT", "b")
 	if n := contextName("", cfg); n != "b" {
 		t.Errorf("Y_OBS_CONTEXT: %s", n)
+	}
+}
+
+// auth with static keys from the environment describes them, never the
+// secret, and exits 0.
+func TestAuthStaticKeys(t *testing.T) {
+	t.Setenv("Y_OBS_CONFIG", filepath.Join(t.TempDir(), "none.yaml"))
+	t.Setenv("Y_OBS_CONTEXT", "")
+	t.Setenv("S3_BUCKET", "b")
+	t.Setenv("S3_ENDPOINT", "objects.test")
+	t.Setenv("AWS_ACCESS_KEY_ID", "k")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "the-secret")
+	r, w, _ := os.Pipe()
+	stderr := os.Stderr
+	os.Stderr = w
+	err := cmdAuth(context.Background(), nil)
+	w.Close()
+	os.Stderr = stderr
+	out, _ := io.ReadAll(r)
+	if err != nil || !strings.Contains(string(out), "static keys from the environment, bucket b at objects.test, AWS_ACCESS_KEY_ID set, no expiry") || strings.Contains(string(out), "the-secret") {
+		t.Errorf("%q %v", out, err)
 	}
 }

@@ -28,6 +28,7 @@ func runInvestigation(ctx context.Context, c *sessionCommand, args []string, tab
 		return err
 	}
 	defer s.close()
+	s.narrow = narrowHints[c.fs.Name()]
 	if err := s.planWindow(ctx, tables, ns, now); err != nil {
 		return err
 	}

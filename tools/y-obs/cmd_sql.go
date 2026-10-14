@@ -224,9 +224,23 @@ func (s *session) summary(w io.Writer, n int, more bool, limit int) {
 		line += " fresh-to=" + t.Format(time.RFC3339)
 	}
 	if more {
-		line += fmt.Sprintf("; more rows than --limit %d: narrow the query (WHERE, a shorter window) or raise --limit", limit)
+		// a note of its own, before the summary, which stays the last line
+		narrow := s.narrow
+		if narrow == "" {
+			narrow = "WHERE or LIMIT in the query, or a shorter window"
+		}
+		fmt.Fprintf(w, "y-obs: more rows than --limit %d: narrow with %s, or raise --limit\n", limit, narrow)
 	}
 	fmt.Fprintln(w, line)
+}
+
+// narrowHints say, per command, what narrows its rows.
+var narrowHints = map[string]string{
+	"pods":    "-n, --name, --label, --phase or a shorter window",
+	"exits":   "-n, --name, --reason, --failed or a shorter window",
+	"grep":    "-n, --name, --container or a shorter window",
+	"metrics": "-n, --pod, --where, a larger --step or a shorter window",
+	"logs":    "--grep, a container or a shorter window",
 }
 
 // freshTo is when the newest raw object read was opened, from its key: its

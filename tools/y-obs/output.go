@@ -96,9 +96,12 @@ func text(v any) string {
 		return string(b)
 	}
 	if f, ok := p.(float64); ok {
-		// plain decimals where they stay readable: 77094912, not 7.7094912e+07
+		// plain decimals where they stay readable: 77094912, not
+		// 7.7094912e+07; and 12 significant digits, 0.00433333333333, not
+		// the float noise of 0.004333333333333348 (JSON keeps every digit)
 		if a := math.Abs(f); a == 0 || a >= 1e-6 && a < 1e15 {
-			return strconv.FormatFloat(f, 'f', -1, 64)
+			r, _ := strconv.ParseFloat(strconv.FormatFloat(f, 'g', 12, 64), 64)
+			return strconv.FormatFloat(r, 'f', -1, 64)
 		}
 	}
 	return fmt.Sprint(p)

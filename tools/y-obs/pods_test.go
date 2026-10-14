@@ -64,7 +64,7 @@ func TestPods(t *testing.T) {
 			t.Errorf("job-1 lacks %s: %s", want, lines[0])
 		}
 	}
-	for _, want := range []string{`"workload":"web"`, `"owner_kind":"Deployment"`, `"ended":null`, `"phase":"running"`, `"restarts":1`, `"last_exit":"OOMKilled 137"`, `"containers":"app"`} {
+	for _, want := range []string{`"workload":"web"`, `"owner_kind":"Deployment"`, `"ended":null`, `"phase":"running"`, `"restarts":1`, `"last_exit":"OOMKilled 137"`, `"containers":["app"]`} {
 		if !strings.Contains(lines[1], want) {
 			t.Errorf("web lacks %s: %s", want, lines[1])
 		}
@@ -100,5 +100,20 @@ func TestPods(t *testing.T) {
 	}
 	if _, _, err := runCmd(t, pods, dir, "--label", "app=none"); exitOf(err) != exitNoRows {
 		t.Errorf("no match: %v", err)
+	}
+}
+
+// The --limit note is a line of its own with the command's own advice,
+// and the summary stays the last line.
+func TestLimitNoteBeforeSummary(t *testing.T) {
+	dir := podsFixture(t)
+	_, e, err := runCmd(t, pods, dir, "--limit", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(e), "\n")
+	if len(lines) < 2 || !strings.HasPrefix(lines[len(lines)-1], "y-obs: cluster=c") ||
+		lines[len(lines)-2] != "y-obs: more rows than --limit 1: narrow with -n, --name, --label, --phase or a shorter window, or raise --limit" {
+		t.Errorf("stderr: %q", e)
 	}
 }
