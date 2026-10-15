@@ -1308,7 +1308,11 @@ yobs_expect "pods: a running log-generator incarnation" ",running," pods -n defa
 yobs_expect "pods --at -1m: the log-generator alive a minute ago" ",running," pods -n default --name '^log-generator-' --at -1m --format csv
 yobs_expect "grep --count: the restart marker exactly once" $'\t1\t' grep "$MARKER" -n default --count
 yobs_expect "logs: the generator's lines, with timestamps" "Z [{].*hello from log-generator" logs default "${GEN_POD:-none}" app --grep 'hello from log-generator' --tail 3 --timestamps
-yobs_expect "logs _node: the kernel marker in the node's journal" "$KMSG_MARKER" logs _node "${GEN_NODE:-none}" --grep "$KMSG_MARKER" --tail 0
+if [ "$BACKEND" = docker ]; then
+  echo "  SKIP: y-obs logs _node (k3s-in-docker has no journal)"
+else
+  yobs_expect "logs _node: the kernel marker in the node's journal" "$KMSG_MARKER" logs _node "${GEN_NODE:-none}" --grep "$KMSG_MARKER" --tail 0
+fi
 yobs_expect "exits: the restarter's exit code 1" "^[^,]*,default,restarter,[^,]*,[^,]*,[0-9]+,1," exits -n default --name '^restarter$' --format csv
 yobs_expect "metrics latest: app_requests_total code 200 is 42" '"value":42' metrics latest app_requests_total --pod '^metrics-multi$' --where code=200 --format jsonl
 yobs_status() {
