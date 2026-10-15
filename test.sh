@@ -358,9 +358,14 @@ $KUBECTL delete pod metrics-multi metrics-classic metrics-numeric metrics-optout
 # the prometheus-operator CRDs, as a cluster without the operator gets them
 # (operator-to-annotations/README.md); too large for a client-side apply
 $KUBECTL apply --server-side -k operator-to-annotations/crds >/dev/null
+# crds_established crd/<name>...: a CRD created a moment ago may have no
+# .status.conditions yet, which kubectl wait fails on instead of waiting
+crds_established() {
+  for _ in $(seq 1 15); do $KUBECTL wait --for condition=established --timeout=5s "$@" >/dev/null 2>&1 && return 0; sleep 1; done
+  $KUBECTL wait --for condition=established --timeout=60s "$@" >/dev/null
+}
 # shellcheck disable=SC2046 # one crd/<name> per word
-$KUBECTL wait --for condition=established --timeout=60s \
-  $(sed -n 's/^  name: \(.*\.monitoring\.coreos\.com\)$/crd\/\1/p' operator-to-annotations/crds/*/*.yaml) >/dev/null
+crds_established $(sed -n 's/^  name: \(.*\.monitoring\.coreos\.com\)$/crd\/\1/p' operator-to-annotations/crds/*/*.yaml)
 $KUBECTL apply -k "$MANIFESTS"
 $KUBECTL rollout status statefulset/versitygw --timeout=180s
 $KUBECTL wait --for=condition=complete job/create-bucket --timeout=180s
@@ -641,7 +646,7 @@ YAML
   gadget_version v1alpha1 false
   gadget_version v1 true
 } | $KUBECTL create -f - >/dev/null
-$KUBECTL wait --for condition=established crd/gadgets.itest.example.com --timeout=60s >/dev/null
+crds_established crd/gadgets.itest.example.com
 $KUBECTL apply -f - >/dev/null <<YAML
 apiVersion: itest.example.com/v1
 kind: Gadget
