@@ -29,9 +29,12 @@ mkdir -p "$HERE/httpfs"
 gunzip -c "$work/httpfs.gz" > "$HERE/httpfs/httpfs.duckdb_extension"
 
 mkdir -p "$OUT"
+# absolute: the build runs in $HERE, and OUTDIR is relative to the caller
+OUT=$(cd "$OUT" && pwd)
 bin=$OUT/obs-$GOOS-$GOARCH
 (cd "$HERE" && CGO_ENABLED=1 go build -tags httpfs_embed -trimpath \
   -ldflags "-s -w -X main.version=$VERSION" -o "$bin" .)
 rm -f "$HERE/httpfs/httpfs.duckdb_extension"
-(cd "$OUT" && echo "$(sha256 "${bin##*/}")  ${bin##*/}" > "${bin##*/}.sha256")
+sum=$(cd "$OUT" && sha256 "${bin##*/}")
+echo "$sum  ${bin##*/}" > "$bin.sha256"
 echo "$bin"
