@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"path/filepath"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -226,5 +228,25 @@ func TestFollowNewKeysOnly(t *testing.T) {
 	writeRaw(t, key(t2, "b"), []map[string]interface{}{line(t2, 0)})
 	if err := p.follow(t.Context(), prom.URL, now); err != nil || p.pushed.Load() != 2 || writes.Load() != 2 {
 		t.Fatalf("a new object: %d samples in %d writes, %v", p.pushed.Load(), writes.Load(), err)
+	}
+}
+
+// A wrapper that runs the server as its child, as ystack's y-prometheus
+// does: stopping the wrapper's group ends the child too, and stopGroup
+// returns only when the group is empty.
+func TestStopGroupEndsAWrappersChild(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "sleep 60; true")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	start := time.Now()
+	stopGroup(cmd, 5*time.Second)
+	if err := syscall.Kill(-cmd.Process.Pid, 0); err != syscall.ESRCH {
+		t.Fatalf("the group is still there: %v", err)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("took %s: SIGINT did not end the group, SIGKILL did", d)
 	}
 }

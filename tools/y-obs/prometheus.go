@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/golang/snappy"
@@ -373,6 +374,11 @@ func startPrometheus(ctx context.Context, bin string, port int, dataDir, readAdd
 		fmt.Sprintf("--web.listen-address=127.0.0.1:%d", port), "--web.enable-remote-write-receiver",
 		"--web.page-title=y-obs "+cluster, "--storage.tsdb.retention.time=3650d")
 	cmd.Stdout, cmd.Stderr = log, log
+	// Its own process group, signalled as a whole: the binary may be a
+	// wrapper that runs Prometheus as its child (ystack's y-prometheus
+	// does), and a signal to the wrapper alone leaves Prometheus running.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGINT) }
 	if err := cmd.Start(); err != nil {
 		return nil, "", err
 	}
@@ -390,8 +396,27 @@ func startPrometheus(ctx context.Context, bin string, port int, dataDir, readAdd
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	cmd.Process.Kill()
+	stopGroup(cmd, 0)
 	return nil, "", errors.New("prometheus did not become ready in 60s; its log is in " + dataDir)
+}
+
+// stopGroup stops cmd's process group, which startPrometheus makes its
+// own: SIGINT, then SIGKILL to what is left after grace. It returns when
+// no process of the group is left, so that nothing answers on the port
+// any more.
+func stopGroup(cmd *exec.Cmd, grace time.Duration) {
+	pgid := cmd.Process.Pid
+	go cmd.Wait() // reaps the group leader, which kill(2) would still find
+	syscall.Kill(-pgid, syscall.SIGINT)
+	for deadline := time.Now().Add(grace); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		if syscall.Kill(-pgid, 0) == syscall.ESRCH {
+			return
+		}
+	}
+	syscall.Kill(-pgid, syscall.SIGKILL)
+	for i := 0; i < 50 && syscall.Kill(-pgid, 0) != syscall.ESRCH; i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 const prometheusServeUsage = `Usage: y-obs prometheus-serve [flags]
@@ -472,16 +497,7 @@ func cmdPrometheusServe(ctx context.Context, args []string) error {
 	if err != nil {
 		return fail(exitStore, "%v", err)
 	}
-	defer func() {
-		cmd.Process.Signal(os.Interrupt)
-		done := make(chan struct{})
-		go func() { cmd.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			cmd.Process.Kill()
-		}
-	}()
+	defer stopGroup(cmd, 10*time.Second)
 	fmt.Fprintf(os.Stderr, "y-obs: prometheus %s ready in %s, loading %s\n", url, time.Since(started).Round(time.Millisecond), w)
 	pushStart := time.Now()
 	p.report(func(l *loadProgress) { l.URL = url })
