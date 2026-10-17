@@ -1436,13 +1436,14 @@ RAW_KEYS="glob('s3://$BUCKET/raw1/$CLUSTER/*/*/*/*.jsonl.zst')"
 q "COPY (SELECT file FROM $RAW_KEYS) TO '$SNAPSHOT' (FORMAT csv, HEADER true)" >/dev/null
 SNAPSHOT_AT=$(($(date +%s) + 1))
 # compactor_metric <name> <job> [namespace]: that sample of the running
-# compactor's /metrics
+# compactor's /metrics (it compacts one cluster: its series' cluster label
+# is not matched)
 compactor_metric() {
   local pod ns=${3:-observability}
   pod=$($KUBECTL -n "$ns" get pods -l app=blobs-compactor -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || return 0
   [ -n "$pod" ] || return 0
   $KUBECTL get --raw "/api/v1/namespaces/$ns/pods/$pod:9090/proxy/metrics" 2>/dev/null \
-    | awk -v k="$1{job=\"$2\"}" '$1 == k { print $2 }'
+    | awk -v n="$1{" -v j="job=\"$2\"" 'index($1, n) == 1 && index($1, j) { print $2 }'
 }
 # started_since <job> <epoch seconds> [namespace]: the job's last run
 # succeeded and started after then (its end less its duration)
@@ -1804,8 +1805,8 @@ assert "put: no sidecar lists the refused keys" \
 final_hours=$(q "SELECT DISTINCT regexp_extract(filename, '_folded/(.*)\\.csv\$', 1) AS h FROM $PUT_FOLDED WHERE final ORDER BY h")
 past_started=$($KUBECTL get --raw "/api/v1/namespaces/$PUT_NS/pods/$($KUBECTL -n "$PUT_NS" get pods -l app=blobs-compactor \
     -o jsonpath='{.items[0].metadata.name}'):9090/proxy/metrics" 2>/dev/null \
-  | awk '$1 == "blobs_compactor_last_success_timestamp_seconds{job=\"past\"}" { e = $2 }
-         $1 == "blobs_compactor_last_duration_seconds{job=\"past\"}" { d = $2 }
+  | awk 'index($1, "blobs_compactor_last_success_timestamp_seconds{") == 1 && index($1, "job=\"past\"") { e = $2 }
+         index($1, "blobs_compactor_last_duration_seconds{") == 1 && index($1, "job=\"past\"") { d = $2 }
          END { if (e != "" && d != "") printf "%d\n", e - d - 30 }')
 if [ -z "$past_started" ]; then
   echo "  FAIL: put: no past pass of the put compactor in its metrics" >&2; ERRORS=$((ERRORS + 1))
