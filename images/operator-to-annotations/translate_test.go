@@ -103,8 +103,9 @@ func TestTranslatePreexistingAnnotationsWin(t *testing.T) {
 		if res.Annotations != nil || !res.Preexisting {
 			t.Fatalf("%s: %+v", k, res)
 		}
-		if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "app/p") || !strings.Contains(res.Warnings[0], "app/pm") {
-			t.Fatalf("%s: warnings %q", k, res.Warnings)
+		// skipped at level INFO: no warning, to the client or in the log
+		if len(res.Warnings) != 0 || len(res.Info) != 1 || !strings.Contains(res.Info[0], "app/p") || !strings.Contains(res.Info[0], "app/pm") {
+			t.Fatalf("%s: warnings %q, info %q", k, res.Warnings, res.Info)
 		}
 	}
 }

@@ -7,6 +7,11 @@ apply, and nothing reads them: the agent scrapes a pod only when the pod
 carries `prometheus.io/*` or `io.opentelemetry.discovery.*` annotations,
 which it reads from the container runtime, at sandbox creation.
 
+It is a **migration path**: the end state is the annotations in the
+workloads' own pod templates, and the PodMonitors gone. Until then the
+controller translates what it can, and reports which pods are migrated,
+annotated for them, or neither. It never restarts or evicts a pod.
+
 ## CRDs
 
 `crds/` is a kustomize base with the five prometheus-operator CRDs that
@@ -132,9 +137,11 @@ name if there is one, and a `keep` on it can drop every series.
   `podMetricsEndpoints`, so the main container no longer needs to proxy
   the sidecar's metrics. The itest runs this case.
 - **A pod with any `prometheus.io/*` or `io.opentelemetry.discovery.*`
-  annotation is left as it is**, with a warning that names the pod and the
-  PodMonitors it would have applied: whoever set them meant something,
-  and mixing would make the outcome depend on precedence rules.
+  annotation is skipped entirely**: its own annotations are the migrated
+  state. The controller logs it at level `INFO`, naming the pod and the
+  PodMonitors it would have applied, and the report counts it as
+  `preannotated`. Nothing is merged, port by port or otherwise, so a pod
+  that is migrated declares every port it wants scraped.
 - **A port two endpoints resolve to** keeps the first, PodMonitors in
   namespace/name order and endpoints in theirs, with a warning when their
   settings differ.
@@ -144,7 +151,7 @@ name if there is one, and a `keep` on it can drop every series.
   lists the PodMonitors applied. It has no scrape meaning; the report
   reads it.
 
-Warnings about a pod (ports, pre-existing annotations) go to the
+Warnings about a pod (its ports) go to the
 controller's log, as JSON lines, and to the client that created the pod as
 admission warnings (for a ReplicaSet's pods that is the controller
 manager, so the log is the place to look). Fields that are not
@@ -157,6 +164,12 @@ after it. The **failure policy is `Ignore`**: a webhook that is down, or
 not yet up, never blocks pod creation, and the pods created meanwhile are
 not annotated until they are recreated. The report (below) lists such
 pods.
+
+**Apply a PodMonitor before the workloads it selects**, or recreate their
+pods once after it. In one `kubectl apply -k` a Deployment is applied
+before custom resources such as PodMonitors, so the Deployment's first
+pods can be created before their PodMonitor exists; the report lists
+them as created before the PodMonitor.
 
 **Not in `kube-system` or the controller's own namespace.** The API server
 calls the webhook for every pod created where the webhook configuration
@@ -212,18 +225,18 @@ not show it.
 
 The controller keeps a report per PodMonitor and logs it as a JSON line
 (`"msg":"report"`) whenever it changes, at level `WARN` while the
-PodMonitor is not translated in full or has selected pods without its
-annotations:
+PodMonitor is not translated in full or has skipped pods:
 
 - `condition`: `Translated`, `PartiallyTranslated` (some fields are not;
   `untranslated` lists them) or `NotTranslated` (no endpoints);
 - `annotated`: the selected pods it annotated, with when (the pod's
   creation), as a count and the first 20 by name;
-- `skipped`: the selected pods it did not annotate, with the reason:
-  created before the PodMonitor; pre-existing scrape annotations; no
-  endpoint resolves to a port of the pod; another PodMonitor took the
-  ports; not annotated at admission (created before the webhook, or while
-  it was down).
+- `preannotated`: the selected pods with scrape annotations of their
+  own, which it leaves alone, as a count and the first 20 by name;
+- `skipped`: the other selected pods it did not annotate, with the
+  reason: created before the PodMonitor; no endpoint resolves to a port
+  of the pod; another PodMonitor took the ports; not annotated at
+  admission (created before the webhook, or while it was down).
 
 The report is not written anywhere else yet. The PodMonitor's `status`
 would be the natural place, but the v1 CRD's status schema holds only

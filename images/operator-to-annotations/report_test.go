@@ -49,11 +49,14 @@ func TestReport(t *testing.T) {
 	for _, s := range r.Skipped {
 		reasons[s.Pod] = s.Reason
 	}
-	if r.SkippedCount != 3 || len(reasons) != 3 {
+	if r.SkippedCount != 2 || len(reasons) != 2 {
 		t.Fatalf("skipped %+v", r.Skipped)
 	}
+	// annotated in its own source: not skipped, migrated
+	if r.PreannotatedCount != 1 || r.Preannotated[0].Pod != "app/preexisting" {
+		t.Fatalf("preannotated %+v", r.Preannotated)
+	}
 	if !strings.HasPrefix(reasons["app/old"], "created before the PodMonitor") ||
-		reasons["app/preexisting"] != "pre-existing scrape annotations" ||
 		!strings.HasPrefix(reasons["app/missed"], "not annotated at admission") {
 		t.Fatalf("reasons %v", reasons)
 	}
