@@ -1,0 +1,75 @@
+name: host
+
+# Release tarballs of the host agent (HOST_MODE.md): a tag v* builds
+# images/fluentbit/host/build.sh on a native runner per arch, the same
+# script a developer runs, smoke-tests the binary on the distribution it
+# was built for, and attaches each tarball and its .sha256 to the tag's
+# release as observability-to-blobs-host-<version>-linux-<arch>.tar.gz,
+# the version being the tag without its v. workflow_dispatch builds
+# without releasing.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - {runner: ubuntu-24.04, arch: amd64}
+        - {runner: ubuntu-24.04-arm, arch: arm64}
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - uses: actions/checkout@v7
+    - uses: docker/setup-buildx-action@v4
+    # exposes the cache credentials to the plain docker buildx build that
+    # build.sh runs
+    - uses: crazy-max/ghaction-github-runtime@v4
+    - name: Build
+      env:
+        HOST_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'dev' }}
+        BUILDX_ARGS: --cache-from type=gha,scope=node-agent-host-${{ matrix.arch }} --cache-to type=gha,mode=max,scope=node-agent-host-${{ matrix.arch }}
+      run: |
+        export HOST_VERSION=${HOST_VERSION#v}
+        images/fluentbit/host/build.sh dist
+    - name: Smoke test
+      # the runner is the distribution the binary is built for: the
+      # checksum holds, and the binary starts with the host's libraries
+      run: |
+        cd dist
+        sha256sum -c ./*.tar.gz.sha256
+        sudo apt-get install -y --no-install-recommends libyaml-0-2 libsystemd0
+        mkdir root && tar -xzf ./*.tar.gz -C root
+        root/bin/fluent-bit --version
+        test -f root/etc/host.yaml && test -x root/bin/observability-host-heartbeat
+        rm -r root
+    - uses: actions/upload-artifact@v7
+      with:
+        name: host-${{ matrix.arch }}
+        path: dist/
+        if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@v8
+      with:
+        path: dist
+        merge-multiple: true
+    - name: Release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        ls -l dist
+        gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+          || gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "observability-to-blobs at $GITHUB_SHA"
+        gh release upload "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --clobber dist/*

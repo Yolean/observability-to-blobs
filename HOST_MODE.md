@@ -96,8 +96,11 @@ it is created, which is one more reason for `use_put_object`.
   Kafka output. It has the `exec` input, which the heartbeat uses and the agent image leaves out.
   The Dockerfile's `host-package` stage refuses any base other than `HOST_DISTRO`.
 - `images/fluentbit/host/build.sh` builds the tarball
-  `observability-to-blobs-host-<version>-linux-amd64.tar.gz` and its `.sha256` (the version is
-  `HOST_VERSION`). The tarball holds, relative to the install prefix `/opt/observability-host`:
+  `observability-to-blobs-host-<version>-linux-<arch>.tar.gz` and its `.sha256` (the version is
+  `HOST_VERSION`, the arch the build machine's, `amd64` or `arm64`). A release tag `v<version>`
+  attaches both arches' tarballs and checksums to the GitHub release, built by CI with this same
+  script (`.github/workflows/host.yaml`). The tarball holds, relative to the install prefix
+  `/opt/observability-host`:
 
   | path | what |
   |---|---|
