@@ -90,13 +90,13 @@ jobs:
         duckdb --version
 
     # exposes the cache credentials to the plain `docker buildx build` that
-    # test.sh runs. Own scope: this build is amd64 only and an export under
-    # the image job's scope would evict the arm64 layers there.
+    # test.sh runs. The image job's amd64 scope: the same Dockerfile, target
+    # and platform, so the image job that follows finds every layer cached.
     - uses: crazy-max/ghaction-github-runtime@v4
 
     - run: ./test.sh
       env:
-        IMAGE_BUILD_ARGS: --cache-from type=gha,scope=node-agent-test --cache-to type=gha,mode=max,scope=node-agent-test
+        IMAGE_BUILD_ARGS: --cache-from type=gha,scope=node-agent-amd64 --cache-to type=gha,mode=max,scope=node-agent-amd64
         # the host tarball is built on another base: a cache scope of its own
         HOST_BUILD_ARGS: --cache-from type=gha,scope=node-agent-host-test --cache-to type=gha,mode=max,scope=node-agent-host-test
 
@@ -110,13 +110,26 @@ jobs:
         kubectl --context=node-agent get events -A --field-selector reason=Evicted || true
         kubectl --context=node-agent logs ds/node-agent --tail=200 || true
 
+  # Each image is built per arch on a runner of that arch, because
+  # fluent-bit's C build took close to three hours for arm64 under qemu,
+  # where amd64 took twenty minutes. Each build pushes by digest only;
+  # image-index then tags one index of the two under the commit sha.
   image:
     needs: test
     if: github.event_name == 'push' && github.repository_owner == 'Yolean'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+        - {name: observability-nodeagent, context: images/fluentbit, scope: node-agent}
+        - {name: observability-prometheus, context: images/blobs-to-prometheus, scope: blobs-to-prometheus}
+        - {name: observability-operator-to-annotations, context: images/operator-to-annotations, scope: operator-to-annotations}
+        platform:
+        - {arch: amd64, runner: ubuntu-24.04}
+        - {arch: arm64, runner: ubuntu-24.04-arm}
+    runs-on: ${{ matrix.platform.runner }}
     steps:
     - uses: actions/checkout@v7
-    - uses: docker/setup-qemu-action@v4
     - uses: docker/setup-buildx-action@v4
     - uses: docker/login-action@v4
       with:
@@ -124,46 +137,60 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     # GITHUB_TOKEN can only publish under the repository's own owner, and
-    # ghcr wants it lowercase; metadata-action does the lowercasing.
+    # ghcr wants it lowercase
+    - run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${{ matrix.image.name }}" >> "$GITHUB_ENV"
     - uses: docker/metadata-action@v6
       id: meta
       with:
-        images: ghcr.io/${{ github.repository_owner }}/observability-nodeagent
-        tags: type=raw,value=${{ github.sha }}
+        images: ${{ env.IMAGE }}
     - uses: docker/build-push-action@v7
+      id: build
       with:
-        context: images/fluentbit
-        platforms: linux/amd64,linux/arm64
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
+        context: ${{ matrix.image.context }}
+        platforms: linux/${{ matrix.platform.arch }}
         labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha,scope=node-agent
-        cache-to: type=gha,mode=max,scope=node-agent
-    - uses: docker/metadata-action@v6
-      id: meta-sidecar
+        tags: ${{ env.IMAGE }}
+        outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+        # one scope per arch, so that neither export evicts the other's layers
+        cache-from: type=gha,scope=${{ matrix.image.scope }}-${{ matrix.platform.arch }}
+        cache-to: type=gha,mode=max,scope=${{ matrix.image.scope }}-${{ matrix.platform.arch }}
+    - env:
+        DIGEST: ${{ steps.build.outputs.digest }}
+      run: |
+        mkdir -p "$RUNNER_TEMP/digests"
+        touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+    - uses: actions/upload-artifact@v7
       with:
-        images: ghcr.io/${{ github.repository_owner }}/observability-prometheus
-        tags: type=raw,value=${{ github.sha }}
-    - uses: docker/build-push-action@v7
+        name: digest-${{ matrix.image.name }}-${{ matrix.platform.arch }}
+        path: ${{ runner.temp }}/digests/*
+        if-no-files-found: error
+        retention-days: 1
+
+  image-index:
+    needs: image
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [observability-nodeagent, observability-prometheus, observability-operator-to-annotations]
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/download-artifact@v8
       with:
-        context: images/blobs-to-prometheus
-        platforms: linux/amd64,linux/arm64
-        push: true
-        tags: ${{ steps.meta-sidecar.outputs.tags }}
-        labels: ${{ steps.meta-sidecar.outputs.labels }}
-        cache-from: type=gha,scope=blobs-to-prometheus
-        cache-to: type=gha,mode=max,scope=blobs-to-prometheus
-    - uses: docker/metadata-action@v6
-      id: meta-operator-to-annotations
+        path: ${{ runner.temp }}/digests
+        pattern: digest-${{ matrix.name }}-*
+        merge-multiple: true
+    - uses: docker/setup-buildx-action@v4
+    - uses: docker/login-action@v4
       with:
-        images: ghcr.io/${{ github.repository_owner }}/observability-operator-to-annotations
-        tags: type=raw,value=${{ github.sha }}
-    - uses: docker/build-push-action@v7
-      with:
-        context: images/operator-to-annotations
-        platforms: linux/amd64,linux/arm64
-        push: true
-        tags: ${{ steps.meta-operator-to-annotations.outputs.tags }}
-        labels: ${{ steps.meta-operator-to-annotations.outputs.labels }}
-        cache-from: type=gha,scope=operator-to-annotations
-        cache-to: type=gha,mode=max,scope=operator-to-annotations
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    - name: Tag the index of both archs
+      working-directory: ${{ runner.temp }}/digests
+      run: |
+        image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${{ matrix.name }}
+        refs=()
+        for d in *; do refs+=("$image@sha256:$d"); done
+        [ "${#refs[@]}" = 2 ] || { ls -l; echo "expected one digest per arch" >&2; exit 1; }
+        docker buildx imagetools create -t "$image:$GITHUB_SHA" "${refs[@]}"
+        docker buildx imagetools inspect "$image:$GITHUB_SHA"
