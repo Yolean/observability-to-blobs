@@ -247,6 +247,10 @@ func (st *pluginState) discoveryLoop(ctx context.Context, disc *criDiscoverer, s
 				tctx, cancel := context.WithCancel(ctx)
 				active[key] = running{cancel: cancel, t: t}
 				log.Printf("[cri_scrape] target added %s/%s/%s %s", t.namespace, t.pod, t.container, t.url())
+				if t.relabelErr != "" {
+					log.Printf("[cri_scrape] target %s/%s/%s %s: metric_relabel_configs not applied, every sample is shipped: %s",
+						t.namespace, t.pod, t.container, t.url(), t.relabelErr)
+				}
 				st.wg.Add(1)
 				go func(t target) {
 					defer st.wg.Done()

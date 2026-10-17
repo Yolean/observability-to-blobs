@@ -2,6 +2,9 @@
 # own /metrics on its own declared port, and one PodMonitor with an
 # endpoint for each. The webhook writes one port-scoped group per
 # container, so each is a target of its own, attributed to its container.
+# The main container's endpoint has metricRelabelings, which the agent
+# applies: a series dropped by name, and a label dropped, which leaves two
+# series equal, so the second is dropped too.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -22,7 +25,12 @@ spec:
         command: ["/bin/sh", "-c"]
         args:
         - |
-          mkdir -p /www && printf '# TYPE podmonitored_main_up gauge\npodmonitored_main_up 1\n' > /www/metrics
+          mkdir -p /www && printf '%s\n' \
+            '# TYPE podmonitored_main_up gauge' 'podmonitored_main_up 1' \
+            '# TYPE podmonitored_main_dropped gauge' 'podmonitored_main_dropped 1' \
+            '# TYPE podmonitored_main_requests_total counter' \
+            'podmonitored_main_requests_total{code="200",worker="0"} 1' \
+            'podmonitored_main_requests_total{code="200",worker="1"} 2' > /www/metrics
           exec httpd -f -p 9201 -h /www
         ports:
         - name: metrics
@@ -49,6 +57,12 @@ spec:
   podMetricsEndpoints:
   - port: metrics
     interval: 20s
+    metricRelabelings:
+    - sourceLabels: [__name__]
+      regex: podmonitored_main_dropped
+      action: drop
+    - regex: worker
+      action: labeldrop
   - port: worker-metrics
     path: /metrics
     # not translated: a warning, and the rest of the endpoint is

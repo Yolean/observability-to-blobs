@@ -34,7 +34,8 @@ Every line is one event with a `table` field:
   hints (multi-container pods opt in per port; "Scrape annotations"
   below), plus node_exporter and the
   agent's own metrics, with the samples as an array and the target's
-  `pod_uid`.
+  `pod_uid`. A target's `metric_relabel_configs` can drop samples and
+  labels before they are written ("Metric relabeling" below).
 - **podindex**: pod and container lifecycle events from the CRI
   (`pod-observed`, `pod-checkpoint`, `pod-deleted`, `container`,
   `container-exit`), the source of "which incarnations of this pod name
@@ -102,7 +103,7 @@ roots, with no TLS settings of its own.
 |---|---|
 | `…/enabled` | boolean; true opts in |
 | `…/scraper` | `prometheus` (also when absent) or `prometheus_simple`; any other value skips the port, because it names a protocol other than Prometheus exposition |
-| `…/config` | YAML, of which only two fields are read: `metrics_path` (default `/metrics`) and `collection_interval`, a Go duration such as `30s` (default the agent's `scrape_interval`; an invalid value is ignored) |
+| `…/config` | YAML, of which only three fields are read: `metrics_path` (default `/metrics`), `collection_interval`, a Go duration such as `30s` (default the agent's `scrape_interval`; an invalid value is ignored), and `metric_relabel_configs` ("Metric relabeling" below) |
 
 The **pod-level** keys, `io.opentelemetry.discovery.metrics/*`, enable every
 declared port. The **port-scoped** keys,
@@ -131,10 +132,65 @@ This agent reads a subset of them, and differs from that reference where it says
 - There, `scraper` names any receiver and `config` is that receiver's
   configuration. Here the only scraper is Prometheus exposition, and
   `config` holds what `prometheus_simple` calls `metrics_path` and
-  `collection_interval`; every other field is ignored, `endpoint`
-  included: the target is always the pod's address and the port.
+  `collection_interval`, and the `metric_relabel_configs` of a
+  Prometheus scrape config, which the `prometheus` receiver embeds. Every
+  other field is ignored, `endpoint` included: the target is always the
+  pod's address and the port.
 - There, `<port>` is a port number. Here it may also be a port's name.
 - The `io.opentelemetry.discovery.logs/*` keys are not read (below).
+
+### Metric relabeling
+
+A target's `metric_relabel_configs` are applied to every sample of each
+scrape before it is written, as Prometheus applies a scrape config's
+([`<metric_relabel_configs>`](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#metric_relabel_configs)):
+the same format and actions, by Prometheus's own code
+(`model/relabel`). Regexes are anchored at both ends, and the metric
+name is the label `__name__`. For example, to keep only the series that
+an Envoy sidecar's alerts read:
+
+```yaml
+io.opentelemetry.discovery.metrics.9901/enabled: "true"
+io.opentelemetry.discovery.metrics.9901/config: |
+  metrics_path: /stats/prometheus
+  metric_relabel_configs:
+  - source_labels: [__name__]
+    regex: envoy_cluster_upstream_rq(_xx|_timeout)?|envoy_cluster_upstream_cx_connect_timeout|envoy_listener_downstream_cx_(active|overflow)
+    action: keep
+```
+
+- **A list is one field.** A port-scoped `metric_relabel_configs`
+  replaces the pod-level list, and an empty list (`[]`) turns the pod's
+  rules off for that port.
+- **The rules see the sample's own labels**, and `__name__`. In
+  Prometheus they also see the target's labels (`job`, `instance` and
+  those that target relabeling adds); here the target's identity is in
+  the row's columns, out of the rules' reach.
+- **A sample is dropped** when a rule drops it, when its name ends up
+  empty, or when its labels end up equal to an earlier sample's in the
+  same scrape (a `labeldrop` can do that), which Prometheus rejects too. A
+  label with an empty value is no label, as in Prometheus.
+- **The scrape's own series are not relabeled**: `up`,
+  `scrape_duration_seconds`, `scrape_samples_scraped` (the samples the
+  target served) and `scrape_samples_post_metric_relabeling` (those
+  written), as in Prometheus. Comparing the last two shows what a
+  target's rules drop.
+- **A list that does not parse or validate is not applied**: the target is
+  scraped, every sample is shipped, and the agent logs why when it adds
+  the target. A filter that is wrong costs volume, never an alert input.
+- **A rule can rewrite as well as drop.** `replace`, `labelmap` and the
+  other actions do what they do in Prometheus, so the rows hold what the
+  rules made of the samples, not what the pod served.
+
+`prometheus.io/*` has no counterpart: a pod that needs rules uses the
+OpenTelemetry form.
+
+A pod that a PodMonitor selects gets its rules from the PodMonitor's
+`metricRelabelings`, which operator-to-annotations translates. Do not
+annotate such a pod yourself: the webhook leaves a pod with any
+`io.opentelemetry.discovery.*` or `prometheus.io/*` annotation alone,
+every port included, so one port annotated by hand turns off the
+PodMonitor's other ports for that pod.
 
 ### What the annotations cannot do
 
@@ -158,7 +214,7 @@ By design, and so permanently:
 
 Not built: a scrape timeout or TLS settings per target, in either form;
 and in the OpenTelemetry form a `scheme` (it is always `http`), auth, URL
-parameters and relabeling.
+parameters, target relabeling (`relabel_configs`) and `honor_labels`.
 
 ## Layout
 

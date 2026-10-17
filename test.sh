@@ -1095,7 +1095,14 @@ ota_ports() {
     annotation_is "$PODMONITORED" io.opentelemetry.discovery.metrics.9202/enabled true
 }
 ota_config() {
-  annotation_is "$PODMONITORED" io.opentelemetry.discovery.metrics.9201/config "collection_interval: 20s" &&
+  annotation_is "$PODMONITORED" io.opentelemetry.discovery.metrics.9201/config "collection_interval: 20s
+metric_relabel_configs:
+- action: drop
+  regex: podmonitored_main_dropped
+  source_labels:
+  - __name__
+- action: labeldrop
+  regex: worker" &&
     annotation_is "$PODMONITORED" io.opentelemetry.discovery.metrics.9202/config "metrics_path: /metrics"
 }
 ota_marker_only() {
@@ -1110,15 +1117,16 @@ ota_preannotated() {
 ota_report() {
   local pm='"podMonitor":"default/podmonitored"'
   logged "$pm" '"condition":"PartiallyTranslated"' && logged "$pm" 'podMetricsEndpoints[1].scrapeTimeout' &&
+    ! logged "$pm" 'metricRelabelings' &&
     logged "$pm" '"reason":"pre-existing scrape annotations"'
 }
 expect "the webhook enables each endpoint's port by number: the main container's 9201, the worker's 9202" ota_ports
-expect "each port's config carries its endpoint's interval and path" ota_config
+expect "each port's config carries its endpoint's interval, path and metricRelabelings" ota_config
 expect "no pod-level key, and the marker names the PodMonitor" ota_marker_only
 expect "a selected pod with its own scrape annotations is left as it is" ota_preannotated
 expect "the webhook warns about it, naming the pod and the PodMonitor" \
   logged default/podmonitored-preannotated "not applying PodMonitor default/podmonitored"
-expect "the report: partially translated, scrapeTimeout untranslated, the pre-annotated pod skipped" ota_report
+expect "the report: partially translated, scrapeTimeout untranslated, metricRelabelings translated, the pre-annotated pod skipped" ota_report
 expect "a ServiceMonitor is logged as not supported" \
   logged "ServiceMonitor is not supported" default/podmonitored
 assert "the main container's metrics, attributed to it" \
@@ -1127,6 +1135,19 @@ assert "the worker's metrics, attributed to it" \
   "SELECT count(*) > 0 FROM metrics WHERE pod LIKE 'podmonitored-%' AND container = 'worker' AND name = 'podmonitored_worker_up' AND value = 1"
 assert "neither container's series in the other's" \
   "SELECT count(*) = 0 FROM metrics WHERE pod LIKE 'podmonitored-%' AND ((container = 'main' AND name = 'podmonitored_worker_up') OR (container = 'worker' AND name = 'podmonitored_main_up'))"
+# the newest pod's: on a reused cluster a replica annotated by the previous
+# run's webhook can still ship for a moment after the purge
+PODMONITORED_POD=${PODMONITORED#pod/}
+assert "main's metricRelabelings: the dropped series is not shipped" \
+  "SELECT count(*) = 0 FROM metrics WHERE pod = '$PODMONITORED_POD' AND name = 'podmonitored_main_dropped'"
+assert "main's metricRelabelings: worker is dropped, and of the two series that leaves equal, the first is kept" \
+  "SELECT count(*) > 0 AND bool_and(value = 1 AND labels = MAP {'code': '200'}) FROM metrics
+   WHERE pod = '$PODMONITORED_POD' AND container = 'main' AND name = 'podmonitored_main_requests_total'"
+assert "main's scrapes count 4 samples scraped, 2 after relabeling; the worker's 1 and 1" \
+  "SELECT bool_and(CASE container WHEN 'main' THEN s = 4 AND p = 2 WHEN 'worker' THEN s = 1 AND p = 1 END) AND count(DISTINCT container) = 2
+   FROM (SELECT container, time, max(value) FILTER (WHERE name = 'scrape_samples_scraped') AS s,
+                max(value) FILTER (WHERE name = 'scrape_samples_post_metric_relabeling') AS p
+         FROM metrics WHERE pod = '$PODMONITORED_POD' AND name LIKE 'scrape_samples_%' GROUP BY container, time)"
 assert "main is scraped every 20 s (its endpoint's interval), the worker every 15 s (the default)" \
   "WITH g AS (SELECT container, epoch(time) - epoch(lag(time) OVER (PARTITION BY pod, container ORDER BY time)) AS gap
               FROM metrics WHERE pod LIKE 'podmonitored-%' AND name = 'up')

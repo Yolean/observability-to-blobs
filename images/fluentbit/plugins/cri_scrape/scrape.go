@@ -122,6 +122,7 @@ func (s *scraper) scrapeOnce(parent context.Context, t target, job string, start
 	out := scrape{Time: start, Job: job, Instance: t.instance(),
 		Namespace: t.namespace, Pod: t.pod, PodUID: t.podUID, Container: t.container, Restart: t.restart}
 	up := 0.0
+	scraped := 0
 	defer func() {
 		// A scrape cut short because the target went away (replaced after
 		// a restart, removed, plugin exit) says nothing about the target;
@@ -130,11 +131,13 @@ func (s *scraper) scrapeOnce(parent context.Context, t target, job string, start
 			return
 		}
 		d := time.Since(start).Seconds()
-		n := len(out.Samples)
+		// Prometheus's own series for a scrape, never relabeled
+		kept := len(out.Samples)
 		out.Samples = append(out.Samples,
 			synthetic("up", up),
 			synthetic("scrape_duration_seconds", d),
-			synthetic("scrape_samples_scraped", float64(n)))
+			synthetic("scrape_samples_scraped", float64(scraped)),
+			synthetic("scrape_samples_post_metric_relabeling", float64(kept)))
 		s.emit(out)
 	}()
 
@@ -167,9 +170,12 @@ func (s *scraper) scrapeOnce(parent context.Context, t target, job string, start
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	var rows []sample
 	for _, n := range names {
-		out.Samples = appendFamily(out.Samples, families[n])
+		rows = appendFamily(rows, families[n])
 	}
+	scraped = len(rows)
+	out.Samples = relabelSamples(rows, t.relabel)
 	up = 1
 	return nil
 }
