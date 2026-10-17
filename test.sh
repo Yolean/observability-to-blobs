@@ -1398,8 +1398,8 @@ if [ -z "$PROM_BIN" ]; then
 else
   YOBS_RUN=$(mktemp -d "${TMPDIR:-/tmp}/itest-yobs.XXXXXX")
   # Prometheus reads through a profile whose credential_process grants
-  # the itest's keys for 80 s, so its session renews its credential at
-  # least once while the assertions below run, and a refusal is exit 3
+  # the itest's keys for 80 s, so its reads outlive the first grant while
+  # the assertions below run, and a refusal is exit 3
   cat > "$YOBS_RUN/grant.sh" <<'GRANT'
 #!/bin/sh
 dir=$(dirname "$0")
@@ -1447,8 +1447,12 @@ GRANT
     PUSHED_TO2=$(prom_pushed to)
     expect "y-obs prometheus: following moves the loaded window's end ($PUSHED_TO to $PUSHED_TO2)" test "${PUSHED_TO2:-0}" -gt "${PUSHED_TO:-0}"
     expect "y-obs prometheus: a repeated call reuses the instance" prom_reused
-    prom_renewed() { [ "$(grant_runs)" -ge 2 ] && grep -q 'credential renewed' "$YOBS_RUN"/y-obs/prometheus/*.log; }
-    expect "y-obs prometheus: the credential_process ran again before its 80 s grant expired, and the session renewed" prom_renewed
+    # past the first grant's 80 s: each poll resolves the chain again, which
+    # runs the credential_process, and the reads after the expiry work
+    sleep 20
+    PUSHED_TO3=$(prom_pushed to)
+    expect "y-obs prometheus: still following past the first grant's expiry ($PUSHED_TO2 to $PUSHED_TO3), the credential_process run $(grant_runs) times" \
+      test "${PUSHED_TO3:-0}" -gt "${PUSHED_TO2:-0}" -a "$(grant_runs)" -ge 2
     expect "y-obs prometheus --stop ends it" yobs_prom --stop
     expect "y-obs prometheus: stopped, Prometheus answers no more" prom_gone
   else
