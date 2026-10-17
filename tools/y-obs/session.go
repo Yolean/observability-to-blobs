@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"slices"
+
 	"sort"
 	"strconv"
 	"strings"
@@ -62,14 +62,15 @@ func (w window) String() string {
 
 // sessionFlags are the flags every command that reads the bucket shares.
 type sessionFlags struct {
-	context, cluster, node, since, from, to, blobsDir, keysDir string
-	maxObjects                                                 int
-	explain                                                    bool
+	context, bucket, cluster, node, since, from, to, blobsDir, keysDir string
+	maxObjects                                                         int
+	explain                                                            bool
 }
 
 func (f *sessionFlags) register(fs *flag.FlagSet) {
-	fs.StringVar(&f.context, "context", "", "the bucket and its credential (y-obs contexts); default Y_OBS_CONTEXT, else the config's current, unless S3_BUCKET is set")
-	fs.StringVar(&f.cluster, "cluster", os.Getenv("CLUSTER_NAME"), "the cluster, the first key segment of every tier (env CLUSTER_NAME); default the credential's only cluster")
+	fs.StringVar(&f.context, "context", "", "the bucket, cluster and AWS profile to read (y-obs contexts); default Y_OBS_CONTEXT, else the config's current")
+	fs.StringVar(&f.bucket, "bucket", "", "the bucket (env S3_BUCKET); default the context's")
+	fs.StringVar(&f.cluster, "cluster", os.Getenv("CLUSTER_NAME"), "the cluster, the first key segment of every tier (env CLUSTER_NAME); default the context's, else the bucket's only one")
 	fs.StringVar(&f.node, "node", "", "read only this node's raw objects")
 	fs.StringVar(&f.since, "since", "1h", "the window: this long back from now, or from --from (30m, 6h, 2d)")
 	fs.StringVar(&f.from, "from", "", "window start, UTC: 2026-10-11T09:00:00Z or '2026-10-11 09:00'")
@@ -215,8 +216,8 @@ type session struct {
 	stopRenew  func()
 }
 
-// storeConfig is where the bucket is; static keys from the environment, as
-// local/blobs.sh reads them, until contexts and auth exist.
+// storeConfig is where the bucket is and the credential that reads it
+// (contexts.go, storeFor).
 type storeConfig struct {
 	bucket, endpoint, region, keyID, secret, token string
 	tls                                            bool
@@ -226,37 +227,30 @@ type storeConfig struct {
 	margin  time.Duration
 }
 
-func storeFromEnv() storeConfig {
-	ep := os.Getenv("S3_ENDPOINT")
-	ep = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(ep, "https://"), "http://"), "/")
-	region := os.Getenv("S3_REGION")
-	if region == "" {
-		region = "us-east-1"
+// clusterFor is the cluster a session reads: the flag (or CLUSTER_NAME),
+// else the context's, else the bucket's only cluster, which list finds.
+func clusterFor(ctx context.Context, flagValue, contextCluster string, list func(context.Context) ([]string, error)) (string, error) {
+	if flagValue != "" {
+		return flagValue, nil
 	}
-	return storeConfig{
-		bucket: os.Getenv("S3_BUCKET"), endpoint: ep, region: region, tls: os.Getenv("S3_TLS") == "on",
-		keyID: os.Getenv("AWS_ACCESS_KEY_ID"), secret: os.Getenv("AWS_SECRET_ACCESS_KEY"), token: os.Getenv("AWS_SESSION_TOKEN"),
+	if contextCluster != "" {
+		return contextCluster, nil
 	}
-}
-
-// clusterFor is the cluster a session reads: the flag, else the
-// credential's only cluster; one the credential does not cover is refused.
-func clusterFor(flagValue string, scope []string) (string, error) {
-	cluster := flagValue
-	if cluster == "" && len(scope) == 1 {
-		cluster = scope[0]
+	if list == nil {
+		return "", fail(exitUsage, "no cluster: pass --cluster or set CLUSTER_NAME")
 	}
-	if cluster == "" {
-		hint := ""
-		if len(scope) > 1 {
-			hint = ": the credential covers " + strings.Join(scope, ", ")
-		}
-		return "", fail(exitUsage, "no cluster: pass --cluster or set CLUSTER_NAME%s", hint)
+	clusters, err := list(ctx)
+	if err != nil {
+		return "", err
 	}
-	if len(scope) > 0 && !slices.Contains(scope, cluster) {
-		return "", fail(exitAuth, "the credential covers clusters %s, not %s", strings.Join(scope, ", "), cluster)
+	if len(clusters) == 1 {
+		return clusters[0], nil
 	}
-	return cluster, nil
+	hint := ": the bucket has none"
+	if len(clusters) > 1 {
+		hint = ": the bucket has " + strings.Join(clusters, ", ")
+	}
+	return "", fail(exitUsage, "no cluster: pass --cluster, set CLUSTER_NAME, or name one in the context%s", hint)
 }
 
 // defaultMemoryLimit bounds the engine's memory (Y_OBS_MEMORY_LIMIT).
@@ -303,18 +297,14 @@ func parseBytes(v string) (float64, bool) {
 // repository, and the secret is scoped to the bucket.
 func openSession(ctx context.Context, f *sessionFlags, w window) (*session, error) {
 	var st storeConfig
-	var scope []string
+	var contextCluster string
 	if f.blobsDir == "" {
 		var err error
-		if st, scope, err = storeFor(ctx, f.context); err != nil {
+		if st, contextCluster, err = storeFor(ctx, f.context, f.bucket); err != nil {
 			return nil, err
 		}
 	}
-	cluster, err := clusterFor(f.cluster, scope)
-	if err != nil {
-		return nil, err
-	}
-	s := &session{cluster: cluster, w: w, node: f.node, keyIDs: map[string]bool{}, plan: map[string][]string{}, store: st}
+	s := &session{w: w, node: f.node, keyIDs: map[string]bool{}, plan: map[string][]string{}, store: st}
 	var init []string
 	if f.blobsDir != "" {
 		abs, err := filepath.Abs(f.blobsDir)
@@ -323,9 +313,6 @@ func openSession(ctx context.Context, f *sessionFlags, w window) (*session, erro
 		}
 		s.root = abs
 	} else {
-		if st.bucket == "" || st.endpoint == "" {
-			return nil, fail(exitUsage, "no bucket: set S3_BUCKET and S3_ENDPOINT (and AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY), or pass --blobs-dir")
-		}
 		s.root = "s3://" + st.bucket
 		switch p := os.Getenv("HTTPFS_EXTENSION"); {
 		case p != "":
@@ -341,6 +328,14 @@ func openSession(ctx context.Context, f *sessionFlags, w window) (*session, erro
 		}
 		s.setSecret(st)
 	}
+	var list func(context.Context) ([]string, error)
+	if f.blobsDir == "" {
+		list = s.clusters
+	}
+	var err error
+	if s.cluster, err = clusterFor(ctx, f.cluster, contextCluster, list); err != nil {
+		return nil, err
+	}
 	init = append(init, "SET TimeZone = 'UTC'", "SET enable_object_cache = true", "SET enable_http_metadata_cache = true")
 	if f.keysDir != "" {
 		stmts, err := s.parquetKeys(f.keysDir)
@@ -354,7 +349,7 @@ func openSession(ctx context.Context, f *sessionFlags, w window) (*session, erro
 	}
 	if !st.expires.IsZero() {
 		s.renewEvery(func(ctx context.Context) (storeConfig, error) {
-			st, _, err := storeFor(ctx, f.context)
+			st, _, err := storeFor(ctx, f.context, f.bucket)
 			return st, err
 		}, st.expires, st.margin)
 	}

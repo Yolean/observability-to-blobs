@@ -33,11 +33,9 @@ var commands = []command{
 	{"sql", "a DuckDB query over the views of a window (raw, logs, metrics, podindex, pods, apiserver, hourly_*, daily_*)", cmdSQL},
 	{"schema", "the views, or one view's columns and their meanings", cmdSchema},
 	{"kubectl", "kubectl against the cluster as it was at a time, read-only", cmdKubectl},
-	{"auth", "get or show the context's read credential, never printing the secret", cmdAuth},
-	{"contexts", "the configured contexts: bucket, endpoint, the clusters the credential covers", cmdContexts},
+	{"contexts", "the configured contexts: bucket, cluster and AWS profile", cmdContexts},
 	{"version", "y-obs, DuckDB and Go versions, and where httpfs comes from", cmdVersion},
 	{"prometheus-serve", "the foreground part of y-obs prometheus, which runs it detached", cmdPrometheusServe},
-	{"mint-stub", "development only: a credential mint handing out static keys", cmdMintStub},
 	{"apiserver-at", "serve a state of objects (JSON lines of apiserver_at rows) to kubectl, read-only", func(_ context.Context, args []string) error {
 		cmdApiserverAt(args)
 		return nil

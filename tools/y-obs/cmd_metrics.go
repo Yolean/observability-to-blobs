@@ -101,8 +101,6 @@ func runMetrics(ctx context.Context, args []string, stdout, stderr io.Writer, no
 	c.fs.StringVar(&pod, "pod", "", "pod names matching this RE2 pattern")
 	c.fs.StringVar(&container, "container", "", "only this container")
 	c.fs.StringVar(&scrape, "scrape", "", "pod, node or host: application targets, the node's own, a host agent's")
-	// its name before the column was renamed
-	c.fs.StringVar(&scrape, "job", "", "the same as --scrape")
 	c.fs.Var(&where, "where", "key=value a series must have (a label, or namespace/pod/container/node/scrape/instance/k8s_*_name); repeatable")
 	c.fs.StringVar(&match, "match", "", "names: metric names matching this RE2 pattern")
 	c.fs.StringVar(&by, "by", "", "series, rate: aggregate across series by these comma-separated keys")

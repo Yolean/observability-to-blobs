@@ -28,7 +28,7 @@ func TestStatus(t *testing.T) {
 	put("raw1/access-check/probe", 1)
 	t.Setenv("Y_OBS_CONFIG", filepath.Join(t.TempDir(), "none.yaml"))
 	t.Setenv("S3_BUCKET", "b")
-	t.Setenv("S3_ENDPOINT", "objects.test")
+	t.Setenv("AWS_ENDPOINT_URL_S3", "http://objects.test")
 	t.Setenv("AWS_ACCESS_KEY_ID", "k")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "the-secret")
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())

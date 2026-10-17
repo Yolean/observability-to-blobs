@@ -55,9 +55,10 @@ anything older.
   what shrinks it: `--node` for the raw tier (the last hours), `-n` when
   the daily tier is read, or a shorter window. `--explain` shows the plan
   without reading.
-- Exit 3 means credentials: run `y-obs auth`. Credentials last minutes,
-  and y-obs renews them itself, so this only happens when the login
-  behind them has expired.
+- Exit 3 means credentials: the AWS profile y-obs reads with found none,
+  or its `credential_process` refused. `y-obs status` shows where the
+  credential comes from. y-obs renews an expiring credential itself, so
+  this only happens when the login behind the profile has expired.
 - Exit 4 means not in the bucket, and the message names what is: the
   pod's containers, the closest pod or metric names, or, when the window
   has no data at all, the clusters with data or the cluster's dates.

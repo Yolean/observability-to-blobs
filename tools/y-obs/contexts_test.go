@@ -2,119 +2,189 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// testMint answers like a real mint: a credential living ttl, scoped to
-// clusters, for the bearer token "t". It counts what it minted.
-func testMint(t *testing.T, ttl time.Duration, clusters ...string) (*httptest.Server, *atomic.Int32) {
-	var n atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer t" {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
-			return
-		}
-		n.Add(1)
-		json.NewEncoder(w).Encode(credential{AccessKeyID: "k", SecretAccessKey: "s", SessionToken: "st",
-			Expiration: time.Now().Add(ttl), Clusters: clusters})
-	}))
-	t.Cleanup(srv.Close)
-	return srv, &n
-}
-
-func testConfig(t *testing.T, mintURL, token string) {
+// awsEnv isolates the AWS SDK from this machine's AWS setup: empty shared
+// files unless config is given, no instance metadata, no AWS_* from the
+// caller. It returns the directory the files are in.
+func awsEnv(t *testing.T, config string) string {
 	t.Helper()
 	dir := t.TempDir()
-	cfg := "current: one\ncontexts:\n  one:\n    bucket: b\n    endpoint: http://objects.test/\n    credentials:\n      url: " + mintURL + "\n      token: printf " + token + "\n"
-	if err := os.WriteFile(filepath.Join(dir, "contexts.yaml"), []byte(cfg), 0o600); err != nil {
+	for _, k := range []string{"AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+		"AWS_SESSION_TOKEN", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3", "S3_BUCKET", "Y_OBS_CONTEXT", "CLUSTER_NAME"} {
+		t.Setenv(k, "")
+		os.Unsetenv(k)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "credentials"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(dir, "config"))
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(dir, "credentials"))
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
 	t.Setenv("Y_OBS_CONFIG", filepath.Join(dir, "contexts.yaml"))
-	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "run"))
-	t.Setenv("S3_BUCKET", "")
-	t.Setenv("Y_OBS_CONTEXT", "")
+	return dir
 }
 
-func TestContextCredential(t *testing.T) {
-	srv, minted := testMint(t, 10*time.Minute, "prod")
-	testConfig(t, srv.URL, "t")
-	ctx := context.Background()
-	st, scope, err := storeFor(ctx, "")
+func writeContexts(t *testing.T, dir, yaml string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "contexts.yaml"), []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// grantScript is a credential_process command: it counts its runs in
+// <dir>/runs and prints a key expiring ttl from now, or with a file
+// <dir>/refuse, refuses as a grant service would.
+func grantScript(t *testing.T, dir string, ttl time.Duration) string {
+	t.Helper()
+	p := filepath.Join(dir, "grant.sh")
+	expires := time.Now().Add(ttl).UTC().Format(time.RFC3339)
+	script := "#!/bin/sh\n" +
+		"echo run >> '" + dir + "/runs'\n" +
+		"if [ -e '" + dir + "/refuse' ]; then echo 'grant refused: not on call' >&2; exit 3; fi\n" +
+		"echo '{\"Version\": 1, \"AccessKeyId\": \"AKGRANT\", \"SecretAccessKey\": \"the-secret\", \"SessionToken\": \"tok\", \"Expiration\": \"" + expires + "\"}'\n"
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func runs(t *testing.T, dir string) int {
+	b, _ := os.ReadFile(filepath.Join(dir, "runs"))
+	return strings.Count(string(b), "run")
+}
+
+// Static keys from the environment and the S3 endpoint from
+// AWS_ENDPOINT_URL_S3: no expiry, and TLS as the URL's scheme says.
+func TestStoreFromEnvironment(t *testing.T) {
+	awsEnv(t, "")
+	t.Setenv("AWS_ACCESS_KEY_ID", "k")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "s")
+	t.Setenv("AWS_REGION", "eu-north-1")
+	t.Setenv("AWS_ENDPOINT_URL_S3", "http://127.0.0.1:30070")
+	st, cluster, err := storeFor(context.Background(), "", "b")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.bucket != "b" || st.endpoint != "objects.test" || !st.tls || st.keyID != "k" || st.token != "st" || st.region != "us-east-1" {
-		t.Errorf("store: %+v", st)
-	}
-	if len(scope) != 1 || scope[0] != "prod" || st.margin != renewBefore {
-		t.Errorf("scope %v, margin %s", scope, st.margin)
-	}
-	if _, _, err := storeFor(ctx, ""); err != nil || minted.Load() != 1 {
-		t.Errorf("the second call minted again: %d %v", minted.Load(), err)
-	}
-	fi, err := os.Stat(cachePath("one"))
-	if err != nil || fi.Mode().Perm() != 0o600 {
-		t.Errorf("cache file: %v %v", fi, err)
-	}
-	if _, how, err := credentialFor(ctx, "one", contextConfig{Credentials: struct {
-		URL   string `json:"url"`
-		Token string `json:"token,omitempty"`
-	}{srv.URL, "printf t"}}, true); err != nil || how != "minted" || minted.Load() != 2 {
-		t.Errorf("--renew: %s %d %v", how, minted.Load(), err)
-	}
-	if _, _, err := storeFor(ctx, "two"); exitOf(err) != exitUsage {
-		t.Errorf("unknown context: %v", err)
+	if st.bucket != "b" || st.endpoint != "127.0.0.1:30070" || st.tls || st.region != "eu-north-1" || st.keyID != "k" || !st.expires.IsZero() || cluster != "" {
+		t.Fatalf("%+v %q", st, cluster)
 	}
 }
 
-func TestContextRefused(t *testing.T) {
-	srv, _ := testMint(t, time.Minute)
-	testConfig(t, srv.URL, "wrong")
-	if _, _, err := storeFor(context.Background(), ""); exitOf(err) != exitAuth {
-		t.Errorf("wrong token: %v", err)
+// A context's profile with credential_process: the grant's key, its
+// expiry, and the profile's endpoint and region; each resolution runs the
+// process again, as a renewal does.
+func TestStoreFromCredentialProcess(t *testing.T) {
+	dir := awsEnv(t, "")
+	grants := t.TempDir()
+	script := grantScript(t, grants, 2*time.Minute)
+	if err := os.WriteFile(filepath.Join(dir, "config"), []byte("[profile obs]\ncredential_process = "+script+
+		"\nendpoint_url = https://objects.example.net\nregion = auto\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	testConfig(t, "http://127.0.0.1:1/v1/read", "t")
-	if _, _, err := storeFor(context.Background(), ""); exitOf(err) != exitAuth {
-		t.Errorf("no mint: %v", err)
+	writeContexts(t, dir, "current: prod\ncontexts:\n  prod:\n    bucket: node-data\n    cluster: prod-eu\n    profile: obs\n")
+	st, cluster, err := storeFor(context.Background(), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.bucket != "node-data" || cluster != "prod-eu" || st.keyID != "AKGRANT" || st.token != "tok" || st.endpoint != "objects.example.net" || !st.tls || st.region != "auto" {
+		t.Fatalf("%+v %q", st, cluster)
+	}
+	if left := time.Until(st.expires); left < 90*time.Second || left > 2*time.Minute || st.margin > time.Minute || st.margin < 40*time.Second {
+		t.Fatalf("expires in %s, margin %s: want about 2m and 1m", left, st.margin)
+	}
+	if _, _, err := storeFor(context.Background(), "", ""); err != nil || runs(t, grants) != 2 {
+		t.Fatalf("a second resolution: %v, %d runs", err, runs(t, grants))
+	}
+	// a refusal is an auth failure with the process's own message
+	os.WriteFile(filepath.Join(grants, "refuse"), nil, 0o600)
+	_, _, err = storeFor(context.Background(), "", "")
+	if exitOf(err) != exitAuth || !strings.Contains(err.Error(), "profile obs") {
+		t.Fatalf("refused: %v (exit %d)", err, exitOf(err))
+	}
+	if strings.Contains(err.Error(), "the-secret") {
+		t.Fatal("the secret in an error")
 	}
 }
 
-func TestMargin(t *testing.T) {
-	now := time.Now()
-	for life, want := range map[time.Duration]time.Duration{10 * time.Minute: renewBefore, 10 * time.Second: 5 * time.Second, 2*time.Minute + 2*time.Second: 61 * time.Second} {
-		c := credential{Obtained: now, Expiration: now.Add(life)}
-		if got := c.margin(); got != want {
-			t.Errorf("lifetime %s: margin %s, want %s", life, got, want)
+// The S3 endpoint: AWS_ENDPOINT_URL_S3 over the profile's services
+// section, over AWS_ENDPOINT_URL and the profile's own endpoint_url; none
+// is AWS's for the region.
+func TestS3Endpoint(t *testing.T) {
+	dir := awsEnv(t, "")
+	// a named profile's credentials are its own, not the environment's
+	keys := "aws_access_key_id = k\naws_secret_access_key = s\n"
+	cfg := "[profile svc]\n" + keys + "services = objects\nendpoint_url = https://global.example.net\n[services objects]\ns3 =\n  endpoint_url = https://s3only.example.net\n" +
+		"[profile plain]\n" + keys + "region = eu-west-1\n"
+	os.WriteFile(filepath.Join(dir, "config"), []byte(cfg), 0o600)
+	ctx := context.Background()
+	for _, c := range []struct {
+		profile, env, envS3, want string
+	}{
+		{"svc", "", "", "s3only.example.net"},
+		{"svc", "", "http://env-s3.test:9000", "env-s3.test:9000"},
+		{"plain", "https://env.example.net", "", "env.example.net"},
+		{"plain", "", "", "s3.eu-west-1.amazonaws.com"},
+	} {
+		t.Setenv("AWS_ENDPOINT_URL", c.env)
+		t.Setenv("AWS_ENDPOINT_URL_S3", c.envS3)
+		st, err := awsStore(ctx, c.profile)
+		if err != nil || st.endpoint != c.want {
+			t.Errorf("%+v: %q %v", c, st.endpoint, err)
 		}
+	}
+}
+
+// The bucket: the flag, else S3_BUCKET, else the context's; none is a
+// usage error.
+func TestBucketPrecedence(t *testing.T) {
+	dir := awsEnv(t, "")
+	t.Setenv("AWS_ACCESS_KEY_ID", "k")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "s")
+	ctx := context.Background()
+	if _, _, err := storeFor(ctx, "", ""); exitOf(err) != exitUsage {
+		t.Fatalf("no bucket: %v", err)
+	}
+	writeContexts(t, dir, "contexts:\n  only:\n    bucket: from-context\n")
+	for _, c := range []struct{ flag, env, want string }{{"", "", "from-context"}, {"", "from-env", "from-env"}, {"from-flag", "from-env", "from-flag"}} {
+		t.Setenv("S3_BUCKET", c.env)
+		if st, _, err := storeFor(ctx, "", c.flag); err != nil || st.bucket != c.want {
+			t.Errorf("%+v: %q %v", c, st.bucket, err)
+		}
+	}
+	if _, _, err := storeFor(ctx, "missing", ""); exitOf(err) != exitUsage {
+		t.Errorf("an unknown context: %v", err)
 	}
 }
 
 func TestClusterFor(t *testing.T) {
+	list := func(names ...string) func(context.Context) ([]string, error) {
+		return func(context.Context) ([]string, error) { return names, nil }
+	}
 	for _, c := range []struct {
-		flag  string
-		scope []string
-		want  string
-		code  int
+		flag, contextCluster string
+		list                 func(context.Context) ([]string, error)
+		want                 string
+		code                 int
 	}{
-		{"", []string{"prod"}, "prod", 0},
-		{"prod", []string{"prod", "qa"}, "prod", 0},
-		{"x", nil, "x", 0},
-		{"", []string{"prod", "qa"}, "", exitUsage},
-		{"", nil, "", exitUsage},
-		{"itest", []string{"prod"}, "", exitAuth},
+		{"x", "y", list("z"), "x", 0},
+		{"", "y", list("z"), "y", 0},
+		{"", "", list("only"), "only", 0},
+		{"", "", list("a", "b"), "", exitUsage},
+		{"", "", list(), "", exitUsage},
+		{"", "", nil, "", exitUsage},
 	} {
-		got, err := clusterFor(c.flag, c.scope)
+		got, err := clusterFor(context.Background(), c.flag, c.contextCluster, c.list)
 		if got != c.want || exitOf(err) != c.code {
-			t.Errorf("%q %v: %q %v", c.flag, c.scope, got, err)
+			t.Errorf("%+v: %q %v", c, got, err)
 		}
 	}
 }
@@ -122,40 +192,26 @@ func TestClusterFor(t *testing.T) {
 func TestContextName(t *testing.T) {
 	cfg := &configFile{Current: "a", Contexts: map[string]contextConfig{"a": {}, "b": {}}}
 	t.Setenv("Y_OBS_CONTEXT", "")
-	t.Setenv("S3_BUCKET", "")
 	if n := contextName("b", cfg); n != "b" {
 		t.Errorf("flag: %s", n)
 	}
 	if n := contextName("", cfg); n != "a" {
 		t.Errorf("current: %s", n)
 	}
-	t.Setenv("S3_BUCKET", "env-bucket")
-	if n := contextName("", cfg); n != "" {
-		t.Errorf("S3_BUCKET wins over current: %s", n)
-	}
 	t.Setenv("Y_OBS_CONTEXT", "b")
 	if n := contextName("", cfg); n != "b" {
 		t.Errorf("Y_OBS_CONTEXT: %s", n)
 	}
+	if n := contextName("", &configFile{Contexts: map[string]contextConfig{"only": {}}}); n != "b" {
+		t.Errorf("Y_OBS_CONTEXT over the only one: %s", n)
+	}
 }
 
-// auth with static keys from the environment describes them, never the
-// secret, and exits 0.
-func TestAuthStaticKeys(t *testing.T) {
-	t.Setenv("Y_OBS_CONFIG", filepath.Join(t.TempDir(), "none.yaml"))
-	t.Setenv("Y_OBS_CONTEXT", "")
-	t.Setenv("S3_BUCKET", "b")
-	t.Setenv("S3_ENDPOINT", "objects.test")
-	t.Setenv("AWS_ACCESS_KEY_ID", "k")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "the-secret")
-	r, w, _ := os.Pipe()
-	stderr := os.Stderr
-	os.Stderr = w
-	err := cmdAuth(context.Background(), nil)
-	w.Close()
-	os.Stderr = stderr
-	out, _ := io.ReadAll(r)
-	if err != nil || !strings.Contains(string(out), "static keys from the environment, bucket b at objects.test, AWS_ACCESS_KEY_ID set, no expiry") || strings.Contains(string(out), "the-secret") {
-		t.Errorf("%q %v", out, err)
+// A context holds no secrets: a field for one is refused.
+func TestContextRefusesCredentials(t *testing.T) {
+	dir := awsEnv(t, "")
+	writeContexts(t, dir, "contexts:\n  a:\n    bucket: b\n    credentials:\n      url: https://mint\n")
+	if _, _, err := loadConfig(); exitOf(err) != exitUsage {
+		t.Fatalf("%v", err)
 	}
 }

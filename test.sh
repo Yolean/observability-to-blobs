@@ -1342,10 +1342,16 @@ at_stop
 # hours are recent, so the planner reads raw; sql reads the encrypted
 # hourly tier with the compactor's keys.
 phase "assert: y-obs over the bucket (tools/y-obs)"
+# y-obs reads with the AWS SDK's default chain (tools/y-obs/README.md, "S3
+# access"): here the environment's keys, and nothing of this machine's own
+# AWS configuration
+yobs_env() {
+  env -u AWS_PROFILE Y_OBS_CONTEXT= Y_OBS_CONFIG=/dev/null AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+    AWS_EC2_METADATA_DISABLED=true AWS_ENDPOINT_URL_S3="http://127.0.0.1:$S3_PORT" S3_BUCKET="$BUCKET" \
+    AWS_ACCESS_KEY_ID=demoaccess AWS_SECRET_ACCESS_KEY=demosecret "$@"
+}
 yobs() {
-  env Y_OBS_CONTEXT= S3_ENDPOINT="127.0.0.1:$S3_PORT" S3_BUCKET="$BUCKET" S3_TLS=off \
-    AWS_ACCESS_KEY_ID=demoaccess AWS_SECRET_ACCESS_KEY=demosecret CLUSTER_NAME="$CLUSTER" \
-    target/bin/y-obs "$@" --since 3h --max-objects 2000 2>"$INIT.yobs.err"
+  yobs_env CLUSTER_NAME="$CLUSTER" target/bin/y-obs "$@" --since 3h --max-objects 2000 2>"$INIT.yobs.err"
 }
 yobs_expect() {
   local what=$1 want=$2 out
@@ -1372,8 +1378,7 @@ fi
 yobs_expect "exits: the restarter's exit code 1" "^[^,]*,default,restarter,[^,]*,[^,]*,[0-9]+,1," exits -n default --name '^restarter$' --format csv
 yobs_expect "metrics latest: app_requests_total code 200 is 42" '"value":42' metrics latest app_requests_total --pod '^metrics-multi$' --where code=200 --format jsonl
 yobs_status() {
-  env Y_OBS_CONTEXT= S3_ENDPOINT="127.0.0.1:$S3_PORT" S3_BUCKET="$BUCKET" S3_TLS=off \
-    AWS_ACCESS_KEY_ID=demoaccess AWS_SECRET_ACCESS_KEY=demosecret target/bin/y-obs status --cluster "$CLUSTER" 2>"$INIT.yobs.err"
+  yobs_env target/bin/y-obs status --cluster "$CLUSTER" 2>"$INIT.yobs.err"
 }
 if out=$(yobs_status) && grep -qE "^$CLUSTER	raw	[0-9-]+T[0-9]{2}	" <<<"$out" && grep -qE "^$CLUSTER	hourly	" <<<"$out"; then
   echo "  PASS: y-obs status: the cluster's raw and hourly tiers with their spans"
@@ -1392,11 +1397,28 @@ if [ -z "$PROM_BIN" ]; then
   echo "  SKIP: y-obs prometheus (no PROMETHEUS, y-prometheus or prometheus)"
 else
   YOBS_RUN=$(mktemp -d "${TMPDIR:-/tmp}/itest-yobs.XXXXXX")
-  yobs_prom() {
-    env Y_OBS_CONTEXT= XDG_RUNTIME_DIR="$YOBS_RUN" PROMETHEUS="$PROM_BIN" S3_ENDPOINT="127.0.0.1:$S3_PORT" S3_BUCKET="$BUCKET" S3_TLS=off \
-      AWS_ACCESS_KEY_ID=demoaccess AWS_SECRET_ACCESS_KEY=demosecret CLUSTER_NAME="$CLUSTER" \
-      target/bin/y-obs prometheus --no-open --max-objects 2000 "$@"
+  # Prometheus reads through a profile whose credential_process grants
+  # the itest's keys for 80 s, so its session renews its credential at
+  # least once while the assertions below run, and a refusal is exit 3
+  cat > "$YOBS_RUN/grant.sh" <<'GRANT'
+#!/bin/sh
+dir=$(dirname "$0")
+echo run >> "$dir/runs"
+if [ -e "$dir/refuse" ]; then echo "grant refused: the itest refuses" >&2; exit 3; fi
+t=$(( $(date +%s) + 80 ))
+exp=$(date -u -d "@$t" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$t" +%Y-%m-%dT%H:%M:%SZ)
+printf '{"Version": 1, "AccessKeyId": "demoaccess", "SecretAccessKey": "demosecret", "Expiration": "%s"}\n' "$exp"
+GRANT
+  printf '[profile itest-grant]\ncredential_process = sh %s/grant.sh\nendpoint_url = http://127.0.0.1:%s\n' "$YOBS_RUN" "$S3_PORT" > "$YOBS_RUN/aws-config"
+  yobs_grant() {
+    env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN -u AWS_ENDPOINT_URL -u AWS_ENDPOINT_URL_S3 \
+      Y_OBS_CONTEXT= Y_OBS_CONFIG=/dev/null AWS_CONFIG_FILE="$YOBS_RUN/aws-config" AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+      AWS_EC2_METADATA_DISABLED=true AWS_PROFILE=itest-grant S3_BUCKET="$BUCKET" CLUSTER_NAME="$CLUSTER" "$@"
   }
+  yobs_prom() {
+    yobs_grant XDG_RUNTIME_DIR="$YOBS_RUN" PROMETHEUS="$PROM_BIN" target/bin/y-obs prometheus --no-open --max-objects 2000 "$@"
+  }
+  grant_runs() { wc -l < "$YOBS_RUN/runs" 2>/dev/null | tr -d ' ' || echo 0; }
   promq() { curl -s "$PROM_URL/api/v1/$1" --data-urlencode "query=$2" "${@:3}"; }
   # the loaded window's bounds, as y-obs reports them on its target
   prom_pushed() { promq query "yobs_pushed_window_seconds{bound=\"$1\"}" | grep -o '"[0-9]*"\]' | tr -dc 0-9 || true; }
@@ -1425,6 +1447,8 @@ else
     PUSHED_TO2=$(prom_pushed to)
     expect "y-obs prometheus: following moves the loaded window's end ($PUSHED_TO to $PUSHED_TO2)" test "${PUSHED_TO2:-0}" -gt "${PUSHED_TO:-0}"
     expect "y-obs prometheus: a repeated call reuses the instance" prom_reused
+    prom_renewed() { [ "$(grant_runs)" -ge 2 ] && grep -q 'credential renewed' "$YOBS_RUN"/y-obs/prometheus/*.log; }
+    expect "y-obs prometheus: the credential_process ran again before its 80 s grant expired, and the session renewed" prom_renewed
     expect "y-obs prometheus --stop ends it" yobs_prom --stop
     expect "y-obs prometheus: stopped, Prometheus answers no more" prom_gone
   else
@@ -1433,6 +1457,13 @@ else
     ERRORS=$((ERRORS + 1))
   fi
   yobs_prom --stop >/dev/null 2>&1 || true
+  touch "$YOBS_RUN/refuse"
+  grant_refused() {
+    local code=0
+    yobs_grant target/bin/y-obs sql "SELECT 1" --since 5m 2>"$INIT.yobs.err" >/dev/null || code=$?
+    [ "$code" = 3 ] && grep -q 'grant refused: the itest refuses' "$INIT.yobs.err"
+  }
+  expect "y-obs: a credential_process that refuses is exit 3, with its message" grant_refused
   rm -rf "$YOBS_RUN"
 fi
 
