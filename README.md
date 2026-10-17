@@ -492,6 +492,10 @@ The compactor:
 
 The alerting tailer (`images/blobs-to-prometheus`, reading `raw1/`):
 
+- It tails `raw1/{CLUSTER_NAME}/`, or with `CLUSTER_NAME` empty every
+  cluster under `raw1/`, which each poll lists again, so one Prometheus
+  per bucket evaluates rules across clusters, or per cluster with
+  `cluster` in the rule.
 - It writes no staleness markers: a series that ends (a pod deleted, a
   target gone) stays in instant queries for Prometheus' lookback delta,
   5 minutes, after its last sample.
@@ -513,3 +517,6 @@ The alerting tailer (`images/blobs-to-prometheus`, reading `raw1/`):
   meta label `job`; the tailer stores it as `exported_job`, as a scrape with
   `honor_labels: false` does, so the rule its README names selects
   `blobs_compactor_last_success_timestamp_seconds{exported_job="rolling"}`.
+  So does the compactor's label `cluster`, the cluster a series is about:
+  it arrives as `exported_cluster`, and `cluster` is the cluster whose
+  agent scraped the compactor.

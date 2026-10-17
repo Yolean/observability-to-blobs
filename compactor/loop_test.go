@@ -47,10 +47,10 @@ func TestRollingPassFinalizesThePreviousHourAndRollsUpItsDay(t *testing.T) {
 	var b strings.Builder
 	w.c.m.write(&b)
 	for _, want := range []string{
-		`blobs_compactor_last_success_timestamp_seconds{job="rolling"} `,
-		`blobs_compactor_last_success_timestamp_seconds{job="rollup"} `,
-		`blobs_compactor_rows{tier="daily",table="logs"} 3`,
-		`blobs_compactor_raw_keys_read_total 3`,
+		`blobs_compactor_last_success_timestamp_seconds{cluster="itest",job="rolling"} `,
+		`blobs_compactor_last_success_timestamp_seconds{cluster="itest",job="rollup"} `,
+		`blobs_compactor_rows{cluster="itest",tier="daily",table="logs"} 3`,
+		`blobs_compactor_raw_keys_read_total{cluster="itest"} 3`,
 	} {
 		if !strings.Contains(b.String(), want) {
 			t.Fatalf("metrics lack %q:\n%s", want, b.String())
@@ -92,14 +92,14 @@ func TestPastPass(t *testing.T) {
 	var b strings.Builder
 	w.c.m.write(&b)
 	for _, want := range []string{
-		"blobs_compactor_raw_objects 1\n",
-		"blobs_compactor_raw_deleted_total 2\n",
+		"blobs_compactor_raw_objects{cluster=\"itest\"} 1\n",
+		"blobs_compactor_raw_deleted_total{cluster=\"itest\"} 2\n",
 	} {
 		if !strings.Contains(b.String(), want) {
 			t.Fatalf("metrics lack %q:\n%s", want, b.String())
 		}
 	}
-	if !strings.Contains(b.String(), "blobs_compactor_raw_oldest_age_seconds 36") {
+	if !strings.Contains(b.String(), "blobs_compactor_raw_oldest_age_seconds{cluster=\"itest\"} 36") {
 		t.Fatalf("want the age of the object uploaded an hour ago:\n%s", b.String())
 	}
 }
@@ -128,7 +128,7 @@ func TestRawGaugesFollowEveryPassesDeletions(t *testing.T) {
 		return b.String()
 	}
 	w.c.m.now = func() time.Time { return h10.Add(6 * time.Minute) }
-	for _, want := range []string{"blobs_compactor_raw_objects 2\n", "blobs_compactor_raw_oldest_age_seconds 3930\n"} {
+	for _, want := range []string{"blobs_compactor_raw_objects{cluster=\"itest\"} 2\n", "blobs_compactor_raw_oldest_age_seconds{cluster=\"itest\"} 3930\n"} {
 		if g := gauges(); !strings.Contains(g, want) {
 			t.Fatalf("after the past pass, metrics lack %q:\n%s", want, g)
 		}
@@ -147,7 +147,7 @@ func TestRawGaugesFollowEveryPassesDeletions(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.c.m.now = func() time.Time { return h10.Add(61 * time.Minute) }
-	for _, want := range []string{"blobs_compactor_raw_objects 2\n", "blobs_compactor_raw_oldest_age_seconds 3630\n"} {
+	for _, want := range []string{"blobs_compactor_raw_objects{cluster=\"itest\"} 2\n", "blobs_compactor_raw_oldest_age_seconds{cluster=\"itest\"} 3630\n"} {
 		if g := gauges(); !strings.Contains(g, want) {
 			t.Fatalf("after the rolling pass deleted hour 09, metrics lack %q:\n%s", want, g)
 		}

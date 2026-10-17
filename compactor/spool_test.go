@@ -118,9 +118,9 @@ func TestSpoolFoldsAndEmptiesAfterTheFinalFold(t *testing.T) {
 	// the deletions the past pass's fold jobs counted: the late file and e
 	var m strings.Builder
 	w.c.m.write(&m)
-	for _, want := range []string{"blobs_compactor_spool_files 0\n", "blobs_compactor_spool_bytes 0\n",
-		"blobs_compactor_spool_oldest_age_seconds 0\n", "blobs_compactor_raw_deleted_total 2\n",
-		`blobs_compactor_put_requests_total{result="stored"} 4`} {
+	for _, want := range []string{"blobs_compactor_spool_files{cluster=\"itest\"} 0\n", "blobs_compactor_spool_bytes{cluster=\"itest\"} 0\n",
+		"blobs_compactor_spool_oldest_age_seconds{cluster=\"itest\"} 0\n", "blobs_compactor_raw_deleted_total{cluster=\"itest\"} 2\n",
+		`blobs_compactor_put_requests_total{cluster="itest",result="stored"} 4`} {
 		if !strings.Contains(m.String(), want) {
 			t.Errorf("metrics lack %q:\n%s", want, m.String())
 		}
@@ -257,8 +257,8 @@ func TestSpoolPutOfAKeyAlreadyFolded(t *testing.T) {
 	}
 	var m strings.Builder
 	w.c.m.write(&m)
-	for _, want := range []string{`blobs_compactor_put_requests_total{result="already_folded"} 2`,
-		`blobs_compactor_put_requests_total{result="stored"} 2`} {
+	for _, want := range []string{`blobs_compactor_put_requests_total{cluster="itest",result="already_folded"} 2`,
+		`blobs_compactor_put_requests_total{cluster="itest",result="stored"} 2`} {
 		if !strings.Contains(m.String(), want) {
 			t.Errorf("metrics lack %q:\n%s", want, m.String())
 		}

@@ -106,7 +106,7 @@ func newTestPut(t *testing.T) *testPut {
 		t.Fatal(err)
 	}
 	return &testPut{t: t, p: &putServer{l: layout{"capture"}, bucket: "node-agent", region: "us-east-1",
-		keyID: "AKIDCAPTURE", secret: capturedSecret, maxBytes: 1 << 20, spool: sp, m: newMetrics(),
+		keyID: "AKIDCAPTURE", secret: capturedSecret, maxBytes: 1 << 20, spool: sp, m: newMetrics("capture"),
 		log: slog.New(slog.NewTextHandler(io.Discard, nil)), now: func() time.Time { return capturedAt }}}
 }
 
@@ -184,12 +184,12 @@ func TestPutCapturedOutS3Request(t *testing.T) {
 	tp.p.m.spool = tp.p.spool.stats
 	tp.p.m.write(&b)
 	for _, want := range []string{
-		`blobs_compactor_put_requests_total{result="stored"} 1`,
-		`blobs_compactor_put_requests_total{result="duplicate"} 1`,
-		`blobs_compactor_put_requests_total{result="conflict"} 1`,
-		`blobs_compactor_put_bytes_total 166`,
-		`blobs_compactor_spool_files 1`,
-		`blobs_compactor_spool_bytes 166`,
+		`blobs_compactor_put_requests_total{cluster="capture",result="stored"} 1`,
+		`blobs_compactor_put_requests_total{cluster="capture",result="duplicate"} 1`,
+		`blobs_compactor_put_requests_total{cluster="capture",result="conflict"} 1`,
+		`blobs_compactor_put_bytes_total{cluster="capture"} 166`,
+		`blobs_compactor_spool_files{cluster="capture"} 1`,
+		`blobs_compactor_spool_bytes{cluster="capture"} 166`,
 	} {
 		if !strings.Contains(b.String(), want) {
 			t.Errorf("metrics lack %q:\n%s", want, b.String())
@@ -526,7 +526,7 @@ func TestPutIsAnsweredWhileAScrapeWalksTheSpool(t *testing.T) {
 	go func() {
 		var b strings.Builder
 		tp.p.m.write(&b)
-		if !strings.Contains(b.String(), "blobs_compactor_spool_files 1\n") {
+		if !strings.Contains(b.String(), "blobs_compactor_spool_files{cluster=\"capture\"} 1\n") {
 			t.Errorf("the scrape:\n%s", b.String())
 		}
 		close(scraped)

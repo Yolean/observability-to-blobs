@@ -74,7 +74,7 @@ func TestGuardRefusesALineWithoutAFoldedTable(t *testing.T) {
 			}
 			var b strings.Builder
 			w.c.m.write(&b)
-			if s := "blobs_compactor_unaccounted_total " + fmt.Sprint(2*len(c.lines)) + "\n"; !strings.Contains(b.String(), s) {
+			if s := "blobs_compactor_unaccounted_total{cluster=\"itest\"} " + fmt.Sprint(2*len(c.lines)) + "\n"; !strings.Contains(b.String(), s) {
 				t.Errorf("metrics lack %q:\n%s", s, b.String())
 			}
 			// the object moved away: the hour folds, final, and deletes its raw
@@ -115,7 +115,7 @@ func TestGuardRefusesARollupOfARowWithoutNamespace(t *testing.T) {
 	}
 	var b strings.Builder
 	w.c.m.write(&b)
-	if s := "blobs_compactor_unaccounted_total 3\n"; !strings.Contains(b.String(), s) {
+	if s := "blobs_compactor_unaccounted_total{cluster=\"itest\"} 3\n"; !strings.Contains(b.String(), s) {
 		t.Errorf("metrics lack %q:\n%s", s, b.String())
 	}
 }

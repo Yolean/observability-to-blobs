@@ -16,6 +16,8 @@ import (
 // the blobs, where alerting reads it; the rule it exists for is
 // time() - blobs_compactor_last_success_timestamp_seconds{job="rolling"} > 600.
 type metrics struct {
+	// cluster is the label on every series
+	cluster      string
 	mu           sync.Mutex
 	now          func() time.Time
 	lastSuccess  map[string]float64    // job
@@ -65,8 +67,8 @@ func summarize(objs []Object, deleted []string) rawSummary {
 	return s
 }
 
-func newMetrics() *metrics {
-	return &metrics{now: time.Now, lastSuccess: map[string]float64{}, lastDuration: map[string]float64{},
+func newMetrics(cluster string) *metrics {
+	return &metrics{cluster: cluster, now: time.Now, lastSuccess: map[string]float64{}, lastDuration: map[string]float64{},
 		runs: map[[2]string]float64{}, rows: map[[2]string]float64{}, rawHours: map[time.Time]rawSummary{},
 		puts: map[string]float64{}}
 }
@@ -161,99 +163,155 @@ func (m *metrics) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	m.write(w)
 }
 
-func (m *metrics) write(w io.Writer) {
-	var st spoolStats
-	var stErr error
-	if m.spool != nil {
-		st, stErr = m.spool()
+// write writes m's families, as a metricsSet of m alone does.
+func (m *metrics) write(w io.Writer) { writeMetrics(w, []*metrics{m}) }
+
+// metricsSet is the /metrics endpoint of a process that compacts several
+// clusters: each family once, with a series per cluster.
+type metricsSet struct {
+	mu sync.Mutex
+	ms []*metrics // by cluster
+}
+
+func (s *metricsSet) add(m *metrics) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ms = append(s.ms, m)
+	sort.Slice(s.ms, func(i, j int) bool { return s.ms[i].cluster < s.ms[j].cluster })
+}
+
+func (s *metricsSet) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	s.mu.Lock()
+	ms := append([]*metrics(nil), s.ms...)
+	s.mu.Unlock()
+	writeMetrics(w, ms)
+}
+
+// writeMetrics writes each family once, and in it each cluster's series,
+// labelled cluster. A spool's gauges are a walk of it now, made before
+// the cluster's mu is held; a failed walk leaves them out.
+func writeMetrics(w io.Writer, ms []*metrics) {
+	sts := make([]spoolStats, len(ms))
+	stErrs := make([]error, len(ms))
+	spooled := false
+	for i, m := range ms {
+		if m.spool != nil {
+			spooled = true
+			sts[i], stErrs[i] = m.spool()
+		}
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	var b strings.Builder
 	family := func(name, typ, help string) {
 		fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s %s\n", name, help, name, typ)
 	}
-	byJob := func(name string, v map[string]float64) {
-		for _, k := range sortedKeys(v) {
-			fmt.Fprintf(&b, "%s{job=%q} %s\n", name, k, num(v[k]))
+	// each runs f for every cluster with its mu held, l its label pair
+	each := func(f func(i int, m *metrics, l string)) {
+		for i, m := range ms {
+			m.mu.Lock()
+			f(i, m, fmt.Sprintf("cluster=%q", m.cluster))
+			m.mu.Unlock()
 		}
 	}
-	pairs := func(name, l1, l2 string, v map[[2]string]float64) {
-		keys := make([][2]string, 0, len(v))
-		for k := range v {
-			keys = append(keys, k)
-		}
-		sort.Slice(keys, func(i, j int) bool { return keys[i][0]+"\x00"+keys[i][1] < keys[j][0]+"\x00"+keys[j][1] })
-		for _, k := range keys {
-			fmt.Fprintf(&b, "%s{%s=%q,%s=%q} %s\n", name, l1, k[0], l2, k[1], num(v[k]))
-		}
+	byJob := func(name string, v func(m *metrics) map[string]float64) {
+		each(func(_ int, m *metrics, l string) {
+			for _, k := range sortedKeys(v(m)) {
+				fmt.Fprintf(&b, "%s{%s,job=%q} %s\n", name, l, k, num(v(m)[k]))
+			}
+		})
+	}
+	pairs := func(name, l1, l2 string, v func(m *metrics) map[[2]string]float64) {
+		each(func(_ int, m *metrics, l string) {
+			keys := make([][2]string, 0, len(v(m)))
+			for k := range v(m) {
+				keys = append(keys, k)
+			}
+			sort.Slice(keys, func(i, j int) bool { return keys[i][0]+"\x00"+keys[i][1] < keys[j][0]+"\x00"+keys[j][1] })
+			for _, k := range keys {
+				fmt.Fprintf(&b, "%s{%s,%s=%q,%s=%q} %s\n", name, l, l1, k[0], l2, k[1], num(v(m)[k]))
+			}
+		})
+	}
+	single := func(name string, v func(m *metrics) float64) {
+		each(func(_ int, m *metrics, l string) { fmt.Fprintf(&b, "%s{%s} %s\n", name, l, num(v(m))) })
 	}
 	family("blobs_compactor_last_success_timestamp_seconds", "gauge", "When a job last completed without error (jobs: rolling, past, rollup).")
-	byJob("blobs_compactor_last_success_timestamp_seconds", m.lastSuccess)
+	byJob("blobs_compactor_last_success_timestamp_seconds", func(m *metrics) map[string]float64 { return m.lastSuccess })
 	family("blobs_compactor_last_duration_seconds", "gauge", "How long the job's last run took, successful or not.")
-	byJob("blobs_compactor_last_duration_seconds", m.lastDuration)
+	byJob("blobs_compactor_last_duration_seconds", func(m *metrics) map[string]float64 { return m.lastDuration })
 	family("blobs_compactor_runs_total", "counter", "Runs of each job by result.")
-	pairs("blobs_compactor_runs_total", "job", "result", m.runs)
+	pairs("blobs_compactor_runs_total", "job", "result", func(m *metrics) map[[2]string]float64 { return m.runs })
 	family("blobs_compactor_rows", "gauge", "Rows in the last object written, per tier and table (daily: the day's rows of the namespaces rewritten).")
-	pairs("blobs_compactor_rows", "tier", "table", m.rows)
+	pairs("blobs_compactor_rows", "tier", "table", func(m *metrics) map[[2]string]float64 { return m.rows })
 	family("blobs_compactor_raw_keys_read_total", "counter", "Raw objects read by folds; a full read counts every key of its hour.")
-	fmt.Fprintf(&b, "blobs_compactor_raw_keys_read_total %s\n", num(m.keysRead))
+	single("blobs_compactor_raw_keys_read_total", func(m *metrics) float64 { return m.keysRead })
 	family("blobs_compactor_raw_deleted_total", "counter", "Raw objects deleted after their hour's final fold (RAW_DELETE=after-final).")
-	fmt.Fprintf(&b, "blobs_compactor_raw_deleted_total %s\n", num(m.rawDeleted))
-	var objects int
-	var oldest time.Time
-	for _, s := range m.rawHours {
-		objects += s.objects
-		if oldest.IsZero() || s.oldest.Before(oldest) {
-			oldest = s.oldest
-		}
-	}
+	single("blobs_compactor_raw_deleted_total", func(m *metrics) float64 { return m.rawDeleted })
 	family("blobs_compactor_raw_objects", "gauge", "Raw objects as the latest listing of each hour saw them (a fold's of its hour, the past pass's of every hour), less those deleted since.")
-	fmt.Fprintf(&b, "blobs_compactor_raw_objects %d\n", objects)
+	single("blobs_compactor_raw_objects", func(m *metrics) float64 {
+		n := 0
+		for _, s := range m.rawHours {
+			n += s.objects
+		}
+		return float64(n)
+	})
 	family("blobs_compactor_raw_oldest_age_seconds", "gauge", "Age now of the oldest of those raw objects, by upload time; 0 when there are none.")
-	age := 0.0
-	if !oldest.IsZero() {
-		age = m.now().Sub(oldest).Seconds()
-	}
-	fmt.Fprintf(&b, "blobs_compactor_raw_oldest_age_seconds %s\n", num(age))
+	single("blobs_compactor_raw_oldest_age_seconds", func(m *metrics) float64 {
+		var oldest time.Time
+		for _, s := range m.rawHours {
+			if oldest.IsZero() || s.oldest.Before(oldest) {
+				oldest = s.oldest
+			}
+		}
+		if oldest.IsZero() {
+			return 0
+		}
+		return m.now().Sub(oldest).Seconds()
+	})
 	family("blobs_compactor_unaccounted_total", "counter", "Raw lines without a table the compactor folds, and hourly logs or metrics rows without a namespace, counted at every fold or rollup that refused for them: it wrote nothing and deleted no raw. Alert on any increase.")
-	fmt.Fprintf(&b, "blobs_compactor_unaccounted_total %s\n", num(m.unaccounted))
+	single("blobs_compactor_unaccounted_total", func(m *metrics) float64 { return m.unaccounted })
 	family("blobs_compactor_parquet_keys_missing", "gauge", "Parquet key ids that tier object names (or PARQUET_KEY_ID) carry and PARQUET_KEYS_DIR lacks; folds and rollups refuse while it is above 0.")
-	fmt.Fprintf(&b, "blobs_compactor_parquet_keys_missing %s\n", num(m.keysMissed))
-	if m.spool != nil {
-		m.writeSpool(&b, st, stErr)
-	}
-	io.WriteString(w, b.String())
-}
-
-// writeSpool writes the put endpoint's and the spool's families. The
-// spool's gauges are st, a walk of it now; a failed walk leaves them out.
-func (m *metrics) writeSpool(b *strings.Builder, st spoolStats, err error) {
-	fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s counter\n", "blobs_compactor_put_requests_total",
-		"Requests to the put endpoint by result: stored, duplicate (the key held the same content), conflict (the key held other content, which it keeps), already_folded (the key's hour was folded with it and its file deleted: nothing stored), or the S3 error code answered.",
-		"blobs_compactor_put_requests_total")
-	for _, k := range sortedKeys(m.puts) {
-		fmt.Fprintf(b, "blobs_compactor_put_requests_total{result=%q} %s\n", k, num(m.puts[k]))
-	}
-	fmt.Fprintf(b, "# HELP blobs_compactor_put_bytes_total Bytes of the objects the put endpoint stored.\n# TYPE blobs_compactor_put_bytes_total counter\n")
-	fmt.Fprintf(b, "blobs_compactor_put_bytes_total %s\n", num(m.putBytes))
-	if err != nil {
+	single("blobs_compactor_parquet_keys_missing", func(m *metrics) float64 { return m.keysMissed })
+	if !spooled {
+		io.WriteString(w, b.String())
 		return
 	}
-	age := 0.0
-	if !st.oldest.IsZero() {
-		age = m.now().Sub(st.oldest).Seconds()
-	}
+	family("blobs_compactor_put_requests_total", "counter", "Requests to the put endpoint by result: stored, duplicate (the key held the same content), conflict (the key held other content, which it keeps), already_folded (the key's hour was folded with it and its file deleted: nothing stored), or the S3 error code answered.")
+	each(func(_ int, m *metrics, l string) {
+		if m.spool == nil {
+			return
+		}
+		for _, k := range sortedKeys(m.puts) {
+			fmt.Fprintf(&b, "blobs_compactor_put_requests_total{%s,result=%q} %s\n", l, k, num(m.puts[k]))
+		}
+	})
+	family("blobs_compactor_put_bytes_total", "counter", "Bytes of the objects the put endpoint stored.")
+	each(func(_ int, m *metrics, l string) {
+		if m.spool != nil {
+			fmt.Fprintf(&b, "blobs_compactor_put_bytes_total{%s} %s\n", l, num(m.putBytes))
+		}
+	})
 	for _, g := range []struct {
 		name, help string
-		v          float64
+		v          func(st spoolStats, m *metrics) float64
 	}{
-		{"blobs_compactor_spool_files", "Raw files in the spool, uploaded and not yet deleted after their hour's final fold.", float64(st.files)},
-		{"blobs_compactor_spool_bytes", "Bytes of those files.", float64(st.bytes)},
-		{"blobs_compactor_spool_oldest_age_seconds", "Age now of the oldest of those files, by write time; 0 when there are none.", age},
+		{"blobs_compactor_spool_files", "Raw files in the spool, uploaded and not yet deleted after their hour's final fold.", func(st spoolStats, _ *metrics) float64 { return float64(st.files) }},
+		{"blobs_compactor_spool_bytes", "Bytes of those files.", func(st spoolStats, _ *metrics) float64 { return float64(st.bytes) }},
+		{"blobs_compactor_spool_oldest_age_seconds", "Age now of the oldest of those files, by write time; 0 when there are none.", func(st spoolStats, m *metrics) float64 {
+			if st.oldest.IsZero() {
+				return 0
+			}
+			return m.now().Sub(st.oldest).Seconds()
+		}},
 	} {
-		fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s gauge\n%s %s\n", g.name, g.help, g.name, g.name, num(g.v))
+		family(g.name, "gauge", g.help)
+		each(func(i int, m *metrics, l string) {
+			if m.spool != nil && stErrs[i] == nil {
+				fmt.Fprintf(&b, "%s{%s} %s\n", g.name, l, num(g.v(sts[i], m)))
+			}
+		})
 	}
+	io.WriteString(w, b.String())
 }
 
 // num renders a sample value without an exponent, so timestamps keep

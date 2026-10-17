@@ -29,11 +29,16 @@ import (
 // Nothing is remembered between ticks that the bucket does not say, so a
 // start is an ordinary tick. One writer: replicas 1, strategy Recreate.
 //
+// Without CLUSTER_NAME every pass runs for each cluster in turn
+// (clusters.go): the rolling pass first lists raw1/ for clusters new
+// since the last tick, and the past pass raw1/ and hourly/.
+//
 // The metrics, put and logs listeners are bound before the first pass, so that
 // an address that cannot be bound ends the run at once, as does a
 // listener that fails later.
 func (c *compactor) run(ctx context.Context, cfg config) error {
-	srv := &http.Server{Addr: cfg.metricsAddr, Handler: c.m, ReadHeaderTimeout: 10 * time.Second}
+	f := newFleet(c, cfg.cluster)
+	srv := &http.Server{Addr: cfg.metricsAddr, Handler: f.set, ReadHeaderTimeout: 10 * time.Second}
 	ml, err := net.Listen("tcp", cfg.metricsAddr)
 	if err != nil {
 		return fmt.Errorf("METRICS_ADDR: %w", err)
@@ -77,19 +82,27 @@ func (c *compactor) run(ctx context.Context, cfg config) error {
 			logs.Shutdown(sctx)
 		}()
 	}
-	c.log.Info("run", "cluster", c.l.cluster, "rolling", cfg.rolling.String(), "grace", cfg.grace.String(),
+	cluster := cfg.cluster
+	if cluster == "" {
+		cluster = "every cluster in the bucket"
+	}
+	c.log.Info("run", "cluster", cluster, "rolling", cfg.rolling.String(), "grace", cfg.grace.String(),
 		"past", cfg.past.String(), "raw_delete", cfg.rawDelete, "metrics", cfg.metricsAddr,
 		"raw_source", cfg.rawSource, "put", cfg.putListen, "logs", cfg.logsListen,
 		"parquet_key", c.keyID, "parquet_keys", sortedIDs(c.keys))
-	c.keysJob(jobContext(ctx), cfg.jobTimeout)
+	if cfg.cluster != "" {
+		c.keysJob(jobContext(ctx), cfg.jobTimeout)
+	}
 	tick := time.NewTicker(cfg.rolling)
 	defer tick.Stop()
 	var lastPast time.Time
 	for {
 		now := time.Now().UTC()
-		c.rollingPass(ctx, now, cfg.jobTimeout)
-		if ctx.Err() == nil && (lastPast.IsZero() || now.Sub(lastPast) >= cfg.past) {
-			c.pastPass(ctx, now, cfg.jobTimeout)
+		past := lastPast.IsZero() || now.Sub(lastPast) >= cfg.past
+		f.discover(ctx, past, cfg.jobTimeout)
+		f.each(ctx, func(c *compactor) { c.rollingPass(ctx, now, cfg.jobTimeout) })
+		if ctx.Err() == nil && past {
+			f.each(ctx, func(c *compactor) { c.pastPass(ctx, now, cfg.jobTimeout) })
 			lastPast = now
 		}
 		select {

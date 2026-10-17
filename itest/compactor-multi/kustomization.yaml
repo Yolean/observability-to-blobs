@@ -1,0 +1,59 @@
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization.json
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# A third compactor, with no CLUSTER_NAME: it compacts every cluster under
+# raw1/ of its bucket (compactor/README.md, "Every cluster of a bucket").
+# Its bucket, node-agent-multi, is its own, so that it never writes a
+# cluster that the bucket-mode compactor (itest/compactor) writes too:
+# test.sh copies raw objects into it under two cluster names.
+namespace: observability-multi
+
+resources:
+- namespace.yaml
+- ../../compactor/deploy/base
+
+secretGenerator:
+- name: blobs-compactor-s3
+  literals:
+  - AWS_ACCESS_KEY_ID=demoaccess
+  - AWS_SECRET_ACCESS_KEY=demosecret
+
+# the OCI layout's own ref, as build.sh image names it
+images:
+- name: ghcr.io/yolean/observability-state
+  newTag: build
+
+patches:
+- patch: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: blobs-compactor
+    spec:
+      template:
+        spec:
+          containers:
+          - name: compactor
+            imagePullPolicy: Never
+            env:
+            - name: CLUSTER_NAME
+              value: ""
+            - name: S3_BUCKET
+              value: node-agent-multi
+            - name: S3_ENDPOINT
+              value: versitygw.default.svc.cluster.local:7070
+            - name: S3_TLS
+              value: "off"
+            - name: ROLLING_INTERVAL
+              value: 20s
+            - name: GRACE
+              value: 1m
+            - name: PAST_INTERVAL
+              value: 5m
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                memory: 1Gi

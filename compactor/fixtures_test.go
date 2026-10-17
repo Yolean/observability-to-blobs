@@ -44,7 +44,7 @@ func newWorld(t *testing.T) *world {
 	dir := t.TempDir()
 	d := dirBucket{root: dir}
 	c := &compactor{l: layout{testCluster}, raw: d, tiers: d, db: db, grace: 10 * time.Minute, threads: 2,
-		log: slog.New(slog.NewTextHandler(io.Discard, nil)), m: newMetrics()}
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)), m: newMetrics(testCluster)}
 	if err := c.init(ctx, t.TempDir()); err != nil {
 		t.Fatal(err)
 	}

@@ -208,7 +208,7 @@ func TestMissingKeyRefuses(t *testing.T) {
 	}
 	var m strings.Builder
 	w.c.m.write(&m)
-	for _, want := range []string{"blobs_compactor_parquet_keys_missing 1\n", `blobs_compactor_runs_total{job="rolling",result="failure"} 1`} {
+	for _, want := range []string{"blobs_compactor_parquet_keys_missing{cluster=\"itest\"} 1\n", `blobs_compactor_runs_total{cluster="itest",job="rolling",result="failure"} 1`} {
 		if !strings.Contains(m.String(), want) {
 			t.Fatalf("metrics lack %q:\n%s", want, m.String())
 		}
@@ -224,7 +224,7 @@ func TestMissingKeyRefuses(t *testing.T) {
 	}
 	m.Reset()
 	w.c.m.write(&m)
-	if !strings.Contains(m.String(), "blobs_compactor_parquet_keys_missing 0\n") {
+	if !strings.Contains(m.String(), "blobs_compactor_parquet_keys_missing{cluster=\"itest\"} 0\n") {
 		t.Fatalf("metrics:\n%s", m.String())
 	}
 

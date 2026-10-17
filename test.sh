@@ -189,6 +189,7 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
   kubectl kustomize compactor/deploy/release >/dev/null
   kubectl kustomize itest/compactor >/dev/null
   kubectl kustomize itest/compactor-put >/dev/null
+  kubectl kustomize itest/compactor-multi >/dev/null
   kubectl kustomize compactor/deploy/spool-networkpolicy >/dev/null
   kubectl kustomize itest/buildkit >/dev/null
   operator-to-annotations/crds/vendor.sh check
@@ -1667,6 +1668,72 @@ case "$plain" in
   (*) echo "  FAIL: encryption: a read without the key gave: $plain" >&2; ERRORS=$((ERRORS + 1)) ;;
 esac
 $KUBECTL -n observability scale deployment/blobs-compactor --replicas=1 >/dev/null
+
+# ------------------------------------------------------- every cluster --
+
+phase "assert: one compactor for every cluster of a bucket (itest/compactor-multi)"
+# $CLUSTER's raw tier so far, copied into a bucket of its own twice, as
+# $CLUSTER and $CLUSTER-copy: the compactor without CLUSTER_NAME finds both
+# and writes each the same as the other, as two compactors of one cluster
+# each would.
+MULTI_BUCKET=node-agent-multi
+$KUBECTL -n observability-multi scale deployment/blobs-compactor --replicas=0 >/dev/null 2>&1 || true
+$KUBECTL delete pod copy-multi --ignore-not-found >/dev/null 2>&1
+$KUBECTL run copy-multi --restart=Never --image=amazon/aws-cli:2.22.35 \
+  --env=AWS_ACCESS_KEY_ID=demoaccess --env=AWS_SECRET_ACCESS_KEY=demosecret \
+  --env=AWS_DEFAULT_REGION=us-east-1 \
+  --command -- sh -ec "s3() { aws --endpoint-url http://versitygw:7070 s3 \"\$@\"; }
+    s3 mb s3://$MULTI_BUCKET 2>/dev/null || true
+    s3 rm --recursive --quiet s3://$MULTI_BUCKET/
+    s3 sync --quiet s3://$BUCKET/raw1/$CLUSTER/ s3://$MULTI_BUCKET/raw1/$CLUSTER/
+    s3 sync --quiet s3://$MULTI_BUCKET/raw1/$CLUSTER/ s3://$MULTI_BUCKET/raw1/$CLUSTER-copy/" >/dev/null
+deadline=$((SECONDS + 600))
+while :; do
+  copy=$($KUBECTL get pod copy-multi -o jsonpath='{.status.phase}')
+  case "$copy" in (Succeeded|Failed) break;; esac
+  [ $SECONDS -lt $deadline ] || fail "copy-multi still $copy after 600s"
+  sleep 3
+done
+[ "$copy" = Succeeded ] || { $KUBECTL logs pod/copy-multi >&2 || true; fail "could not copy raw1/$CLUSTER/ into s3://$MULTI_BUCKET/"; }
+$KUBECTL delete pod copy-multi >/dev/null
+$KUBECTL apply -k itest/compactor-multi >/dev/null
+$KUBECTL -n observability-multi scale deployment/blobs-compactor --replicas=1 >/dev/null
+$KUBECTL -n observability-multi rollout status deployment/blobs-compactor --timeout=180s
+# multi_rows <table>: true when both clusters' hourly rows are there and equal
+multi_rows() {
+  echo "SELECT a > 0 AND a = b FROM (SELECT
+    (SELECT count(*) FROM read_parquet('s3://$MULTI_BUCKET/hourly/$CLUSTER/$1/*/*.parquet')) AS a,
+    (SELECT count(*) FROM read_parquet('s3://$MULTI_BUCKET/hourly/$CLUSTER-copy/$1/*/*.parquet')) AS b)"
+}
+multi_folded() {
+  local c=$1
+  echo "(SELECT count(*) FROM read_csv('s3://$MULTI_BUCKET/hourly/$c/_folded/*/*.csv', header = true, columns = {'key': 'VARCHAR', 'final': 'BOOLEAN'}))"
+}
+MULTI_RAW="(SELECT count(*) FROM glob('s3://$MULTI_BUCKET/raw1/$CLUSTER/*/*/*/*.jsonl.zst'))"
+for _ in $(seq 1 60); do
+  [ "$(q "SELECT $(multi_folded "$CLUSTER") = $MULTI_RAW AND $(multi_folded "$CLUSTER-copy") = $MULTI_RAW" | tr -d '[:space:]')" = true ] && break
+  sleep 3
+done
+assert "every raw key of both clusters is folded" \
+  "SELECT $MULTI_RAW > 0 AND $(multi_folded "$CLUSTER") = $MULTI_RAW AND $(multi_folded "$CLUSTER-copy") = $MULTI_RAW"
+for t in logs metrics podindex; do
+  assert "$t: both clusters' hourly rows, equal" "$(multi_rows $t)"
+done
+MULTI_POD=$($KUBECTL -n observability-multi get pod -l app=blobs-compactor -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+MULTI_METRICS=$($KUBECTL get --raw "/api/v1/namespaces/observability-multi/pods/$MULTI_POD:9090/proxy/metrics" 2>/dev/null || true)
+multi_metrics() {
+  grep -q "^blobs_compactor_raw_keys_read_total{cluster=\"$CLUSTER\"} [1-9]" <<< "$MULTI_METRICS" &&
+    grep -q "^blobs_compactor_raw_keys_read_total{cluster=\"$CLUSTER-copy\"} [1-9]" <<< "$MULTI_METRICS"
+}
+expect "/metrics: a series per cluster" multi_metrics
+MULTI_LOGS=$($KUBECTL -n observability-multi logs deployment/blobs-compactor)
+multi_found() {
+  grep -F '"msg":"cluster found"' <<< "$MULTI_LOGS" | grep -qF "\"cluster\":\"$CLUSTER\"" &&
+    grep -F '"msg":"cluster found"' <<< "$MULTI_LOGS" | grep -qF "\"cluster\":\"$CLUSTER-copy\""
+}
+expect "the log names each cluster found" multi_found
+# it is done: the rest of the run does not need it
+$KUBECTL -n observability-multi scale deployment/blobs-compactor --replicas=0 >/dev/null
 
 # ------------------------------------------------------- put and spool --
 

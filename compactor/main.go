@@ -92,6 +92,9 @@ func command(ctx context.Context, log *slog.Logger, args []string) error {
 	}
 	defer c.Close()
 	if args[0] != "run" {
+		if cfg.cluster == "" {
+			return fmt.Errorf("%s needs CLUSTER_NAME", args[0])
+		}
 		if err := c.keysJob(ctx, cfg.jobTimeout); err != nil {
 			return err
 		}
@@ -129,6 +132,9 @@ func serve(ctx context.Context, log *slog.Logger) error {
 	cfg, err := configFromEnv()
 	if err != nil {
 		return err
+	}
+	if cfg.cluster == "" {
+		return fmt.Errorf("serve needs CLUSTER_NAME: the logs API serves one cluster")
 	}
 	if cfg.logsListen == "" {
 		cfg.logsListen = ":8080"

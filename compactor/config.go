@@ -107,7 +107,18 @@ func parseConfig(env func(string) string) (config, error) {
 		putKey:         env("PUT_SECRET_ACCESS_KEY"),
 		logsListen:     env("LOGS_LISTEN"),
 	}
-	if !clusterRE.MatchString(c.cluster) {
+	// Without CLUSTER_NAME the loop compacts every cluster it finds
+	// (loop.go); what serves one cluster's agent or readers needs one.
+	if c.cluster == "" {
+		for _, n := range []struct {
+			name string
+			set  bool
+		}{{"LOGS_LISTEN", c.logsListen != ""}, {"PUT_LISTEN", c.putListen != ""}, {"RAW_SOURCE=spool", c.rawSource == "spool"}} {
+			if n.set {
+				return c, fmt.Errorf("%s needs CLUSTER_NAME: it serves one cluster", n.name)
+			}
+		}
+	} else if !clusterRE.MatchString(c.cluster) {
 		return c, fmt.Errorf("CLUSTER_NAME %q: want a lowercase name of letters, digits, '-', '_' and '.'", c.cluster)
 	}
 	// the endpoint is host[:port]; a scheme, as the agent's env carries it, is dropped
