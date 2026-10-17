@@ -1135,16 +1135,19 @@ assert "the worker's metrics, attributed to it" \
   "SELECT count(*) > 0 FROM metrics WHERE pod LIKE 'podmonitored-%' AND container = 'worker' AND name = 'podmonitored_worker_up' AND value = 1"
 assert "neither container's series in the other's" \
   "SELECT count(*) = 0 FROM metrics WHERE pod LIKE 'podmonitored-%' AND ((container = 'main' AND name = 'podmonitored_worker_up') OR (container = 'worker' AND name = 'podmonitored_main_up'))"
+# the newest pod's: on a reused cluster a replica annotated by the previous
+# run's webhook can still ship for a moment after the purge
+PODMONITORED_POD=${PODMONITORED#pod/}
 assert "main's metricRelabelings: the dropped series is not shipped" \
-  "SELECT count(*) = 0 FROM metrics WHERE pod LIKE 'podmonitored-%' AND name = 'podmonitored_main_dropped'"
+  "SELECT count(*) = 0 FROM metrics WHERE pod = '$PODMONITORED_POD' AND name = 'podmonitored_main_dropped'"
 assert "main's metricRelabelings: worker is dropped, and of the two series that leaves equal, the first is kept" \
   "SELECT count(*) > 0 AND bool_and(value = 1 AND labels = MAP {'code': '200'}) FROM metrics
-   WHERE pod LIKE 'podmonitored-%' AND container = 'main' AND name = 'podmonitored_main_requests_total'"
+   WHERE pod = '$PODMONITORED_POD' AND container = 'main' AND name = 'podmonitored_main_requests_total'"
 assert "main's scrapes count 4 samples scraped, 2 after relabeling; the worker's 1 and 1" \
   "SELECT bool_and(CASE container WHEN 'main' THEN s = 4 AND p = 2 WHEN 'worker' THEN s = 1 AND p = 1 END) AND count(DISTINCT container) = 2
    FROM (SELECT container, time, max(value) FILTER (WHERE name = 'scrape_samples_scraped') AS s,
                 max(value) FILTER (WHERE name = 'scrape_samples_post_metric_relabeling') AS p
-         FROM metrics WHERE pod LIKE 'podmonitored-%' AND name LIKE 'scrape_samples_%' GROUP BY container, time)"
+         FROM metrics WHERE pod = '$PODMONITORED_POD' AND name LIKE 'scrape_samples_%' GROUP BY container, time)"
 assert "main is scraped every 20 s (its endpoint's interval), the worker every 15 s (the default)" \
   "WITH g AS (SELECT container, epoch(time) - epoch(lag(time) OVER (PARTITION BY pod, container ORDER BY time)) AS gap
               FROM metrics WHERE pod LIKE 'podmonitored-%' AND name = 'up')
