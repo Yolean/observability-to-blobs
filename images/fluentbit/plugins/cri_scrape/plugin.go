@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"unsafe"
 
 	"github.com/fluent/fluent-bit-go/input"
+	"github.com/ugorji/go/codec"
 )
 
 // cri_scrape is a Fluent Bit Go input plugin: it discovers pods on this node
@@ -363,17 +365,35 @@ func setInt(rec map[string]interface{}, key string, v int64) {
 	}
 }
 
-func (st *pluginState) enqueue(ts time.Time, recs []map[string]interface{}) {
-	enc := input.NewEncoder()
+// msgpack is fluent-bit-go's encoding (input.NewEncoder) with map keys in
+// sorted order. Its own leaves them in Go's map order, which differs from
+// one encode to the next, and a consumer that compares maps as values,
+// as DuckDB's MAP does, then counts one series as several.
+var msgpack = func() *codec.MsgpackHandle {
+	h := &codec.MsgpackHandle{}
+	h.WriteExt = true
+	h.Canonical = true
+	h.SetBytesExt(reflect.TypeOf(input.FLBTime{}), 0, &input.FLBTime{})
+	return h
+}()
+
+// encode is recs as Fluent Bit entries at ts, one after another.
+func encode(ts time.Time, recs []map[string]interface{}) []byte {
 	buf := make([]byte, 0, 512*len(recs))
 	for _, rec := range recs {
-		packed, err := enc.Encode([]interface{}{input.FLBTime{Time: ts}, rec})
+		var packed []byte
+		err := codec.NewEncoderBytes(&packed, msgpack).Encode([]interface{}{input.FLBTime{Time: ts}, rec})
 		if err != nil {
 			log.Printf("[cri_scrape] encode: %v", err)
 			continue
 		}
 		buf = append(buf, packed...)
 	}
+	return buf
+}
+
+func (st *pluginState) enqueue(ts time.Time, recs []map[string]interface{}) {
+	buf := encode(ts, recs)
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if st.queued+len(recs) > st.queueMax {

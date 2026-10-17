@@ -358,3 +358,31 @@ func TestExpandTargetsOtelUndeclaredNeedsOwnEnabled(t *testing.T) {
 		t.Fatalf("unexpected %+v", got)
 	}
 }
+
+// A label map is encoded with its keys in sorted order, the same every
+// time, so that its JSON line is the same text for the same series.
+func TestEncodeSortsMapKeys(t *testing.T) {
+	labels := map[string]string{}
+	for _, k := range []string{"mode", "cpu", "zone", "a", "le", "code", "instance_id", "b"} {
+		labels[k] = "v"
+	}
+	rec := func() []map[string]interface{} {
+		return []map[string]interface{}{{"table": "metrics", "samples": []map[string]interface{}{{"name": "x", "labels": labels}}}}
+	}
+	ts := time.Unix(1700000000, 0)
+	first := encode(ts, rec())
+	for i := 0; i < 20; i++ {
+		if got := encode(ts, rec()); string(got) != string(first) {
+			t.Fatalf("encode %d differs from the first", i)
+		}
+	}
+	last := -1
+	for _, k := range []string{"a", "b", "code", "cpu", "instance_id", "le", "mode", "zone"} {
+		// a msgpack fixstr: 0xa0 plus the length, then the bytes
+		i := strings.Index(string(first), string([]byte{byte(0xa0 + len(k))})+k)
+		if i <= last {
+			t.Fatalf("key %q at %d, after the previous key at %d", k, i, last)
+		}
+		last = i
+	}
+}
