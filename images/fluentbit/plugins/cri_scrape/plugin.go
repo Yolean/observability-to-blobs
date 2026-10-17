@@ -108,7 +108,7 @@ func FLBPluginInit(plugin unsafe.Pointer) int {
 		st.wg.Add(1)
 		go func() {
 			defer st.wg.Done()
-			sc.run(ctx, t, s.job)
+			sc.run(ctx, t, s.scrape)
 		}()
 	}
 
@@ -140,7 +140,7 @@ type config struct {
 
 type staticTarget struct {
 	target target
-	job    string
+	scrape string
 }
 
 // parseConfig reads and validates every setting; get returns def for an
@@ -190,22 +190,23 @@ func parseConfig(get func(key, def string) string) (config, error) {
 		if spec == "" {
 			continue
 		}
-		t, job, err := parseStaticTarget(spec)
+		t, name, err := parseStaticTarget(spec)
 		if err != nil {
 			return config{}, fmt.Errorf("static_targets: %w", err)
 		}
-		c.statics = append(c.statics, staticTarget{target: t, job: job})
+		c.statics = append(c.statics, staticTarget{target: t, scrape: name})
 	}
 	return c, nil
 }
 
-// static_targets: comma-separated "job@host:port/path", e.g.
+// static_targets: comma-separated "scrape@host:port/path", the name before
+// the @ being the rows' scrape, e.g.
 // "node@127.0.0.1:2021/metrics" for node_exporter metrics served by
 // fluent-bit's own prometheus_exporter output.
 func parseStaticTarget(spec string) (target, string, error) {
-	job, rest, ok := strings.Cut(spec, "@")
+	name, rest, ok := strings.Cut(spec, "@")
 	if !ok {
-		return target{}, "", fmt.Errorf("%q: expected job@host:port/path", spec)
+		return target{}, "", fmt.Errorf("%q: expected scrape@host:port/path", spec)
 	}
 	hostport, path, _ := strings.Cut(rest, "/")
 	host, portStr, ok := strings.Cut(hostport, ":")
@@ -216,7 +217,7 @@ func parseStaticTarget(spec string) (target, string, error) {
 	if err != nil {
 		return target{}, "", fmt.Errorf("%q: bad port: %v", spec, err)
 	}
-	return target{key: "static/" + spec, scheme: "http", host: host, port: port, path: "/" + path}, job, nil
+	return target{key: "static/" + spec, scheme: "http", host: host, port: port, path: "/" + path}, name, nil
 }
 
 func (st *pluginState) discoveryLoop(ctx context.Context, disc *criDiscoverer, sc *scraper, every time.Duration) {
@@ -293,7 +294,7 @@ func (st *pluginState) enqueueScrape(s scrape) {
 		"time":      s.Time.UTC().Format(timeFormat),
 		"cluster":   st.cluster,
 		"node":      st.node,
-		"job":       s.Job,
+		"scrape":    s.Scrape,
 		"instance":  s.Instance,
 		"namespace": s.Namespace,
 		"pod":       s.Pod,
@@ -303,6 +304,9 @@ func (st *pluginState) enqueueScrape(s scrape) {
 	}
 	if s.Restart != nil {
 		rec["restart"] = *s.Restart
+	}
+	for k, v := range s.Workload.fields() {
+		rec[k] = v
 	}
 	st.enqueue(s.Time, []map[string]interface{}{rec})
 }

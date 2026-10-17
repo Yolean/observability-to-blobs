@@ -34,8 +34,18 @@ CREATE OR REPLACE VIEW raw AS
       priority:'INTEGER',           -- journal rows: syslog priority
       message:'VARCHAR',
       -- metrics: one line per scrape
-      job:'VARCHAR',                -- pod | node
+      scrape:'VARCHAR',             -- the scrape path: pod (annotations) | node (the agent's
+                                    -- node_exporter and own metrics) | host (a host agent)
+      job:'VARCHAR',                -- scrape's name in objects written before it was renamed
       instance:'VARCHAR',           -- ip:port
+      -- the pod's controllers, by the OpenTelemetry semantic conventions' k8s.*.name
+      -- (README.md, "Workload names"); absent when the pod has none of that kind
+      k8s_deployment_name:'VARCHAR',
+      k8s_replicaset_name:'VARCHAR',
+      k8s_statefulset_name:'VARCHAR',
+      k8s_daemonset_name:'VARCHAR',
+      k8s_job_name:'VARCHAR',
+      k8s_cronjob_name:'VARCHAR',
       samples:'STRUCT(name VARCHAR, type VARCHAR, labels MAP(VARCHAR, VARCHAR), value DOUBLE)[]',
       -- podindex: pod-observed | pod-checkpoint | pod-deleted | container | container-exit
       kind:'VARCHAR',

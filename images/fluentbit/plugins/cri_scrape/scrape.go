@@ -24,13 +24,14 @@ import (
 // the samples into one row each.
 type scrape struct {
 	Time      time.Time
-	Job       string
+	Scrape    string // the scrape path: pod, or a static target's name (node, host)
 	Instance  string
 	Namespace string
 	Pod       string
 	PodUID    string
 	Container string
 	Restart   *int32 // absent when the target names no running container
+	Workload  workload
 	Samples   []sample
 }
 
@@ -74,7 +75,7 @@ func newScraper(interval, timeout time.Duration, bodySizeLimit int64, emit func(
 // scraped in one burst; after that the loop is sequential, so a target is
 // never asked for metrics while the previous request is still in flight, and
 // a slow pod is asked less often, not more.
-func (s *scraper) run(ctx context.Context, t target, job string) {
+func (s *scraper) run(ctx context.Context, t target, scrapePath string) {
 	interval := s.interval
 	if t.interval > 0 {
 		interval = t.interval
@@ -90,7 +91,7 @@ func (s *scraper) run(ctx context.Context, t target, job string) {
 	failures := 0
 	for {
 		start := time.Now()
-		err := s.scrapeOnce(ctx, t, job, start)
+		err := s.scrapeOnce(ctx, t, scrapePath, start)
 		if err != nil {
 			failures++
 			if ctx.Err() == nil {
@@ -115,12 +116,12 @@ func (s *scraper) run(ctx context.Context, t target, job string) {
 	}
 }
 
-func (s *scraper) scrapeOnce(parent context.Context, t target, job string, start time.Time) error {
+func (s *scraper) scrapeOnce(parent context.Context, t target, scrapePath string, start time.Time) error {
 	ctx, cancel := context.WithTimeout(parent, s.timeout)
 	defer cancel()
 
-	out := scrape{Time: start, Job: job, Instance: t.instance(),
-		Namespace: t.namespace, Pod: t.pod, PodUID: t.podUID, Container: t.container, Restart: t.restart}
+	out := scrape{Time: start, Scrape: scrapePath, Instance: t.instance(),
+		Namespace: t.namespace, Pod: t.pod, PodUID: t.podUID, Container: t.container, Restart: t.restart, Workload: t.workload}
 	up := 0.0
 	scraped := 0
 	defer func() {

@@ -181,7 +181,7 @@ func TestParseConfigDefaults(t *testing.T) {
 		c.podindexCheckpoint != time.Hour || c.bodyLimit != 8<<20 || c.queueMax != 100000 {
 		t.Fatalf("defaults: %+v", c)
 	}
-	if len(c.statics) != 2 || c.statics[0].job != "node" || c.statics[1].target.path != "/api/v2/metrics/prometheus" {
+	if len(c.statics) != 2 || c.statics[0].scrape != "node" || c.statics[1].target.path != "/api/v2/metrics/prometheus" {
 		t.Fatalf("statics: %+v", c.statics)
 	}
 }

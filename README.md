@@ -33,9 +33,12 @@ Every line is one event with a `table` field:
   opts in via `prometheus.io/*` annotations or the OpenTelemetry port-scoped
   hints (multi-container pods opt in per port; "Scrape annotations"
   below), plus node_exporter and the
-  agent's own metrics, with the samples as an array and the target's
-  `pod_uid`. A target's `metric_relabel_configs` can drop samples and
-  labels before they are written ("Metric relabeling" below).
+  agent's own metrics, with the samples as an array, the target's
+  `pod_uid`, `scrape`, the scrape path (`pod` for an annotated pod, `node`
+  for node_exporter and the agent's own metrics, `host` for a host
+  agent's), and the pod's controllers ("Workload names" below). A
+  target's `metric_relabel_configs` can drop samples and labels before
+  they are written ("Metric relabeling" below).
 - **podindex**: pod and container lifecycle events from the CRI
   (`pod-observed`, `pod-checkpoint`, `pod-deleted`, `container`,
   `container-exit`), the source of "which incarnations of this pod name
@@ -191,6 +194,41 @@ annotate such a pod yourself: the webhook leaves a pod with any
 `io.opentelemetry.discovery.*` or `prometheus.io/*` annotation alone,
 every port included, so one port annotated by hand turns off the
 PodMonitor's other ports for that pod.
+
+### Workload names
+
+Each scraped pod's rows carry the pod's controllers, named as the
+OpenTelemetry semantic conventions name them (all stable), with dots as
+underscores, as in Prometheus: `k8s_deployment_name`,
+`k8s_replicaset_name`, `k8s_statefulset_name`, `k8s_daemonset_name`,
+`k8s_job_name` and `k8s_cronjob_name`, each absent when the pod has none
+of that kind. The tailer makes them series labels, so rules can group by
+workload rather than by pod.
+
+The Collector's k8sattributes processor reads them from the pod's
+`ownerReferences`, which the container runtime does not have; the agent
+reads the labels each controller puts on its pods instead, and applies
+the processor's own rules where it derives one name from another
+(`images/fluentbit/plugins/cri_scrape/workload.go`):
+
+| pod label | names |
+|---|---|
+| `batch.kubernetes.io/job-name` (or `job-name`) | the Job; the CronJob when the Job is named `<cronjob>-<8 digits>`, the minute it was scheduled, within a day of the pod's creation |
+| `statefulset.kubernetes.io/pod-name`, the pod's own name | the StatefulSet: the name less `-<ordinal>` |
+| `pod-template-hash` | the ReplicaSet: the name less its generated suffix, when that ends in `-<hash>`; the Deployment: the ReplicaSet less `-<hash>` |
+| `controller-revision-hash`, and none of the above | the DaemonSet: the name less its generated suffix |
+
+Where that is wrong:
+
+- A Job named `<x>-<8 digits>` that runs within a day of that minute is
+  taken for a CronJob's, as by the processor.
+- A ReplicaSet orphaned from its Deployment (deleted with
+  `--cascade=orphan`) still names the Deployment.
+- Other controllers (Argo Rollouts, OpenKruise and the like) give no
+  names, or with `controller-revision-hash` look like a DaemonSet.
+- A pod whose owner's name is over 58 characters has a cut generated
+  name, and then no ReplicaSet, Deployment or DaemonSet.
+- Static pods, bare pods and the static targets (node, host) carry none.
 
 ### What the annotations cannot do
 
@@ -513,10 +551,13 @@ The alerting tailer (`images/blobs-to-prometheus`, reading `raw1/`):
   rewrites every `ROLLING_INTERVAL`: samples arrive that much later (plus
   the upload interval), which rules' ranges and `for:` have to allow for,
   and the reader needs the Parquet keys.
-- The compactor's own label `job` (rolling, past, rollup) collides with the
-  meta label `job`; the tailer stores it as `exported_job`, as a scrape with
-  `honor_labels: false` does, so the rule its README names selects
-  `blobs_compactor_last_success_timestamp_seconds{exported_job="rolling"}`.
-  So does the compactor's label `cluster`, the cluster a series is about:
-  it arrives as `exported_cluster`, and `cluster` is the cluster whose
-  agent scraped the compactor.
+- The series' labels are the row's cluster, node, `scrape`, instance,
+  namespace, pod, container and workload names ("Workload names"), then
+  the sample's own. A sample label named like one of those is stored as
+  `exported_<name>`, as a scrape with `honor_labels: false` does. There is
+  no `job` among them, so a target's own `job` stays `job`: the
+  compactor's (rolling, past, rollup) is selected as
+  `blobs_compactor_last_success_timestamp_seconds{job="rolling"}`. Its
+  label `cluster`, the cluster a series is about, arrives as
+  `exported_cluster`, and `cluster` is the cluster whose agent scraped the
+  compactor.

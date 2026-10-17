@@ -26,14 +26,14 @@ run() { row=$("$hb"); }
 
 echo "counter"
 run
-check "the first run is a metrics row of job node for the node's instance" \
-  '.table == "metrics" and .job == "node" and .instance == "testnode:2023"'
+check "the first run is a metrics row of scrape node for the node's instance" \
+  '.table == "metrics" and .scrape == "node" and .instance == "testnode:2023"'
 check "one sample, a counter named observability_host_heartbeat, value 1" \
   '(.samples | length) == 1 and .samples[0].name == "observability_host_heartbeat" and .samples[0].type == "counter" and .samples[0].value == 1'
 check "the boot id is the sample's only label" \
   '.samples[0].labels == {"boot_id": "aaaaaaaa-1111-2222-3333-444444444444"}'
 check "the row has no other key than raw.sql's" \
-  '(keys - ["table","time","job","instance","samples"]) == []'
+  '(keys - ["table","time","scrape","instance","samples"]) == []'
 check "time is UTC to the nanosecond, as the node agent's scrapes have it" \
   '.time | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{9}Z$")'
 run; run

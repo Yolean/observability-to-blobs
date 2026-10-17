@@ -24,21 +24,33 @@ import (
 // metaLabels are the line's columns that become series labels, in the
 // order Prometheus would have them as target labels. A sample label of
 // the same name is renamed exported_<name>, as a Prometheus scrape with
-// honor_labels: false does, so no series carries a label twice.
-var metaLabels = []string{"cluster", "node", "job", "instance", "namespace", "pod", "container"}
+// honor_labels: false does, so no series carries a label twice. There is
+// no job: scrape names the scrape path, so a target's own job label stays
+// job.
+var metaLabels = []string{"cluster", "node", "scrape", "instance", "namespace", "pod", "container",
+	"k8s_deployment_name", "k8s_replicaset_name", "k8s_statefulset_name", "k8s_daemonset_name",
+	"k8s_job_name", "k8s_cronjob_name"}
 
 type rawLine struct {
-	Table     string      `json:"table"`
-	Time      string      `json:"time"`
-	TS        string      `json:"ts"`
-	Cluster   string      `json:"cluster"`
-	Node      string      `json:"node"`
-	Job       string      `json:"job"`
-	Instance  string      `json:"instance"`
-	Namespace string      `json:"namespace"`
-	Pod       string      `json:"pod"`
-	Container string      `json:"container"`
-	Samples   []rawSample `json:"samples"`
+	Table     string `json:"table"`
+	Time      string `json:"time"`
+	TS        string `json:"ts"`
+	Cluster   string `json:"cluster"`
+	Node      string `json:"node"`
+	Scrape    string `json:"scrape"`
+	Job       string `json:"job"` // scrape, in lines written before it was renamed
+	Instance  string `json:"instance"`
+	Namespace string `json:"namespace"`
+	Pod       string `json:"pod"`
+	Container string `json:"container"`
+	// the pod's controllers (README.md, "Workload names")
+	Deployment  string      `json:"k8s_deployment_name"`
+	ReplicaSet  string      `json:"k8s_replicaset_name"`
+	StatefulSet string      `json:"k8s_statefulset_name"`
+	DaemonSet   string      `json:"k8s_daemonset_name"`
+	K8sJob      string      `json:"k8s_job_name"`
+	CronJob     string      `json:"k8s_cronjob_name"`
+	Samples     []rawSample `json:"samples"`
 }
 
 type rawSample struct {
@@ -130,8 +142,15 @@ func decodeLines(r io.Reader, keep *selectorSet) (*batch, error) {
 			continue
 		}
 		b.lines++
-		meta := map[string]string{"cluster": l.Cluster, "node": l.Node, "job": l.Job,
-			"instance": l.Instance, "namespace": l.Namespace, "pod": l.Pod, "container": l.Container}
+		scrape := l.Scrape
+		if scrape == "" {
+			scrape = l.Job
+		}
+		meta := map[string]string{"cluster": l.Cluster, "node": l.Node, "scrape": scrape,
+			"instance": l.Instance, "namespace": l.Namespace, "pod": l.Pod, "container": l.Container,
+			"k8s_deployment_name": l.Deployment, "k8s_replicaset_name": l.ReplicaSet,
+			"k8s_statefulset_name": l.StatefulSet, "k8s_daemonset_name": l.DaemonSet,
+			"k8s_job_name": l.K8sJob, "k8s_cronjob_name": l.CronJob}
 		for _, s := range l.Samples {
 			if s.Name == "" {
 				continue

@@ -279,7 +279,7 @@ func (s *session) printPlan(w io.Writer) error {
 // The views schema describes, in the order an investigation reads them.
 var viewDocs = []struct{ name, doc string }{
 	{"logs", "log lines: containers' (namespace, pod, pod_uid, container, restart) and the node's journal (namespace _node, pod NULL, unit)"},
-	{"metrics", "one row per scraped sample: name, type, labels (MAP), value; job pod or node"},
+	{"metrics", "one row per scraped sample: name, type, labels (MAP), value; scrape pod, node or host; k8s_*_name the pod's controllers"},
 	{"podindex", "pod and container events: pod-observed, pod-checkpoint, pod-deleted, container, container-exit"},
 	{"pods", "one row per (pod_uid, container, restart) seen in logs, metrics or podindex, with first/last log, exit and limits"},
 	{"apiserver", "the cluster agent's rows: object-added/-modified/-deleted/-snapshot and snapshot markers, apijson the object"},

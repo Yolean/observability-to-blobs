@@ -37,9 +37,9 @@ func zstdLines(t *testing.T, lines ...string) []byte {
 }
 
 // metricsLine is a metrics line as the agent writes it (cri_scrape's enqueueScrape).
-func metricsLine(at time.Time, node, job, ns, samples string) string {
-	return fmt.Sprintf(`{"table":"metrics","time":"%s","ts":"%s","cluster":"c1","node":"%s","job":"%s","instance":"10.0.0.1:9100","namespace":"%s","pod":"p","pod_uid":"u","container":"c","samples":[%s]}`,
-		at.UTC().Format("2006-01-02T15:04:05.000000000Z"), at.UTC().Format("2006-01-02T15:04:05.000000Z"), node, job, ns, samples)
+func metricsLine(at time.Time, node, scrape, ns, samples string) string {
+	return fmt.Sprintf(`{"table":"metrics","time":"%s","ts":"%s","cluster":"c1","node":"%s","scrape":"%s","instance":"10.0.0.1:9100","namespace":"%s","pod":"p","pod_uid":"u","container":"c","k8s_deployment_name":"web","k8s_replicaset_name":"web-5d8f7c9b4f","samples":[%s]}`,
+		at.UTC().Format("2006-01-02T15:04:05.000000000Z"), at.UTC().Format("2006-01-02T15:04:05.000000Z"), node, scrape, ns, samples)
 }
 
 func TestDecodeLines(t *testing.T) {
@@ -71,7 +71,8 @@ func TestDecodeLines(t *testing.T) {
 	if x == nil {
 		t.Fatalf("no x_total in %v", b.order)
 	}
-	want := "__name__=x_total cluster=c1 code=200 container=c exported_job=inner instance=10.0.0.1:9100 job=pod namespace=ns1 node=n1 pod=p"
+	// the target's own job stays job; the scrape path is scrape
+	want := "__name__=x_total cluster=c1 code=200 container=c instance=10.0.0.1:9100 job=inner k8s_deployment_name=web k8s_replicaset_name=web-5d8f7c9b4f namespace=ns1 node=n1 pod=p scrape=pod"
 	if got := fmtLabels(x.labels); got != want {
 		t.Fatalf("labels\n got %s\nwant %s", got, want)
 	}
@@ -369,5 +370,21 @@ func TestTailerEveryCluster(t *testing.T) {
 	}
 	if got := strings.Join(rcv.names, ","); got != "one,two,three" {
 		t.Fatalf("pushed %q after c3 appeared", got)
+	}
+}
+
+// A line written before job was renamed scrape: its job is the scrape.
+func TestDecodeLegacyJob(t *testing.T) {
+	at := time.Date(2026, 10, 8, 14, 0, 5, 0, time.UTC)
+	line := strings.Replace(metricsLine(at, "n1", "node", "ns1", `{"name":"up","type":"gauge","labels":{},"value":1}`), `"scrape":`, `"job":`, 1)
+	b, err := decodeObject(zstdLines(t, line), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := labelValue(b.series[b.order[0]].labels, "scrape"); got != "node" {
+		t.Fatalf("scrape %q, want node", got)
+	}
+	if got := labelValue(b.series[b.order[0]].labels, "job"); got != "" {
+		t.Fatalf("job %q, want none", got)
 	}
 }

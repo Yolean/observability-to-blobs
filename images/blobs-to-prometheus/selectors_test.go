@@ -46,16 +46,17 @@ func TestSelectorMatching(t *testing.T) {
 }
 
 // A selector sees the labels as stored: an exposed label named like a
-// set meta label is exported_<name>, and . matches a newline as in PromQL.
+// set meta label is exported_<name>, job is no meta label and stays job,
+// and . matches a newline as in PromQL.
 func TestSelectorSeesStoredLabels(t *testing.T) {
 	s := loadFrom(t, `{"selectors":[
-		{"name":"blobs_compactor_last_success_timestamp_seconds","matchers":[{"label":"exported_job","type":"=","value":"rolling"}]},
+		{"name":"blobs_compactor_last_success_timestamp_seconds","matchers":[{"label":"job","type":"=","value":"rolling"},{"label":"exported_cluster","type":"=","value":"c2"}]},
 		{"name":"msg","matchers":[{"label":"text","type":"=~","value":"a.b"}]}
 	]}`)
 	ls := seriesLabels("blobs_compactor_last_success_timestamp_seconds",
-		map[string]string{"job": "pod"}, map[string]string{"job": "rolling"})
+		map[string]string{"scrape": "pod", "cluster": "c1"}, map[string]string{"job": "rolling", "cluster": "c2"})
 	if !s.matches(ls) {
-		t.Fatalf("exported_job: %v", ls)
+		t.Fatalf("job and exported_cluster: %v", ls)
 	}
 	if !s.matches(seriesLabels("msg", nil, map[string]string{"text": "a\nb"})) {
 		t.Fatal("(?s): a newline is not matched by .")

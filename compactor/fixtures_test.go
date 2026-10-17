@@ -96,8 +96,17 @@ func journalLine(t time.Time, msg string) line {
 		"unit": "k3s.service", "priority": 6, "message": msg}
 }
 
+// legacyScrapeLine is scrapeLine as agents wrote it before job was
+// renamed scrape.
+func legacyScrapeLine(t time.Time, ns, pod, uid, container string, restart int, name string, value float64) line {
+	l := scrapeLine(t, ns, pod, uid, container, restart, name, value)
+	l["job"] = l["scrape"]
+	delete(l, "scrape")
+	return l
+}
+
 func scrapeLine(t time.Time, ns, pod, uid, container string, restart int, name string, value float64) line {
-	return line{"table": "metrics", "time": ts(t), "ts": ts(t), "cluster": testCluster, "node": "n1", "job": "pod",
+	return line{"table": "metrics", "time": ts(t), "ts": ts(t), "cluster": testCluster, "node": "n1", "scrape": "pod",
 		"instance": "10.0.0.1:9090", "namespace": ns, "pod": pod, "pod_uid": uid, "container": container,
 		"restart": restart, "samples": []any{
 			map[string]any{"name": name, "type": "gauge", "labels": map[string]string{"code": "200"}, "value": value},
