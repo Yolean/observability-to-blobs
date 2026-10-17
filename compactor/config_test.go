@@ -49,6 +49,14 @@ func TestConfigDefaults(t *testing.T) {
 	}
 }
 
+// Without CLUSTER_NAME the loop compacts every cluster in the bucket.
+func TestConfigEveryCluster(t *testing.T) {
+	c, err := parseConfig(envOf(bucketEnv(map[string]string{"CLUSTER_NAME": ""})))
+	if err != nil || c.cluster != "" {
+		t.Fatalf("%+v %v", c, err)
+	}
+}
+
 func TestConfigRefuses(t *testing.T) {
 	for _, tc := range []struct {
 		env  map[string]string
@@ -59,6 +67,9 @@ func TestConfigRefuses(t *testing.T) {
 		{map[string]string{"PAST_INTERVAL": "61m"}, "PAST_INTERVAL 1h1m0s: at most 1h0m0s"},
 		{map[string]string{"RAW_DELETE": "yes"}, "RAW_DELETE"},
 		{map[string]string{"CLUSTER_NAME": "a/b"}, "CLUSTER_NAME"},
+		{map[string]string{"CLUSTER_NAME": "", "LOGS_LISTEN": ":8080"}, "LOGS_LISTEN needs CLUSTER_NAME"},
+		{map[string]string{"CLUSTER_NAME": "", "PUT_LISTEN": ":8081"}, "PUT_LISTEN needs CLUSTER_NAME"},
+		{map[string]string{"CLUSTER_NAME": "", "RAW_SOURCE": "spool", "SPOOL_DIR": "/spool"}, "RAW_SOURCE=spool needs CLUSTER_NAME"},
 		{map[string]string{"S3_BUCKET": ""}, "S3_BUCKET is required"},
 		{map[string]string{"ROLLING_INTERVAL": "0s"}, "ROLLING_INTERVAL"},
 		{map[string]string{"S3_TLS": "maybe"}, "S3_TLS"},

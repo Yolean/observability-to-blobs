@@ -73,7 +73,7 @@ func newCompactor(c config, log *slog.Logger) (*compactor, error) {
 		retries = c.httpRetries
 	}
 	cp := &compactor{l: layout{c.cluster}, raw: raw, tiers: tiers, db: db, grace: c.grace,
-		rawDelete: c.rawDelete, threads: c.threads, retries: retries, log: log, m: newMetrics(),
+		rawDelete: c.rawDelete, threads: c.threads, retries: retries, log: log, m: newMetrics(c.cluster),
 		keysDir: c.parquetKeysDir, keyID: c.parquetKeyID, sortRows: sortRows(c.memoryLimit)}
 	if sp, ok := raw.(*spool); ok {
 		cp.m.spool = sp.stats

@@ -447,6 +447,36 @@ and a stopped compactor leaves a quiet bucket. A job that outlasts
 other: its temporary objects are swept and its keys folded again. `fold <date> <HH>` and `rollup <date>`
 run one job by hand with the same environment, while no loop runs.
 
+### Every cluster of a bucket
+
+With `CLUSTER_NAME` empty, one `run` compacts every cluster that writes
+to the bucket, each into its own `hourly/{cluster}/` and
+`daily/{cluster}/`, as a compactor of that cluster alone would:
+
+- **Finding clusters.** The rolling pass first lists `raw1/` for
+  clusters that are new since the last tick (one request), and the past
+  pass, the first tick after a start included, also lists `hourly/`, so
+  a cluster whose raw objects are all folded and deleted still gets its
+  last rollups. The tiers stay the only state. A cluster is never dropped:
+  one that stops writing keeps its passes, which find nothing to do.
+  A name under `raw1/` that is not a cluster name is left alone.
+- **One cluster after another.** Each pass runs for every cluster in
+  name order, on one engine, so memory is what the largest single job
+  needs, as with one cluster. A failed fold or rollup is logged and its
+  pass goes on, so a cluster whose jobs fail costs the others their time,
+  at most `JOB_TIMEOUT` each, and nothing else. The bounds on the raw
+  tier's age (above) hold while one pass over every cluster takes under
+  25m.
+- **One writer per cluster.** Such a compactor writes every cluster it
+  finds: no other compactor may write any of them.
+- **What needs a cluster.** The logs API, the put endpoint and spool mode
+  serve one cluster's agent or readers, so `LOGS_LISTEN`, `PUT_LISTEN`
+  and `RAW_SOURCE=spool` refuse to start without `CLUSTER_NAME`, and so do
+  `fold`, `rollup` and `serve`.
+- **Metrics** carry a `cluster` label on every series (below), with or
+  without `CLUSTER_NAME`, and the log a `cluster` attribute on every line
+  of a cluster's jobs.
+
 ### Raw deletion
 
 Off by default. With `RAW_DELETE=after-final`, once an hour's final fold
@@ -896,7 +926,8 @@ Service from everyone else.
   only with `RAW_DELETE=after-final`. The compactor deletes nothing else
   in the tiers.
 - env, set by overlays where the base has none: `CLUSTER_NAME` (as the
-  agent names it), `S3_BUCKET`, `S3_ENDPOINT` (host:port; a scheme is
+  agent names it; empty for every cluster of the bucket, above),
+  `S3_BUCKET`, `S3_ENDPOINT` (host:port; a scheme is
   stripped), `S3_REGION` (us-east-1), `S3_TLS` (on), `ROLLING_INTERVAL`
   (2m, at most 5m), `GRACE` (10m, at most 30m), `PAST_INTERVAL` (1h, at
   most 1h), `RAW_DELETE`
@@ -925,7 +956,9 @@ Service from everyone else.
   namespace's compressed rows, not with the day in the engine's format,
   and the memory share sets the run size.
 - `prometheus.io/scrape` and `prometheus.io/port: "9090"` for `/metrics`,
-  written with stdlib text exposition:
+  written with stdlib text exposition, every series labelled `cluster`,
+  the cluster it is about (a tailer whose rows carry the scraping
+  cluster's `cluster` stores it as `exported_cluster`):
   `blobs_compactor_last_success_timestamp_seconds{job}` and
   `blobs_compactor_last_duration_seconds{job}` (jobs `rolling`, `past`,
   `rollup`), `blobs_compactor_runs_total{job,result}`,

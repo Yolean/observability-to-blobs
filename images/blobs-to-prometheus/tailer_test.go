@@ -114,6 +114,25 @@ func (f *fakeStore) list(_ context.Context, prefix string) ([]string, error) {
 	return keys, nil
 }
 
+func (f *fakeStore) dirs(_ context.Context, prefix string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	seen := map[string]bool{}
+	var dirs []string
+	for k := range f.objects {
+		rest, ok := strings.CutPrefix(k, prefix)
+		if i := strings.Index(rest, "/"); ok && i >= 0 && !seen[rest[:i]] {
+			seen[rest[:i]] = true
+			dirs = append(dirs, prefix+rest[:i+1])
+		}
+	}
+	sort.Strings(dirs)
+	return dirs, nil
+}
+
 func (f *fakeStore) get(_ context.Context, key string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -311,10 +330,44 @@ func TestTailerSelectors(t *testing.T) {
 }
 
 func TestHourOf(t *testing.T) {
-	if got := hourOf("c1", "raw1/c1/2026-10-08/14/n1/2000-1.jsonl.zst"); got != "raw1/c1/2026-10-08/14/" {
+	if got := hourOf("raw1/c1/2026-10-08/14/n1/2000-1.jsonl.zst"); got != "raw1/c1/2026-10-08/14/" {
 		t.Fatal(got)
 	}
 	if got := producer("raw1/c1/2026-10-08/14/", "raw1/c1/2026-10-08/14/_k8sagent/0000-x.jsonl.zst"); got != "_k8sagent" {
 		t.Fatal(got)
+	}
+}
+
+// With no CLUSTER_NAME every cluster under raw1/ is tailed, each line's
+// series with its own cluster label; one is found when it appears.
+func TestTailerEveryCluster(t *testing.T) {
+	now := time.Date(2026, 10, 8, 14, 20, 0, 0, time.UTC)
+	line := func(cluster, name string) []byte {
+		return zstdLines(t, strings.Replace(metricsLine(now, "n1", "node", "", `{"name":"`+name+`","labels":{},"value":1}`),
+			`"cluster":"c1"`, `"cluster":"`+cluster+`"`, 1))
+	}
+	st := &fakeStore{objects: map[string][]byte{
+		"raw1/c1/2026-10-08/14/n1/2000-1.jsonl.zst":            line("c1", "one"),
+		"raw1/c2/2026-10-08/14/n1/2000-1.jsonl.zst":            line("c2", "two"),
+		"raw1/Not_A_Cluster/2026-10-08/14/n1/2000-1.jsonl.zst": line("x", "never"),
+	}}
+	rcv := &receiver{}
+	srv := httptest.NewServer(rcv)
+	t.Cleanup(srv.Close)
+	tl := newTailer(config{lookback: 3 * time.Hour}, st, &remoteWriter{url: srv.URL, client: &http.Client{Timeout: 5 * time.Second}}, nil)
+	if err := tl.pass(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(rcv.names, ","); got != "one,two" {
+		t.Fatalf("pushed %q, want one,two", got)
+	}
+	st.mu.Lock()
+	st.objects["raw1/c3/2026-10-08/14/n1/2010-1.jsonl.zst"] = line("c3", "three")
+	st.mu.Unlock()
+	if err := tl.pass(context.Background(), now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(rcv.names, ","); got != "one,two,three" {
+		t.Fatalf("pushed %q after c3 appeared", got)
 	}
 }

@@ -5,8 +5,10 @@
 // arrive per node, not in global time order.
 //
 // It reads raw1/{cluster}/{date}/{HH}/{producer}/{MMSS}-{uuid}.jsonl.zst
-// (README.md, "What the agent ships"). Every POLL it LISTs the hour
-// prefixes from LOOKBACK ago to now, and pushes every key it has not
+// (README.md, "What the agent ships"), of CLUSTER_NAME, or with no
+// CLUSTER_NAME of every cluster that has a prefix under raw1/, which every
+// pass lists again. Every POLL it LISTs the hour prefixes from LOOKBACK
+// ago to now, and pushes every key it has not
 // pushed yet, oldest first per producer: the metrics lines' samples, with
 // the line's cluster, node, job, instance, namespace, pod and container
 // as labels. So a new Prometheus, or one whose volume was lost, comes back
@@ -34,6 +36,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -86,8 +89,11 @@ func main() {
 	}
 	endpoint := envDefault("S3_ENDPOINT", "")
 	bucket := envDefault("S3_BUCKET", "")
-	if endpoint == "" || bucket == "" || cfg.cluster == "" {
-		log.Fatal("S3_ENDPOINT, S3_BUCKET and CLUSTER_NAME are required")
+	if endpoint == "" || bucket == "" {
+		log.Fatal("S3_ENDPOINT and S3_BUCKET are required")
+	}
+	if cfg.cluster != "" && !clusterRE.MatchString(cfg.cluster) {
+		log.Fatalf("CLUSTER_NAME %q: want a lowercase name of letters, digits, '-', '_' and '.'", cfg.cluster)
 	}
 	endpoint = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(endpoint, "https://"), "http://"), "/")
 	st := &s3Store{bucket: bucket, endpoint: endpoint, tls: envDefault("S3_TLS", "off") == "on",
@@ -103,7 +109,11 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	log.Printf("tailing raw1/%s/ from %s back, every %s", cfg.cluster, cfg.lookback, cfg.poll)
+	what := "raw1/" + cfg.cluster + "/"
+	if cfg.cluster == "" {
+		what = "every cluster under raw1/"
+	}
+	log.Printf("tailing %s from %s back, every %s", what, cfg.lookback, cfg.poll)
 	t.run(ctx)
 }
 
@@ -111,6 +121,8 @@ func main() {
 type store interface {
 	// list returns every key under prefix
 	list(ctx context.Context, prefix string) ([]string, error)
+	// dirs returns the prefixes one level under prefix, each ending in /
+	dirs(ctx context.Context, prefix string) ([]string, error)
 	// get returns an object's body; errNotFound when it is gone
 	get(ctx context.Context, key string) ([]byte, error)
 }
@@ -156,11 +168,35 @@ func (t *tailer) run(ctx context.Context) {
 	}
 }
 
-// hourPrefixes are the raw1 hour prefixes from now-LOOKBACK to now, oldest first.
-func (t *tailer) hourPrefixes(now time.Time) []string {
+// clusterRE is the compactor's: a cluster name is one plain key segment.
+var clusterRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9_.]*[a-z0-9])?$`)
+
+// clusters is CLUSTER_NAME, or every cluster with a prefix under raw1/.
+func (t *tailer) clusters(ctx context.Context) ([]string, error) {
+	if t.cfg.cluster != "" {
+		return []string{t.cfg.cluster}, nil
+	}
+	dirs, err := t.st.dirs(ctx, "raw1/")
+	if err != nil {
+		return nil, fmt.Errorf("list raw1/: %w", err)
+	}
 	var out []string
-	for h := now.Add(-t.cfg.lookback).UTC().Truncate(time.Hour); !h.After(now); h = h.Add(time.Hour) {
-		out = append(out, fmt.Sprintf("raw1/%s/%s/", t.cfg.cluster, h.Format("2006-01-02/15")))
+	for _, d := range dirs {
+		if c := strings.TrimSuffix(strings.TrimPrefix(d, "raw1/"), "/"); clusterRE.MatchString(c) {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+// hourPrefixes are the clusters' raw1 hour prefixes from now-LOOKBACK to
+// now, oldest first per cluster.
+func (t *tailer) hourPrefixes(clusters []string, now time.Time) []string {
+	var out []string
+	for _, c := range clusters {
+		for h := now.Add(-t.cfg.lookback).UTC().Truncate(time.Hour); !h.After(now); h = h.Add(time.Hour) {
+			out = append(out, fmt.Sprintf("raw1/%s/%s/", c, h.Format("2006-01-02/15")))
+		}
 	}
 	return out
 }
@@ -169,7 +205,14 @@ func (t *tailer) hourPrefixes(now time.Time) []string {
 // first failure that a later pass may not have, so that per producer the
 // keys go in order.
 func (t *tailer) pass(ctx context.Context, now time.Time) error {
-	hours := t.hourPrefixes(now)
+	clusters, err := t.clusters(ctx)
+	if err != nil {
+		t.mu.Lock()
+		t.m.lastFailure = float64(now.Unix())
+		t.mu.Unlock()
+		return err
+	}
+	hours := t.hourPrefixes(clusters, now)
 	keepHours := map[string]bool{}
 	for _, h := range hours {
 		keepHours[h] = true
@@ -179,7 +222,7 @@ func (t *tailer) pass(ctx context.Context, now time.Time) error {
 			delete(t.done, h)
 		}
 	}
-	err := t.passHours(ctx, hours)
+	err = t.passHours(ctx, hours)
 	t.mu.Lock()
 	if err != nil {
 		t.m.lastFailure = float64(now.Unix())
@@ -211,7 +254,7 @@ func (t *tailer) passHours(ctx context.Context, hours []string) error {
 			pending = append(pending, k)
 		}
 	}
-	// key order is hour, producer, MMSS: time order per producer
+	// key order is cluster, hour, producer, MMSS: time order per producer
 	sort.Strings(pending)
 	t.mu.Lock()
 	t.m.keysPending = len(pending)
@@ -230,7 +273,7 @@ func (t *tailer) passHours(ctx context.Context, hours []string) error {
 		if err != nil {
 			log.Printf("%s: %v", k, err)
 		}
-		t.done[hourOf(t.cfg.cluster, k)][k] = true
+		t.done[hourOf(k)][k] = true
 	}
 	return nil
 }
@@ -278,14 +321,12 @@ func (t *tailer) pushKey(ctx context.Context, key string) (string, error) {
 }
 
 // hourOf is the hour prefix raw1/{cluster}/{date}/{HH}/ of a key.
-func hourOf(cluster, key string) string {
-	root := "raw1/" + cluster + "/"
-	rest := strings.TrimPrefix(key, root)
-	parts := strings.SplitN(rest, "/", 3)
-	if len(parts) < 3 {
-		return root + rest
+func hourOf(key string) string {
+	parts := strings.SplitN(key, "/", 5)
+	if len(parts) < 5 {
+		return key
 	}
-	return root + parts[0] + "/" + parts[1] + "/"
+	return strings.Join(parts[:4], "/") + "/"
 }
 
 // producer is the key's segment after the hour: a node name, or a
