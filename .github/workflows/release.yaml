@@ -79,6 +79,7 @@ jobs:
       run: |
         cd dist
         sha256sum -c ./*.tar.gz.sha256
+        sudo apt-get update
         sudo apt-get install -y --no-install-recommends libyaml-0-2 libsystemd0
         mkdir root && tar -xzf ./*.tar.gz -C root
         root/bin/fluent-bit --version
