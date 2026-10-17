@@ -6,6 +6,7 @@ require (
 	github.com/Yolean/observability-to-blobs/images/fluentbit/plugins/k8s_objects v0.0.0-00010101000000-000000000000
 	github.com/aws/aws-sdk-go-v2 v1.47.1
 	github.com/aws/aws-sdk-go-v2/config v1.33.6
+	github.com/aws/aws-sdk-go-v2/credentials v1.20.6
 	github.com/duckdb/duckdb-go/v2 v2.10506.0
 	github.com/golang/snappy v1.0.0
 	github.com/klauspost/compress v1.19.0
@@ -18,7 +19,6 @@ require (
 
 require (
 	github.com/apache/arrow-go/v18 v18.5.1 // indirect
-	github.com/aws/aws-sdk-go-v2/credentials v1.20.6 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.1 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.4 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.4 // indirect

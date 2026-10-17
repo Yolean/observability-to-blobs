@@ -288,3 +288,18 @@ func TestResolveClusterWithoutCredential(t *testing.T) {
 		t.Fatalf("%q %v", c, err)
 	}
 }
+
+// An endpoint with a path is refused, not cut to its host.
+func TestEndpointWithAPath(t *testing.T) {
+	awsEnv(t, "")
+	t.Setenv("AWS_ACCESS_KEY_ID", "k")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "s")
+	t.Setenv("AWS_ENDPOINT_URL_S3", "https://objects.example.net/s3")
+	if _, err := awsStore(context.Background(), ""); exitOf(err) != exitUsage || !strings.Contains(err.Error(), "has a path") {
+		t.Fatalf("%v", err)
+	}
+	t.Setenv("AWS_ENDPOINT_URL_S3", "https://objects.example.net/")
+	if st, err := awsStore(context.Background(), ""); err != nil || st.endpoint != "objects.example.net" {
+		t.Fatalf("a bare slash: %q %v", st.endpoint, err)
+	}
+}

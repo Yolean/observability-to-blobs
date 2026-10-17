@@ -242,6 +242,10 @@ func awsStore(ctx context.Context, profile string) (storeConfig, error) {
 		if err != nil || u.Host == "" {
 			return storeConfig{}, fail(exitUsage, "the S3 endpoint %q%s is not a URL such as https://objects.example.net", endpoint, ofProfile(profile))
 		}
+		if strings.Trim(u.Path, "/") != "" || u.RawQuery != "" {
+			// path-style requests put the bucket where a path would go
+			return storeConfig{}, fail(exitUsage, "the S3 endpoint %q%s has a path; y-obs takes scheme, host and port only", endpoint, ofProfile(profile))
+		}
 		st.endpoint, st.tls = u.Host, u.Scheme != "http"
 	}
 	if creds.CanExpire {
