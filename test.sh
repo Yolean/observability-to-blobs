@@ -1448,8 +1448,9 @@ GRANT
     expect "y-obs prometheus: following moves the loaded window's end ($PUSHED_TO to $PUSHED_TO2)" test "${PUSHED_TO2:-0}" -gt "${PUSHED_TO:-0}"
     expect "y-obs prometheus: a repeated call reuses the instance" prom_reused
     # past the first grant's 80 s: each poll resolves the chain again, which
-    # runs the credential_process, and the reads after the expiry work
-    sleep 20
+    # runs the credential_process, and the reads after the expiry work; as
+    # long a wait as the following check's above, for a poll and a scrape
+    sleep 45
     PUSHED_TO3=$(prom_pushed to)
     expect "y-obs prometheus: still following past the first grant's expiry ($PUSHED_TO2 to $PUSHED_TO3), the credential_process run $(grant_runs) times" \
       test "${PUSHED_TO3:-0}" -gt "${PUSHED_TO2:-0}" -a "$(grant_runs)" -ge 2
