@@ -468,8 +468,8 @@ assert "within a boot the counter goes up by one, never repeats and never skips"
   "SELECT bool_and(n = pn + 1) AND count(*) = count(DISTINCT (boot, n)) FROM ($STEPS) WHERE pn IS NOT NULL"
 assert "the node's reboot starts a new boot id, and the counter starts at 1 again" \
   "SELECT count(DISTINCT boot) >= 2 AND bool_and(first_n = 1) FROM (SELECT boot, min(n) AS first_n FROM ($HEARTBEATS) GROUP BY boot)"
-assert "the heartbeat row is job node, with the node's name and port in instance" \
-  "SELECT count(*) >= 1 AND bool_and(job = 'node' AND instance LIKE '%:2023' AND cluster = '$CLUSTER') FROM metrics WHERE name = 'observability_host_heartbeat'"
+assert "the heartbeat row is scrape node, with the node's name and port in instance" \
+  "SELECT count(*) >= 1 AND bool_and(scrape = 'node' AND instance LIKE '%:2023' AND cluster = '$CLUSTER') FROM metrics WHERE name = 'observability_host_heartbeat'"
 echo "  restart flag as the node serves it:"
 vm "curl -s http://127.0.0.1:2023/metrics | grep -E '^(node_reboot_required|node_(cpu|load|memory)|fluentbit_output_proc_records_total)' | cut -c1-120 | head -8" | sed 's/^/    /' || true
 check "the node serves the restart flag and the agent's own metrics, and no node_* of the machine (HOST_NODE_COLLECTORS=textfile)" \
@@ -516,8 +516,8 @@ assert "journal lines carry exactly table, cluster, node, stream, unit, priority
 assert "file lines carry exactly table, cluster, node, stream, unit, message and ts" \
   "SELECT list_sort(list_distinct(flatten(list(json_keys(json))))) = ['cluster', 'message', 'node', 'stream', 'table', 'ts', 'unit']
    FROM $RAW_OBJECTS WHERE json_extract_string(json, 'stream') = 'file'"
-assert "heartbeat lines carry exactly table, cluster, node, job, instance, samples, time and ts" \
-  "SELECT list_sort(list_distinct(flatten(list(json_keys(json))))) = ['cluster', 'instance', 'job', 'node', 'samples', 'table', 'time', 'ts']
+assert "heartbeat lines carry exactly table, cluster, node, scrape, instance, samples, time and ts" \
+  "SELECT list_sort(list_distinct(flatten(list(json_keys(json))))) = ['cluster', 'instance', 'node', 'samples', 'scrape', 'table', 'time', 'ts']
    FROM $RAW_OBJECTS WHERE json_extract_string(json, 'table') = 'metrics'"
 assert "a sample carries exactly name, type, labels and value" \
   "SELECT list_sort(list_distinct(flatten(list(json_keys(json_extract(json, '\$.samples[0]')))))) = ['labels', 'name', 'type', 'value']

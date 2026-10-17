@@ -364,6 +364,8 @@ phase "cluster: apply"
 # manifest must recreate them, so apply always starts from absence
 $KUBECTL delete pod metrics-multi metrics-classic metrics-numeric metrics-optout \
   --ignore-not-found --grace-period=1 >/dev/null
+# and a Job runs once: delete it so that every run scrapes it
+$KUBECTL delete job owner-job --ignore-not-found >/dev/null
 # the prometheus-operator CRDs, as a cluster without the operator gets them
 # (operator-to-annotations/README.md); too large for a client-side apply
 $KUBECTL apply --server-side -k operator-to-annotations/crds >/dev/null
@@ -917,7 +919,8 @@ assert "container log lines carry exactly the contract keys (no Lua, no leaked p
 # does not pin would be silently ignored, a pinned field no line carries
 # is a rename or a typo. Journal-only fields are absent on the docker
 # backend; exit_message is only set when the runtime has one.
-if [ "$BACKEND" = docker ]; then ABSENT_OK="['unit', 'priority', 'exit_message']"; else ABSENT_OK="['exit_message']"; fi
+# job is scrape's name in older objects; no line has it now.
+if [ "$BACKEND" = docker ]; then ABSENT_OK="['unit', 'priority', 'exit_message', 'job']"; else ABSENT_OK="['exit_message', 'job']"; fi
 assert "every field the agent emits is a pinned column of compactor/sql/raw.sql (offenders listed)" \
   "WITH seen AS (SELECT list_distinct(flatten(list(json_keys(json)))) AS keys FROM $RAW_OBJECTS),
         pinned AS (SELECT list(column_name) AS cols FROM (DESCRIBE raw))
@@ -1058,6 +1061,17 @@ assert "no metrics line has job: scrape names the scrape path" \
 assert "a Deployment's pod's samples carry its Deployment and ReplicaSet (README.md, \"Workload names\")" \
   "SELECT count(*) > 0 AND bool_and(k8s_deployment_name = 'podmonitored' AND k8s_replicaset_name LIKE 'podmonitored-%'
      AND k8s_daemonset_name IS NULL AND k8s_job_name IS NULL) FROM metrics WHERE pod LIKE 'podmonitored-%' AND pod <> 'podmonitored-preannotated'"
+# owners <pod LIKE pattern> <condition>: the workload name columns as k=v,...
+# on the rows of that pod's gauge, meet the condition
+owners() {
+  echo "SELECT count(*) > 0 AND bool_and(concat_ws(',', 'd=' || k8s_deployment_name, 'rs=' || k8s_replicaset_name,
+       'sts=' || k8s_statefulset_name, 'ds=' || k8s_daemonset_name, 'job=' || k8s_job_name, 'cj=' || k8s_cronjob_name) $2)
+     FROM metrics WHERE pod LIKE '$1' AND name LIKE 'owner_%'"
+}
+assert "a StatefulSet's pod carries its StatefulSet only" "$(owners 'owner-sts-%' "= 'sts=owner-sts'")"
+assert "a DaemonSet's pod carries its DaemonSet only" "$(owners 'owner-ds-%' "= 'ds=owner-ds'")"
+assert "a Job's pod carries its Job only" "$(owners 'owner-job-%' "= 'job=owner-job'")"
+assert "a CronJob's pod carries its Job and its CronJob" "$(owners 'owner-cron-%' "SIMILAR TO 'job=owner-cron-[0-9]{8},cj=owner-cron'")"
 assert "a bare pod's samples and the static targets' carry no workload" \
   "SELECT count(*) > 0 AND bool_and(coalesce(k8s_deployment_name, k8s_replicaset_name, k8s_statefulset_name, k8s_daemonset_name,
      k8s_job_name, k8s_cronjob_name) IS NULL) FROM metrics WHERE pod = 'metrics-multi' OR scrape = 'node'"
