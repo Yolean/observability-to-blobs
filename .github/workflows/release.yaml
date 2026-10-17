@@ -1,12 +1,17 @@
-name: host
+name: release
 
-# Release tarballs of the host agent (HOST_MODE.md): a tag v* builds
-# images/fluentbit/host/build.sh on a native runner per arch, the same
-# script a developer runs, smoke-tests the binary on the distribution it
-# was built for, and attaches each tarball and its .sha256 to the tag's
-# release as observability-to-blobs-host-<version>-linux-<arch>.tar.gz,
-# the version being the tag without its v. workflow_dispatch builds
-# without releasing.
+# A tag v* releases the binaries of the tagged commit, all on one release
+# of that tag, each with its .sha256 beside it:
+#   - tools/y-obs as obs-{os}-{arch} (tools/y-obs/README.md, "Release"),
+#     built by tools/y-obs/release.sh on a native runner per platform:
+#     duckdb-go links prebuilt static libraries through cgo, so there is
+#     no cross compiling; ystack's y-bin entry adds the y- prefix;
+#   - the host agent as observability-to-blobs-host-<version>-linux-<arch>.tar.gz
+#     (HOST_MODE.md), built by images/fluentbit/host/build.sh on a native
+#     runner per arch, the version being the tag without its v.
+# Each build is smoke-tested on its runner. One job attaches them all once
+# every build has passed, so a release never has some of them.
+# workflow_dispatch builds without releasing.
 on:
   push:
     tags: ['v*']
@@ -16,7 +21,38 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  y-obs:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: tools/y-obs/go.mod
+        cache-dependency-path: tools/y-obs/go.sum
+    - name: Build
+      env:
+        VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'dev' }}
+      run: tools/y-obs/release.sh dist "$VERSION"
+    - name: Smoke test
+      # the engine, the embedded extension and the embedded views, without
+      # a bucket: version loads nothing, schema reads an empty raw tier
+      run: |
+        bin=$(ls dist/obs-* | grep -v sha256)
+        "$bin" version
+        "$bin" version | grep -q '^httpfs embedded'
+        "$bin" schema logs | grep -q '^message'
+        "$bin" sql --blobs-dir "$RUNNER_TEMP" --cluster smoke "SELECT count(*) AS n FROM logs"
+    - uses: actions/upload-artifact@v7
+      with:
+        name: obs-${{ matrix.runner }}
+        path: dist/
+        if-no-files-found: error
+
+  host:
     strategy:
       fail-fast: false
       matrix:
@@ -56,7 +92,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [y-obs, host]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

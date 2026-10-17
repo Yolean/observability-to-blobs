@@ -10,7 +10,7 @@
 >   when `setup-envtest` or `KUBEBUILDER_ASSETS` provides the release;
 > - contexts, `auth` with cache and renewal, and `mint-stub`;
 > - the window planner (each hour from one tier), `pods`, `exits`, `logs`, `grep` and `metrics`;
-> - release builds with httpfs embedded (`release.sh`, `.github/workflows/y-obs.yaml`), and `version`;
+> - release builds with httpfs embedded (`release.sh`, `.github/workflows/release.yaml`), and `version`;
 > - `prometheus`: a local Prometheus UI over the bucket;
 > - `status`: contexts, credentials, instances, and each cluster's tiers.
 > The rest is design.
@@ -74,8 +74,10 @@ Two things make this possible now:
   into a temporary table of the rows it scopes to, which its query and
   its follow-up questions (a cut count, the closest names) then read.
 
-**Release.** A tag `y-obs-v*` runs `.github/workflows/y-obs.yaml`. It
-builds four binaries, linux/amd64, linux/arm64, darwin/arm64 and
+**Release.** A tag `v*` of the repository runs
+`.github/workflows/release.yaml`, which releases y-obs with the host
+agent's tarballs on that tag's release; there are no y-obs tags of its
+own. It builds four binaries, linux/amd64, linux/arm64, darwin/arm64 and
 darwin/amd64, each on a native runner: duckdb-go links prebuilt static
 libraries per platform through cgo, so there is no cross compiling.
 
