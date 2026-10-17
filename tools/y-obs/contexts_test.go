@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -331,6 +333,28 @@ func TestStatusExitCodes(t *testing.T) {
 	e.Reset()
 	err := runStatus(context.Background(), nil, &o, &e, time.Now())
 	if exitOf(err) != exitUsage || !strings.Contains(e.String(), "has a path") || !strings.Contains(o.String(), "AWS_PROFILE env") {
+		t.Fatalf("%v\n%s\n%s", err, o.String(), e.String())
+	}
+}
+
+// A store that refuses the listing: status still shows its other
+// sections, says why in a note, and exits 3.
+func TestStatusStoreRefusal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`<?xml version="1.0"?><Error><Code>AccessDenied</Code><Message>Access Denied.</Message></Error>`))
+	}))
+	defer srv.Close()
+	awsEnv(t, "")
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AWS_ACCESS_KEY_ID", "k")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "s")
+	t.Setenv("AWS_ENDPOINT_URL_S3", srv.URL)
+	t.Setenv("S3_BUCKET", "b")
+	var o, e strings.Builder
+	err := runStatus(context.Background(), nil, &o, &e, time.Now())
+	if exitOf(err) != exitAuth || !strings.Contains(o.String(), "## prometheus") || !strings.Contains(e.String(), "AccessDenied: Access Denied.") ||
+		!strings.Contains(e.String(), "in bucket b;") || strings.Contains(e.String(), "<Error>") {
 		t.Fatalf("%v\n%s\n%s", err, o.String(), e.String())
 	}
 }

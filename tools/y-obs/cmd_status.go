@@ -134,14 +134,19 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer, now
 		case *cluster != "":
 			clusters = []string{*cluster}
 		default:
+			// a bucket that cannot be listed is a note and the exit code;
+			// the other sections are still shown
 			if clusters, err = s.clusters(ctx); err != nil {
-				return err
+				notes = append(notes, "no data section: "+err.Error())
+				storeErr = err
 			}
 		}
 		for _, c := range clusters {
 			r, err := s.clusterStatus(ctx, c, *full, now)
 			if err != nil {
-				return err
+				notes = append(notes, fmt.Sprintf("cluster %s: %v", c, err))
+				storeErr = err
+				continue
 			}
 			rows = append(rows, r...)
 		}

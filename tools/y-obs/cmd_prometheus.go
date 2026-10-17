@@ -261,8 +261,12 @@ func cmdPrometheus(ctx context.Context, args []string) error {
 			lines := strings.Split(strings.TrimSpace(string(tail)), "\n")
 			return fail(exitStore, "the server stopped: %s (log %s)", lines[len(lines)-1], logPath)
 		}
+		// a load that failed: stop the server and leave its log, which the
+		// error names, and nothing else
 		syscall.Kill(st.PID, syscall.SIGTERM)
 		os.Remove(statePath)
+		os.Remove(progressPath)
+		os.Remove(ready)
 		return err
 	}
 	if b, err := os.ReadFile(logPath); err == nil {
