@@ -961,14 +961,19 @@ Service from everyone else.
   cluster's `cluster` stores it as `exported_cluster`):
   `blobs_compactor_last_success_timestamp_seconds{job}` and
   `blobs_compactor_last_duration_seconds{job}` (jobs `rolling`, `past`,
-  `rollup`), `blobs_compactor_runs_total{job,result}`,
+  `rollup`), `blobs_compactor_runs_total{job,result}` (every job's
+  `success` and `failure` from 0 at the start, so the first failure is an
+  increase),
   `blobs_compactor_rows{tier,table}` (rows of the last object written),
   `blobs_compactor_raw_keys_read_total`, `blobs_compactor_raw_deleted_total`,
   `blobs_compactor_raw_objects` and `blobs_compactor_raw_oldest_age_seconds`
   (by upload time, aging between listings), and
   `blobs_compactor_parquet_keys_missing`,
   `blobs_compactor_unaccounted_total` (above, "Raw deletion"), and in
-  spool mode the put and spool families (above). The raw gauges are per
+  spool mode the put and spool families (above); and the process's own
+  `process_start_time_seconds` (a restart, an OOM kill's included, is a
+  new value) and `process_resident_memory_bytes` (DuckDB's included),
+  without a cluster label. The raw gauges are per
   hour as its
   latest listing saw it, less what was deleted since: every fold lists its
   hour, the rolling pass's folds too, and the past pass lists every hour,

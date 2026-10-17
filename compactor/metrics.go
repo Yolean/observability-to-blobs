@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,9 +69,39 @@ func summarize(objs []Object, deleted []string) rawSummary {
 }
 
 func newMetrics(cluster string) *metrics {
-	return &metrics{cluster: cluster, now: time.Now, lastSuccess: map[string]float64{}, lastDuration: map[string]float64{},
+	m := &metrics{cluster: cluster, now: time.Now, lastSuccess: map[string]float64{}, lastDuration: map[string]float64{},
 		runs: map[[2]string]float64{}, rows: map[[2]string]float64{}, rawHours: map[time.Time]rawSummary{},
 		puts: map[string]float64{}}
+	// every job's counters from the start, so that the first failure after
+	// a start is an increase from 0, not a series that appears
+	for _, job := range []string{"rolling", "past", "rollup"} {
+		for _, result := range []string{"success", "failure"} {
+			m.runs[[2]string{job, result}] = 0
+		}
+	}
+	return m
+}
+
+// processStart is when this process started, near enough: a restart, an
+// OOM kill's included, shows as a new value (process_start_time_seconds).
+var processStart = time.Now()
+
+// residentBytes is the process's resident memory, DuckDB's included, from
+// /proc/self/statm; false where there is none.
+func residentBytes() (float64, bool) {
+	b, err := os.ReadFile("/proc/self/statm")
+	if err != nil {
+		return 0, false
+	}
+	f := strings.Fields(string(b))
+	if len(f) < 2 {
+		return 0, false
+	}
+	pages, err := strconv.ParseFloat(f[1], 64)
+	if err != nil {
+		return 0, false
+	}
+	return pages * float64(os.Getpagesize()), true
 }
 
 // put records one request to the put endpoint: stored, duplicate,
@@ -272,6 +303,14 @@ func writeMetrics(w io.Writer, ms []*metrics) {
 	single("blobs_compactor_unaccounted_total", func(m *metrics) float64 { return m.unaccounted })
 	family("blobs_compactor_parquet_keys_missing", "gauge", "Parquet key ids that tier object names (or PARQUET_KEY_ID) carry and PARQUET_KEYS_DIR lacks; folds and rollups refuse while it is above 0.")
 	single("blobs_compactor_parquet_keys_missing", func(m *metrics) float64 { return m.keysMissed })
+	// the process's own, once, as client_golang's process collector names
+	// them
+	family("process_start_time_seconds", "gauge", "Start time of the process since unix epoch in seconds.")
+	fmt.Fprintf(&b, "process_start_time_seconds %s\n", num(float64(processStart.UnixMilli())/1000))
+	if rss, ok := residentBytes(); ok {
+		family("process_resident_memory_bytes", "gauge", "Resident memory size in bytes.")
+		fmt.Fprintf(&b, "process_resident_memory_bytes %s\n", num(rss))
+	}
 	if !spooled {
 		io.WriteString(w, b.String())
 		return

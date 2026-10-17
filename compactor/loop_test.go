@@ -245,8 +245,10 @@ func TestRunEndsOnAnAddressItCannotBind(t *testing.T) {
 		go func() { done <- w.c.run(w.ctx, cfg) }()
 		select {
 		case err := <-done:
-			if len(w.c.m.runs) != 0 {
-				t.Fatalf("passes ran before the run ended (%v): %v", err, w.c.m.runs)
+			for k, n := range w.c.m.runs {
+				if n != 0 {
+					t.Fatalf("passes ran before the run ended (%v): %v %v", err, k, n)
+				}
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("run: %v, want a %s error", err, tc.want)

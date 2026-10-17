@@ -168,6 +168,10 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
       cd "$mod"
       unformatted=$(gofmt -l .)
       [ -z "$unformatted" ] || fail "gofmt: $unformatted"
+      # the code without its tests, which vet and test compile with them
+      bin=$(mktemp -d)
+      go build -o "$bin" ./...
+      rm -rf "$bin"
       go vet ./...
       go test ./...
     )
