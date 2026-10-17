@@ -544,7 +544,10 @@ the AWS CLI does, and has no credential settings of its own:
   (or half its remaining life, when shorter) by resolving the chain
   again, which runs `credential_process` again. Until then a process
   keeps it, so `y-obs prometheus`, whose polls and remote reads each
-  open a session, runs the process once per credential. A cluster that
+  open a session, runs the process once per credential. A credential
+  the store refuses is dropped, so the next session resolves the chain
+  again: a new grant is taken up, and a revoked one is refused by its
+  source. A cluster that
   `--cluster` or the context names needs no credential, so
   `prometheus --stop` asks for none. The new secret replaces
   the database's from a second connection, so a running query carries
@@ -587,7 +590,8 @@ the AWS CLI does, and has no credential settings of its own:
   `--context` picks one, else `Y_OBS_CONTEXT`, else `current`, else the
   only one. `y-obs contexts` lists them; `y-obs status` also resolves the
   one in use and shows its endpoint and its credential's source and
-  expiry, and exits 3 when it gets no credential.
+  expiry, and exits with the error's code (3 for a credential) when it
+  cannot read the bucket.
 
 What issues the credentials (a grant service behind `credential_process`,
 an SSO role, a reader key) is the deployment's; y-obs needs read and list

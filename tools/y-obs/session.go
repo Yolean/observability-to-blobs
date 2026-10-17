@@ -221,8 +221,9 @@ type session struct {
 type storeConfig struct {
 	bucket, endpoint, region, keyID, secret, token string
 	tls                                            bool
-	// source is where the credential came from, for messages
-	source string
+	// source is where the credential came from, for messages; profile is
+	// the one it was resolved for, its key in the process's cache
+	source, profile string
 	// expires is the credential's expiry, zero for static keys; it is
 	// renewed margin before
 	expires time.Time
@@ -529,6 +530,7 @@ func (s *session) wrap(err error) error {
 		if source == "" {
 			source = "the AWS default chain"
 		}
+		forgetStore(s.store.profile)
 		return fail(exitAuth, "the store refused the credentials of %s: %s", source, msg)
 	case strings.Contains(msg, "Out of Memory Error"):
 		if i := strings.Index(msg, " Possible solutions:"); i > 0 {

@@ -200,6 +200,12 @@ func cmdPrometheus(ctx context.Context, args []string) error {
 	if err != nil {
 		return fail(exitUsage, "%v", err)
 	}
+	if sf.blobsDir == "" {
+		// a credential the server would be refused: before anything starts
+		if _, _, err := storeFor(ctx, sf.context, sf.bucket); err != nil {
+			return err
+		}
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -249,6 +255,8 @@ func cmdPrometheus(ctx context.Context, args []string) error {
 	if err != nil {
 		if errors.Is(err, errServerExited) {
 			os.Remove(statePath)
+			os.Remove(progressPath)
+			os.Remove(ready)
 			tail, _ := os.ReadFile(logPath)
 			lines := strings.Split(strings.TrimSpace(string(tail)), "\n")
 			return fail(exitStore, "the server stopped: %s (log %s)", lines[len(lines)-1], logPath)
