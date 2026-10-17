@@ -185,6 +185,13 @@ io.opentelemetry.discovery.metrics.9901/config: |
 `prometheus.io/*` has no counterpart: a pod that needs rules uses the
 OpenTelemetry form.
 
+A pod that a PodMonitor selects gets its rules from the PodMonitor's
+`metricRelabelings`, which operator-to-annotations translates. Do not
+annotate such a pod yourself: the webhook leaves a pod with any
+`io.opentelemetry.discovery.*` or `prometheus.io/*` annotation alone,
+every port included, so one port annotated by hand turns off the
+PodMonitor's other ports for that pod.
+
 ### What the annotations cannot do
 
 By design, and so permanently:
