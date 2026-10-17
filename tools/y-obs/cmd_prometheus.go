@@ -151,17 +151,9 @@ func cmdPrometheus(ctx context.Context, args []string) error {
 		return err
 	}
 	contextName := contextName(sf.context, cfg)
-	cluster := sf.cluster
-	if cluster == "" && sf.blobsDir == "" {
-		_, scope, err := storeFor(ctx, sf.context)
-		if err != nil {
-			return err
-		}
-		if cluster, err = clusterFor("", scope); err != nil {
-			return err
-		}
-	} else if cluster == "" {
-		return fail(exitUsage, "no cluster: pass --cluster or set CLUSTER_NAME")
+	cluster, err := resolveCluster(ctx, &sf)
+	if err != nil {
+		return err
 	}
 	key := promKey(contextName, cluster)
 	statePath := filepath.Join(promStateDir(), key+".json")

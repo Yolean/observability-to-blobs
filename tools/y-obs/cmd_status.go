@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,10 +17,10 @@ const statusUsage = `Usage: y-obs status [flags]
 
 What y-obs can reach, and what is there:
 
-  contexts    each context's bucket, endpoint and the clusters its
-              credential covers, and the credential: cached with its
-              expiry, none cached, or static keys from the environment;
-              the one in use marked *
+  contexts    each context's bucket, cluster and AWS profile, the one in
+              use marked *, and for that one the S3 endpoint and where
+              its credential comes from and until when (README.md,
+              "S3 access")
   prometheus  the running y-obs prometheus instances
   data        per cluster in the bucket in use and per tier (raw, hourly,
               daily): first and last hour or day, objects and bytes, the
@@ -44,9 +45,10 @@ type contextRow struct {
 	Context    string `json:"context"`
 	Current    bool   `json:"current"`
 	Bucket     string `json:"bucket"`
-	Endpoint   string `json:"endpoint"`
-	Clusters   string `json:"clusters"`
-	Credential string `json:"credential"`
+	Cluster    string `json:"cluster"`
+	Profile    string `json:"profile"`
+	Endpoint   string `json:"endpoint,omitempty"`
+	Credential string `json:"credential,omitempty"`
 }
 
 type instanceRow struct {
@@ -77,6 +79,7 @@ func cmdStatus(ctx context.Context, args []string) error {
 func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer, now time.Time) error {
 	fs := newFlagSet("status", statusUsage)
 	contextFlag := fs.String("context", "", "the context whose bucket the data section lists; default the one in use")
+	bucketFlag := fs.String("bucket", "", "the bucket the data section lists (env S3_BUCKET); default the context's")
 	cluster := fs.String("cluster", "", "only this cluster's data")
 	full := fs.Bool("full", false, "list all of raw, not its last 24 hours of data")
 	format := fs.String("format", "tsv", "tsv or json")
@@ -101,21 +104,26 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer, now
 		irows = append(irows, instanceRow{i.name, i.URL, i.Cluster, i.Window, i.Started.Format(time.RFC3339)})
 	}
 	s := &session{plan: map[string][]string{}}
-	var scope []string
+	// a credential that cannot be had is exit 3, after the rest is shown
+	var authErr error
 	switch {
 	case *blobsDir != "":
 		s.root = *blobsDir
 	default:
-		st, sc, err := storeFor(ctx, *contextFlag)
+		st, _, err := storeFor(ctx, *contextFlag, *bucketFlag)
 		if err != nil {
 			notes = append(notes, "no data section: "+err.Error())
+			if ee := (*exitError)(nil); errors.As(err, &ee) && ee.code == exitAuth {
+				authErr = err
+			}
 			break
 		}
-		if st.bucket == "" {
-			notes = append(notes, "no data section: no context and no S3_BUCKET; y-obs contexts -h shows how to add a context")
-			break
+		s.root, s.store = "s3://"+st.bucket, st
+		for i := range contexts {
+			if contexts[i].Current {
+				contexts[i].Endpoint, contexts[i].Credential = st.endpoint, credentialNote(contexts[i].Profile, st)
+			}
 		}
-		s.root, s.store, scope = "s3://"+st.bucket, st, sc
 	}
 	var rows []tierRow
 	if s.root != "" {
@@ -123,9 +131,6 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer, now
 		switch {
 		case *cluster != "":
 			clusters = []string{*cluster}
-		case len(scope) > 0:
-			// a scoped credential may not list the bucket's root
-			clusters = scope
 		default:
 			if clusters, err = s.clusters(ctx); err != nil {
 				return err
@@ -150,13 +155,13 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer, now
 		}{contexts, irows, rows, notes})
 	} else {
 		fmt.Fprintln(stdout, "## contexts")
-		fmt.Fprintln(stdout, "context\tcurrent\tbucket\tendpoint\tclusters\tcredential")
+		fmt.Fprintln(stdout, "context\tcurrent\tbucket\tcluster\tprofile\tendpoint\tcredential")
 		for _, r := range contexts {
 			mark := ""
 			if r.Current {
 				mark = "*"
 			}
-			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\t%s\n", r.Context, mark, r.Bucket, r.Endpoint, r.Clusters, r.Credential)
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", r.Context, mark, r.Bucket, r.Cluster, r.Profile, r.Endpoint, r.Credential)
 		}
 		fmt.Fprintln(stdout, "\n## prometheus")
 		fmt.Fprintln(stdout, "instance\turl\tcluster\tloaded\tstarted")
@@ -182,11 +187,15 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer, now
 	}
 	fmt.Fprintf(stderr, "y-obs: status: %d contexts (in use: %s), %d prometheus instances, %d clusters in bucket %s; %d listing requests\n",
 		len(contexts), current, len(irows), len(clusters), bucket, s.listRequests)
+	if authErr != nil {
+		// the note above says why
+		return &exitError{code: exitAuth}
+	}
 	return nil
 }
 
 // statusContexts are the configured contexts and, when S3_BUCKET is set,
-// the environment's static keys; and the name of the one in use.
+// the environment's bucket; and the name of the one in use.
 func statusContexts(flagValue string) ([]contextRow, string, error) {
 	cfg, _, err := loadConfig()
 	if err != nil {
@@ -199,31 +208,19 @@ func statusContexts(flagValue string) ([]contextRow, string, error) {
 	}
 	sort.Strings(names)
 	var rows []contextRow
-	now := time.Now()
 	for _, n := range names {
 		cc := cfg.Contexts[n]
-		cred, clusters := "none cached: y-obs auth --context "+n, ""
-		if c, ok := cached(n, now); ok {
-			cred = fmt.Sprintf("cached, expires %s (in %s)", c.Expiration.UTC().Format(time.RFC3339), time.Until(c.Expiration).Round(time.Second))
-			clusters = strings.Join(c.Clusters, ",")
-			if clusters == "" {
-				clusters = "*"
-			}
+		profile := cc.Profile
+		if profile == "" {
+			profile = "(default chain)"
 		}
-		rows = append(rows, contextRow{n, n == current, cc.Bucket, cc.Endpoint, clusters, cred})
-	}
-	if os.Getenv("S3_BUCKET") != "" {
-		st := storeFromEnv()
-		cred := "static keys from the environment, no expiry"
-		if st.keyID == "" {
-			cred = "static, but AWS_ACCESS_KEY_ID is unset"
-		}
-		rows = append(rows, contextRow{"(environment)", current == "", st.bucket, st.endpoint, "*", cred})
+		rows = append(rows, contextRow{Context: n, Current: n == current, Bucket: cc.Bucket, Cluster: cc.Cluster, Profile: profile})
 	}
 	if current == "" {
-		current = "(environment)"
-		if os.Getenv("S3_BUCKET") == "" {
-			current = "none"
+		current = "none"
+		if b := os.Getenv("S3_BUCKET"); b != "" {
+			current = "(environment)"
+			rows = append(rows, contextRow{Context: current, Current: true, Bucket: b, Profile: "(default chain)"})
 		}
 	}
 	return rows, current, nil

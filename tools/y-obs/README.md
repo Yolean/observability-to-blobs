@@ -3,12 +3,13 @@
 > Draft for review. Open decisions are marked **Decide**; the rest is a
 > proposal to change freely. Built so far:
 > - `apiserver-at`;
-> - `sql` and `schema`, with static keys from the environment (as for
->   `local/blobs.sh`) or `--blobs-dir`;
+> - `sql` and `schema`, on the bucket or `--blobs-dir`;
 > - `--out`, `--db` and `--attach` on `sql`;
 > - `kubectl --at`, in-process: no duckdb CLI, temp files or go needed
 >   when `setup-envtest` or `KUBEBUILDER_ASSETS` provides the release;
-> - contexts, `auth` with cache and renewal, and `mint-stub`;
+> - S3 access through the AWS SDK's default credential chain
+>   (`credential_process` included), with renewal, and contexts that name
+>   a bucket, a cluster and an AWS profile;
 > - the window planner (each hour from one tier), `pods`, `exits`, `logs`, `grep` and `metrics`;
 > - release builds with httpfs embedded (`release.sh`, `.github/workflows/release.yaml`), and `version`;
 > - `prometheus`: a local Prometheus UI over the bucket;
@@ -146,8 +147,8 @@ output into its context, and cannot see a progress bar. So:
    - 0: ok, results printed;
    - 1: ok, nothing matched;
    - 2: usage, a SQL syntax error or unknown column included;
-   - 3: credentials (the token command, the mint, or the store refusing
-     the key; also a cluster outside the credential's scope);
+   - 3: credentials (none in the AWS chain, a `credential_process` that
+     fails or refuses, or the store refusing the key);
    - 4: not in the bucket, with what is: the pod's containers, the
      closest pod or metric names, DuckDB's "did you mean" for a view;
      and when the window has no object at all, the clusters with data,
@@ -184,16 +185,14 @@ y-obs <command> [flags]
   schema        views, columns, meanings
   prometheus    a local Prometheus UI: the window loaded, older ranges on query
   kubectl       kubectl against the cluster as it was at a time (read-only)
-  auth          get or show the read credential (never prints the secret)
-  contexts      the configured contexts and the clusters their credential covers
+  contexts      the configured contexts: bucket, cluster and AWS profile
   version       y-obs, DuckDB and Go versions, and where httpfs comes from
-  mint-stub     development only: a mint handing out static keys
   apiserver-at  serve a state file to kubectl (what kubectl and the itest use)
 ```
 
 Shared flags of the commands that read the bucket:
 
-- `--context`, `--cluster`, `--node`;
+- `--context`, `--bucket`, `--cluster`, `--node`;
 - `--since=1h`, or `--from=T` and `--to=T`;
 - `--limit`, `--format`, `--explain`, `--max-objects`;
 - `--out=FILE.duckdb[:TABLE]`, `--append`, `--attach=FILE.duckdb`;
@@ -223,9 +222,9 @@ What y-obs can reach, and what is there, in three sections (TSV with a
 header each, or one JSON object):
 
 - **contexts.** Like `kubectl config get-contexts`: each context's
-  bucket, endpoint and the clusters its credential covers, and the
-  credential (cached with its expiry, none cached, or static keys from
-  the environment), with the one in use marked. Never the secret.
+  bucket, cluster and AWS profile, the one in use marked, and for that
+  one the S3 endpoint and where its credential comes from and until
+  when. Never the secret.
 - **prometheus.** The running `y-obs prometheus` instances.
 - **data.** Per cluster in the bucket in use, and per tier (raw,
   hourly, daily):
@@ -357,8 +356,7 @@ target (pod_uid, container, instance) and label set. The subcommands:
   at a value.
 
 `--where key=value` and `--by key,...` take labels or the namespace,
-pod, pod_uid, container, node, scrape (`--scrape`, or `--job` as
-before the column was renamed) and instance columns, and the workload
+pod, pod_uid, container, node, scrape (`--scrape`) and instance columns, and the workload
 names (`k8s_deployment_name` and the rest). `--agg` (sum,
 avg, max, min) combines the series sharing the `--by` keys. An unknown
 name is exit 4, with the closest names in the window.
@@ -531,101 +529,70 @@ The views are those of `local/blobs.sh`. `--since`, `-n` and `--name`
 scope the raw view's files, so the budget guard applies. `--tier=hourly`
 reads the `hourly_*` views instead.
 
-### auth and contexts
+### S3 access
 
-A context is what one credential can read: one bucket at one endpoint,
-and the mint that hands out its read credentials. The credential's scope
-may narrow the bucket to some clusters; `--cluster` picks among them,
-and defaults to the only one.
+y-obs reads the bucket with the AWS SDK's default credential chain, as
+the AWS CLI does, and has no credential settings of its own:
 
-`~/.config/y-obs/contexts.yaml` (or `Y_OBS_CONFIG`):
+- **Credentials.** `AWS_ACCESS_KEY_ID` and the rest from the
+  environment, else the profile (`AWS_PROFILE`, or the context's) in
+  `~/.aws/config` and `~/.aws/credentials`: static keys,
+  `credential_process`, SSO, or a role; else a container or instance
+  role. A `credential_process` command prints `AccessKeyId`,
+  `SecretAccessKey`, an optional `SessionToken` and `Expiration`.
+- **Renewal.** A credential with an expiry is renewed 2 min before it
+  (or half its remaining life, when shorter) by resolving the chain
+  again, which runs `credential_process` again. Until then a process
+  keeps it, so `y-obs prometheus`, whose polls and remote reads each
+  open a session, runs the process once per credential. A cluster that
+  `--cluster` or the context names needs no credential, so
+  `prometheus --stop` asks for none. The new secret replaces
+  the database's from a second connection, so a running query carries
+  on; httpfs re-reads secrets on a refused request. A renewal that fails
+  is printed, and the reads that then fail end the command with exit 3.
+- **Endpoint and region.** `AWS_ENDPOINT_URL_S3`, else the profile's
+  `services` section's `s3` `endpoint_url`, else `AWS_ENDPOINT_URL` or
+  the profile's `endpoint_url`, else AWS's own for the region; TLS as the
+  URL's scheme says. The region from `AWS_REGION` or the profile, else
+  `us-east-1`. Requests are path-style, which every S3 implementation
+  takes.
+- **Bucket and cluster.** `--bucket`, else `S3_BUCKET`, else the
+  context's. The cluster is `--cluster` (or `CLUSTER_NAME`), else the
+  context's when the bucket is the context's, else the bucket's only
+  cluster.
+- **What is explicit wins.** `AWS_PROFILE` wins over the profile of a
+  context that the file picks (its `current` or only one); a context
+  named by `--context` or `Y_OBS_CONTEXT` keeps its own.
+- **Contexts** name where to read and never hold a secret. In
+  `~/.config/y-obs/contexts.yaml` (or `Y_OBS_CONFIG`):
 
-```yaml
-current: prod
-contexts:
-  prod:
-    bucket: node-data
-    endpoint: objects.example.net
-    region: auto
-    credentials:
-      url: https://obs-creds.example.net/v1/read     # behind an identity-aware proxy
-      token: y-remote-iap print https://obs-creds.example.net
-```
+  ```yaml
+  current: prod
+  contexts:
+    prod:
+      bucket: node-data
+      cluster: prod-eu
+      profile: observability-read
+  ```
 
-- **Which context.** `--context`, else `Y_OBS_CONTEXT`, else `current`,
-  else the only one. `S3_BUCKET` in the environment wins over `current`,
-  as `local/blobs.sh`'s static keys.
-- **Minting.** y-obs runs the token command and POSTs to `url` with the
-  output as a bearer token. The answer is `{accessKeyId, secretAccessKey,
-  sessionToken, expiration}`, optionally with `bucket`, `endpoint` and
-  `region` overriding the context's, and `clusters`, the scope.
-- **Cache and renewal.** The credential is cached 0600 in
-  `$XDG_RUNTIME_DIR/y-obs/` (else the user cache directory). It is used
-  until a margin before it expires: 2 min, or half its lifetime when
-  that is shorter. A session that outlives it gets a new one at the
-  margin. The new secret replaces the database's from a second
-  connection, so a running query carries on; httpfs re-reads secrets on
-  a refused request.
-- **The auth command.** `y-obs auth` prints the context, bucket, scope,
-  source (cached or minted) and expiry, never the secret. `--renew`
-  mints even when the cache is valid. `y-obs auth -- duckdb` runs a
-  program with the credential in its environment (the `AWS_*` and `S3_*`
-  variables of `local/blobs.sh`).
-- **Listing contexts.** `y-obs contexts` lists the contexts with the
-  clusters their cached credential covers. The clusters present in a
-  bucket are listed (delimiter listings) when a command names one that
-  is not there, with exit 4; `contexts` does not list them.
-- **Static keys.** Without a context, `S3_BUCKET` and the `AWS_*` keys in
-  the environment are used as they are, as `local/blobs.sh` does.
-  `y-obs auth` then says so (bucket, endpoint, whether a key is set, no
-  expiry) and exits 0, and `y-obs auth -- cmd` runs the command with that
-  environment.
-- **The stub mint.** `y-obs mint-stub` is a mint for development. It
-  hands out the static keys it was started with, under an expiry: the
-  protocol of a real mint, none of its security.
-- **Exit codes.** A token command that fails, a mint that refuses or is
-  down, and a cluster outside the scope are all exit 3.
+  with, in `~/.aws/config`:
 
-## Credentials
+  ```ini
+  [profile observability-read]
+  credential_process = obs-grant --read prod-eu
+  endpoint_url = https://objects.example.net
+  region = auto
+  ```
 
-Read credentials are short-lived, read-only, and scoped to one bucket
-(optionally to `raw1/{cluster}/`, `hourly/{cluster}/` and
-`daily/{cluster}/`). Write credentials stay as they are: one per cluster,
-long-lived, write-only.
+  `--context` picks one, else `Y_OBS_CONTEXT`, else `current`, else the
+  only one. `y-obs contexts` lists them; `y-obs status` also resolves the
+  one in use and shows its endpoint and its credential's source and
+  expiry, and exits 3 when it gets no credential.
 
-What mints them is per store:
-
-- **Decide:** where the minting principal runs. Keys that can create
-  other keys never exist in the hosting, so the mint runs outside the
-  clusters that produce the data, behind the same identity-aware proxy
-  the logs CLI already authenticates with.
-- **Decide:** the TTL within 5–15 min, and whether the cache above is
-  acceptable. Without it, every invocation mints.
-
-Per store (read 2026-10-11 from provider docs and DuckDB v1.5.6 httpfs
-source; marked where untested):
-
-| store | mint | minting principal | DuckDB secret |
-|---|---|---|---|
-| Cloudflare R2 | temporary credentials, `object-read-only` with `prefixes`, TTL in seconds; minted locally by signing with the parent's S3 secret, no API call | a bucket-scoped read-only token's S3 key pair, which cannot create tokens; runs in a Worker with the pair as a secret | `TYPE s3` with `SESSION_TOKEN` |
-| GCS | a downscoped OAuth token (Credential Access Boundary: `storage.objectViewer`, `startsWith` and `objectListPrefix` per prefix), TTL at most the source token's | a service account with object read only and no key-creation permission, keyless on a serverless runtime | `TYPE gcs` with `BEARER_TOKEN`, which httpfs sends for `gs://` URLs only, so the context's prefixes are `gs://`. Untested against a downscoped token |
-| Ceph RGW (S3-compatible hosting) | none documented. The gateway answers STS actions, so `GetSessionToken` from a reader account may work; untested | a separate reader account granted read on the bucket by bucket policy. The provider API key that creates accounts and keys stays out of every cluster | `TYPE s3` with `SESSION_TOKEN` if STS works |
-| versitygw (itest) | `AssumeRoleWithWebIdentity` since v1.8.0, the itest pins v1.7.0 | an OIDC issuer the gateway trusts | `TYPE s3` with `SESSION_TOKEN`; untested |
-
-If a store has no temporary credentials, the fallbacks are both weaker:
-
-- **A long-lived reader key on the operator's machine.** It is read-only
-  and outside the hosting, but it does not expire.
-- **A read proxy that holds that key.** The proxy sees every object key
-  read.
-
-Presigned URLs alone do not work, because the views list prefixes.
-
-On the DuckDB side, httpfs v1.5.6 reads a secret when it opens a file. On
-401, 403 or `ExpiredToken` it re-reads the secret manager and retries
-once (`httpfs_enable_credential_refresh`, on by default). So y-obs renews
-by `CREATE OR REPLACE SECRET` from a timer, and a long query survives the
-TTL. This was read in the source, not tested.
+What issues the credentials (a grant service behind `credential_process`,
+an SSO role, a reader key) is the deployment's; y-obs needs read and list
+on the bucket's `raw1/`, `hourly/` and `daily/` prefixes of the clusters
+it reads.
 
 ## Encrypted tiers
 
@@ -633,14 +600,16 @@ With tier encryption on, reading the hourly and daily objects needs the
 parquet keys as well as the S3 credential. A parquet key never changes,
 so a key handed to a laptop stays valid past any credential TTL.
 
-- **Decide:** whether the mint also returns the keys (the credential then
+- **Decide:** whether whatever issues the S3 credential also hands out
+  the keys (the credential then
   bounds access to the objects, not to their content), or node data
   relies on the store's own encryption at rest and the tiers stay plain.
 
 ## Reads are not logged
 
 `y-obs` runs every query locally, and nothing sends the query or its
-results anywhere. The mint sees who asked for a credential, and when. The
+results anywhere. Whatever issues the credential sees who asked for it,
+and when. The
 store sees GETs of object keys under that credential, and those keys
 carry namespace and pod. To keep reads unidentifiable, the node-data
 bucket's access logging stays off. That is a property of the bucket, not
@@ -656,8 +625,8 @@ of y-obs, so the deployment documents it.
    `metrics`, each with its rules for LLM callers.
 3. Done: the release workflow and `release.sh`. The `y-bin` entry
    follows the first release, whose checksums it pins.
-4. Done with a stub: contexts, `auth`, the cache and renewal, and
-   `mint-stub`. The real mint waits for the decisions in "Credentials".
+4. Done: S3 access through the AWS default credential chain, with
+   renewal, and contexts that name a bucket, a cluster and a profile.
 5. Started: consuming repositories add `SKILL.md` from this directory as
    an `observability` skill, beside their log, pod-index and metrics
    skills. The old skills point at it for clusters that have moved, and

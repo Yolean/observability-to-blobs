@@ -449,16 +449,8 @@ func cmdPrometheusServe(ctx context.Context, args []string) error {
 	if err != nil {
 		return fail(exitUsage, "%v", err)
 	}
-	if p.sf.cluster == "" {
-		// resolve the cluster as a session would, from the credential's scope
-		st, scope, err := storeFor(ctx, p.sf.context)
-		_ = st
-		if err != nil {
-			return err
-		}
-		if p.sf.cluster, err = clusterFor("", scope); err != nil {
-			return err
-		}
+	if p.sf.cluster, err = resolveCluster(ctx, &p.sf); err != nil {
+		return err
 	}
 	bin, err := prometheusBinary()
 	if err != nil {
