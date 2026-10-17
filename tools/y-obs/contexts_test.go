@@ -14,6 +14,7 @@ import (
 // caller. It returns the directory the files are in.
 func awsEnv(t *testing.T, config string) string {
 	t.Helper()
+	forgetStores()
 	dir := t.TempDir()
 	for _, k := range []string{"AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
 		"AWS_SESSION_TOKEN", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3", "S3_BUCKET", "Y_OBS_CONTEXT", "CLUSTER_NAME"} {
@@ -101,10 +102,16 @@ func TestStoreFromCredentialProcess(t *testing.T) {
 	if left := time.Until(st.expires); left < 90*time.Second || left > 2*time.Minute || st.margin > time.Minute || st.margin < 40*time.Second {
 		t.Fatalf("expires in %s, margin %s: want about 2m and 1m", left, st.margin)
 	}
+	// within the process the credential is kept until its renewal margin
+	if _, _, err := storeFor(context.Background(), "", ""); err != nil || runs(t, grants) != 1 {
+		t.Fatalf("a second resolution in the margin's time: %v, %d runs", err, runs(t, grants))
+	}
+	forgetStores()
 	if _, _, err := storeFor(context.Background(), "", ""); err != nil || runs(t, grants) != 2 {
-		t.Fatalf("a second resolution: %v, %d runs", err, runs(t, grants))
+		t.Fatalf("a resolution after the cache: %v, %d runs", err, runs(t, grants))
 	}
 	// a refusal is an auth failure with the process's own message
+	forgetStores()
 	os.WriteFile(filepath.Join(grants, "refuse"), nil, 0o600)
 	_, _, err = storeFor(context.Background(), "", "")
 	if exitOf(err) != exitAuth || !strings.Contains(err.Error(), "profile obs") {
@@ -252,5 +259,32 @@ func TestMessages(t *testing.T) {
 	writeContexts(t, dir, "contexts:\n  a:\n    bucket: b\n    credentials:\n      url: https://mint\n")
 	if _, _, err := loadConfig(); exitOf(err) != exitUsage || !strings.Contains(err.Error(), "are the AWS profile's") {
 		t.Errorf("credentials field: %v", err)
+	}
+}
+
+func forgetStores() {
+	stores.Lock()
+	stores.byProfile = nil
+	stores.Unlock()
+}
+
+// The environment's keys are named as such when the store refuses them.
+func TestSourceOfEnvironmentKeys(t *testing.T) {
+	awsEnv(t, "")
+	t.Setenv("AWS_ACCESS_KEY_ID", "k")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "s")
+	st, err := awsStore(context.Background(), "")
+	if err != nil || st.source != "the AWS_* environment variables" {
+		t.Fatalf("%q %v", st.source, err)
+	}
+}
+
+// A cluster the context names needs no credential: with none to be had,
+// resolveCluster still finds it.
+func TestResolveClusterWithoutCredential(t *testing.T) {
+	dir := awsEnv(t, "")
+	writeContexts(t, dir, "contexts:\n  prod:\n    bucket: node-data\n    cluster: prod-eu\n    profile: none-such\n")
+	if c, err := resolveCluster(context.Background(), &sessionFlags{}); err != nil || c != "prod-eu" {
+		t.Fatalf("%q %v", c, err)
 	}
 }

@@ -542,7 +542,11 @@ the AWS CLI does, and has no credential settings of its own:
   `SecretAccessKey`, an optional `SessionToken` and `Expiration`.
 - **Renewal.** A credential with an expiry is renewed 2 min before it
   (or half its remaining life, when shorter) by resolving the chain
-  again, which runs `credential_process` again. The new secret replaces
+  again, which runs `credential_process` again. Until then a process
+  keeps it, so `y-obs prometheus`, whose polls and remote reads each
+  open a session, runs the process once per credential. A cluster that
+  `--cluster` or the context names needs no credential, so
+  `prometheus --stop` asks for none. The new secret replaces
   the database's from a second connection, so a running query carries
   on; httpfs re-reads secrets on a refused request. A renewal that fails
   is printed, and the reads that then fail end the command with exit 3.

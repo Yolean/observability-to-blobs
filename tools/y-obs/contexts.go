@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -120,19 +121,34 @@ func cacheDir() string {
 // picks (its current or only one), and a bucket other than the context's
 // drops the context's cluster.
 func storeFor(ctx context.Context, contextFlag, bucketFlag string) (storeConfig, string, error) {
-	cfg, path, err := loadConfig()
+	bucket, cluster, profile, err := target(contextFlag, bucketFlag)
 	if err != nil {
 		return storeConfig{}, "", err
+	}
+	st, err := cachedAWSStore(ctx, profile)
+	if err != nil {
+		return storeConfig{}, "", err
+	}
+	st.bucket = bucket
+	return st, cluster, nil
+}
+
+// target is storeFor's bucket, the context's cluster and the AWS profile,
+// which need no credential.
+func target(contextFlag, bucketFlag string) (bucket, cluster, profile string, err error) {
+	cfg, path, err := loadConfig()
+	if err != nil {
+		return "", "", "", err
 	}
 	var cc contextConfig
 	name, explicit := contextChoice(contextFlag, cfg)
 	if name != "" {
 		var ok bool
 		if cc, ok = cfg.Contexts[name]; !ok {
-			return storeConfig{}, "", fail(exitUsage, "no context %q in %s; y-obs contexts lists them", name, path)
+			return "", "", "", fail(exitUsage, "no context %q in %s; y-obs contexts lists them", name, path)
 		}
 	}
-	bucket := bucketFlag
+	bucket = bucketFlag
 	if bucket == "" {
 		bucket = os.Getenv("S3_BUCKET")
 	}
@@ -140,22 +156,43 @@ func storeFor(ctx context.Context, contextFlag, bucketFlag string) (storeConfig,
 		bucket = cc.Bucket
 	}
 	if bucket == "" {
-		return storeConfig{}, "", fail(exitUsage, "no bucket: pass --bucket, set S3_BUCKET, or name one in a context (y-obs contexts -h)")
+		return "", "", "", fail(exitUsage, "no bucket: pass --bucket, set S3_BUCKET, or name one in a context (y-obs contexts -h)")
 	}
-	cluster := cc.Cluster
+	cluster = cc.Cluster
 	if bucket != cc.Bucket {
 		cluster = ""
 	}
-	profile := cc.Profile
+	profile = cc.Profile
 	if !explicit && os.Getenv("AWS_PROFILE") != "" {
 		profile = ""
 	}
+	return bucket, cluster, profile, nil
+}
+
+// stores caches awsStore by profile within the process until its
+// credential's renewal margin, as the SDK's own cache does: a process that
+// opens many sessions (prometheus's polls and remote reads) then runs a
+// credential_process once per credential, not once per session.
+var stores struct {
+	sync.Mutex
+	byProfile map[string]storeConfig
+}
+
+func cachedAWSStore(ctx context.Context, profile string) (storeConfig, error) {
+	stores.Lock()
+	defer stores.Unlock()
+	if st, ok := stores.byProfile[profile]; ok && (st.expires.IsZero() || time.Now().Before(st.expires.Add(-st.margin))) {
+		return st, nil
+	}
 	st, err := awsStore(ctx, profile)
 	if err != nil {
-		return storeConfig{}, "", err
+		return storeConfig{}, err
 	}
-	st.bucket = bucket
-	return st, cluster, nil
+	if stores.byProfile == nil {
+		stores.byProfile = map[string]storeConfig{}
+	}
+	stores.byProfile[profile] = st
+	return st, nil
 }
 
 // awsStore is the AWS SDK's default chain, for profile when it is set,
@@ -175,10 +212,14 @@ func awsStore(ctx context.Context, profile string) (storeConfig, error) {
 		return storeConfig{}, fail(exitAuth, "the AWS configuration%s: %v", ofProfile(profile), err)
 	}
 	source := "the AWS default chain"
-	if p := os.Getenv("AWS_PROFILE"); profile == "" && p != "" {
-		source = "AWS profile " + p
-	} else if profile != "" {
+	switch p := os.Getenv("AWS_PROFILE"); {
+	case profile != "":
 		source = "AWS profile " + profile
+	case p != "":
+		source = "AWS profile " + p
+	case os.Getenv("AWS_ACCESS_KEY_ID") != "":
+		// the SDK takes the environment's keys first when no profile is set
+		source = "the AWS_* environment variables"
 	}
 	creds, err := cfg.Credentials.Retrieve(ctx)
 	var pe *processcreds.ProviderError
@@ -306,9 +347,13 @@ func credentialNote(profile string, st storeConfig) string {
 
 // resolveCluster is the cluster a session of sf would read, for a command
 // that needs it before it opens one.
+// A cluster that the flag or the context names takes no credential.
 func resolveCluster(ctx context.Context, sf *sessionFlags) (string, error) {
 	if sf.cluster != "" || sf.blobsDir != "" {
 		return clusterFor(ctx, sf.cluster, "", nil)
+	}
+	if _, contextCluster, _, err := target(sf.context, sf.bucket); err != nil || contextCluster != "" {
+		return contextCluster, err
 	}
 	st, contextCluster, err := storeFor(ctx, sf.context, sf.bucket)
 	if err != nil {
