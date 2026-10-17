@@ -554,7 +554,11 @@ the AWS CLI does, and has no credential settings of its own:
   takes.
 - **Bucket and cluster.** `--bucket`, else `S3_BUCKET`, else the
   context's. The cluster is `--cluster` (or `CLUSTER_NAME`), else the
-  context's, else the bucket's only cluster.
+  context's when the bucket is the context's, else the bucket's only
+  cluster.
+- **What is explicit wins.** `AWS_PROFILE` wins over the profile of a
+  context that the file picks (its `current` or only one); a context
+  named by `--context` or `Y_OBS_CONTEXT` keeps its own.
 - **Contexts** name where to read and never hold a secret. In
   `~/.config/y-obs/contexts.yaml` (or `Y_OBS_CONFIG`):
 
@@ -579,7 +583,7 @@ the AWS CLI does, and has no credential settings of its own:
   `--context` picks one, else `Y_OBS_CONTEXT`, else `current`, else the
   only one. `y-obs contexts` lists them; `y-obs status` also resolves the
   one in use and shows its endpoint and its credential's source and
-  expiry.
+  expiry, and exits 3 when it gets no credential.
 
 What issues the credentials (a grant service behind `credential_process`,
 an SSO role, a reader key) is the deployment's; y-obs needs read and list

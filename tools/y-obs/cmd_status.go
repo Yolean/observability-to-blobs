@@ -103,6 +103,8 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer, now
 		irows = append(irows, instanceRow{i.name, i.URL, i.Cluster, i.Window, i.Started.Format(time.RFC3339)})
 	}
 	s := &session{plan: map[string][]string{}}
+	// a credential that cannot be had is exit 3, after the rest is shown
+	var authErr error
 	switch {
 	case *blobsDir != "":
 		s.root = *blobsDir
@@ -110,6 +112,9 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer, now
 		st, _, err := storeFor(ctx, *contextFlag, *bucketFlag)
 		if err != nil {
 			notes = append(notes, "no data section: "+err.Error())
+			if exitOf(err) == exitAuth {
+				authErr = err
+			}
 			break
 		}
 		s.root, s.store = "s3://"+st.bucket, st
@@ -181,6 +186,10 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer, now
 	}
 	fmt.Fprintf(stderr, "y-obs: status: %d contexts (in use: %s), %d prometheus instances, %d clusters in bucket %s; %d listing requests\n",
 		len(contexts), current, len(irows), len(clusters), bucket, s.listRequests)
+	if authErr != nil {
+		// the note above says why
+		return &exitError{code: exitAuth}
+	}
 	return nil
 }
 

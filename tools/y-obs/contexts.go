@@ -9,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials/processcreds"
 	"sigs.k8s.io/yaml"
 )
 
@@ -57,6 +59,9 @@ func loadConfig() (*configFile, string, error) {
 	}
 	var c configFile
 	if err := yaml.UnmarshalStrict(b, &c); err != nil {
+		if strings.Contains(err.Error(), "unknown field") {
+			return nil, p, fail(exitUsage, "%s: %v: a context names only bucket, cluster and profile; credentials, the endpoint and the region are the AWS profile's (y-obs contexts -h)", p, err)
+		}
 		return nil, p, fail(exitUsage, "%s: %v", p, err)
 	}
 	if c.Contexts == nil {
@@ -68,12 +73,23 @@ func loadConfig() (*configFile, string, error) {
 // contextName picks the context: the flag, else Y_OBS_CONTEXT, else the
 // config's current one, else its only one; "" for none.
 func contextName(flagValue string, c *configFile) string {
+	name, _ := contextChoice(flagValue, c)
+	return name
+}
+
+// contextChoice is contextName, and whether the context was named
+// explicitly, by the flag or Y_OBS_CONTEXT, rather than by the file.
+func contextChoice(flagValue string, c *configFile) (string, bool) {
 	if flagValue != "" {
-		return flagValue
+		return flagValue, true
 	}
 	if v := os.Getenv("Y_OBS_CONTEXT"); v != "" {
-		return v
+		return v, true
 	}
+	return implicitContext(c), false
+}
+
+func implicitContext(c *configFile) string {
 	if c.Current != "" {
 		return c.Current
 	}
@@ -99,14 +115,18 @@ func cacheDir() string {
 // storeFor resolves where a session reads: the bucket from bucketFlag,
 // else S3_BUCKET, else the context; everything else from the AWS SDK's
 // default chain, for the context's profile when it names one. It also
-// returns the context's cluster, "" when it names none.
+// returns the context's cluster, "" when it names none. What is explicit
+// wins over the file: AWS_PROFILE over the profile of a context the file
+// picks (its current or only one), and a bucket other than the context's
+// drops the context's cluster.
 func storeFor(ctx context.Context, contextFlag, bucketFlag string) (storeConfig, string, error) {
 	cfg, path, err := loadConfig()
 	if err != nil {
 		return storeConfig{}, "", err
 	}
 	var cc contextConfig
-	if name := contextName(contextFlag, cfg); name != "" {
+	name, explicit := contextChoice(contextFlag, cfg)
+	if name != "" {
 		var ok bool
 		if cc, ok = cfg.Contexts[name]; !ok {
 			return storeConfig{}, "", fail(exitUsage, "no context %q in %s; y-obs contexts lists them", name, path)
@@ -122,12 +142,20 @@ func storeFor(ctx context.Context, contextFlag, bucketFlag string) (storeConfig,
 	if bucket == "" {
 		return storeConfig{}, "", fail(exitUsage, "no bucket: pass --bucket, set S3_BUCKET, or name one in a context (y-obs contexts -h)")
 	}
-	st, err := awsStore(ctx, cc.Profile)
+	cluster := cc.Cluster
+	if bucket != cc.Bucket {
+		cluster = ""
+	}
+	profile := cc.Profile
+	if !explicit && os.Getenv("AWS_PROFILE") != "" {
+		profile = ""
+	}
+	st, err := awsStore(ctx, profile)
 	if err != nil {
 		return storeConfig{}, "", err
 	}
 	st.bucket = bucket
-	return st, cc.Cluster, nil
+	return st, cluster, nil
 }
 
 // awsStore is the AWS SDK's default chain, for profile when it is set,
@@ -146,11 +174,22 @@ func awsStore(ctx context.Context, profile string) (storeConfig, error) {
 	if err != nil {
 		return storeConfig{}, fail(exitAuth, "the AWS configuration%s: %v", ofProfile(profile), err)
 	}
-	creds, err := cfg.Credentials.Retrieve(ctx)
-	if err != nil {
-		return storeConfig{}, fail(exitAuth, "no AWS credentials%s: %v", ofProfile(profile), err)
+	source := "the AWS default chain"
+	if p := os.Getenv("AWS_PROFILE"); profile == "" && p != "" {
+		source = "AWS profile " + p
+	} else if profile != "" {
+		source = "AWS profile " + profile
 	}
-	st := storeConfig{region: cfg.Region, keyID: creds.AccessKeyID, secret: creds.SecretAccessKey, token: creds.SessionToken, tls: true}
+	creds, err := cfg.Credentials.Retrieve(ctx)
+	var pe *processcreds.ProviderError
+	if errors.As(err, &pe) {
+		// the SDK passes the process's stderr through, and keeps none of it
+		return storeConfig{}, fail(exitAuth, "the credential_process of %s failed (%v); its own message, if it printed one, is above", source, pe.Err)
+	}
+	if err != nil {
+		return storeConfig{}, fail(exitAuth, "no AWS credentials from %s: %v", source, err)
+	}
+	st := storeConfig{region: cfg.Region, keyID: creds.AccessKeyID, secret: creds.SecretAccessKey, token: creds.SessionToken, tls: true, source: source}
 	if st.region == "" {
 		st.region = "us-east-1"
 	}

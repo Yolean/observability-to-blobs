@@ -215,3 +215,42 @@ func TestContextRefusesCredentials(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// What is explicit wins over what the file picks: AWS_PROFILE over the
+// current context's profile, and another bucket drops its cluster; a
+// context named by --context keeps its profile.
+func TestExplicitOverCurrent(t *testing.T) {
+	dir := awsEnv(t, "")
+	keys := func(id string) string { return "aws_access_key_id = " + id + "\naws_secret_access_key = s\n" }
+	os.WriteFile(filepath.Join(dir, "config"), []byte("[profile ctx]\n"+keys("CTX")+"[profile env]\n"+keys("ENV")), 0o600)
+	writeContexts(t, dir, "current: prod\ncontexts:\n  prod:\n    bucket: node-data\n    cluster: prod-eu\n    profile: ctx\n")
+	ctx := context.Background()
+	t.Setenv("AWS_PROFILE", "env")
+	st, cluster, err := storeFor(ctx, "", "")
+	if err != nil || st.keyID != "ENV" || cluster != "prod-eu" || !strings.Contains(st.source, "env") {
+		t.Fatalf("AWS_PROFILE over the current context: %+v %q %v", st, cluster, err)
+	}
+	if st, _, err = storeFor(ctx, "prod", ""); err != nil || st.keyID != "CTX" {
+		t.Fatalf("--context keeps its profile: %+v %v", st, err)
+	}
+	if _, cluster, err = storeFor(ctx, "", "other-bucket"); err != nil || cluster != "" {
+		t.Fatalf("another bucket keeps the context's cluster %q: %v", cluster, err)
+	}
+}
+
+// A refusing credential_process names the profile; a context with a
+// credentials field says where credentials belong.
+func TestMessages(t *testing.T) {
+	dir := awsEnv(t, "")
+	grants := t.TempDir()
+	os.WriteFile(filepath.Join(grants, "refuse"), nil, 0o600)
+	os.WriteFile(filepath.Join(dir, "config"), []byte("[profile obs]\ncredential_process = "+grantScript(t, grants, time.Minute)+"\n"), 0o600)
+	t.Setenv("AWS_PROFILE", "obs")
+	if _, err := awsStore(context.Background(), ""); exitOf(err) != exitAuth || !strings.Contains(err.Error(), "the credential_process of AWS profile obs failed") {
+		t.Errorf("refused: %v", err)
+	}
+	writeContexts(t, dir, "contexts:\n  a:\n    bucket: b\n    credentials:\n      url: https://mint\n")
+	if _, _, err := loadConfig(); exitOf(err) != exitUsage || !strings.Contains(err.Error(), "are the AWS profile's") {
+		t.Errorf("credentials field: %v", err)
+	}
+}

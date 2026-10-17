@@ -221,6 +221,8 @@ type session struct {
 type storeConfig struct {
 	bucket, endpoint, region, keyID, secret, token string
 	tls                                            bool
+	// source is where the credential came from, for messages
+	source string
 	// expires is the credential's expiry, zero for static keys; it is
 	// renewed margin before
 	expires time.Time
@@ -523,7 +525,11 @@ func (s *session) wrap(err error) error {
 	}
 	switch {
 	case strings.Contains(msg, "HTTP 403") || strings.Contains(msg, "HTTP 401") || strings.Contains(msg, "SignatureDoesNotMatch") || strings.Contains(msg, "InvalidAccessKeyId") || strings.Contains(msg, "ExpiredToken"):
-		return fail(exitAuth, "the store refused the credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN): %s", msg)
+		source := s.store.source
+		if source == "" {
+			source = "the AWS default chain"
+		}
+		return fail(exitAuth, "the store refused the credentials of %s: %s", source, msg)
 	case strings.Contains(msg, "Out of Memory Error"):
 		if i := strings.Index(msg, " Possible solutions:"); i > 0 {
 			msg = msg[:i]
