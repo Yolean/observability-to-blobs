@@ -264,6 +264,33 @@ metrics_path: /stats/prometheus
 	}
 }
 
+// A rule on a label that Prometheus gives the target, not the sample, is
+// translated with a warning: the agent's rules see the sample's labels.
+func TestTranslateWarnsOnTargetLabels(t *testing.T) {
+	pm := podMonitor(t, "app", "pm", `
+selector: {}
+podMetricsEndpoints:
+- port: metrics
+  metricRelabelings:
+  - sourceLabels: [namespace]
+    regex: prod
+    action: keep
+  - sourceLabels: [__name__, __meta_kubernetes_pod_label_app]
+    action: drop
+    regex: x;y
+  - sourceLabels: [__name__, code]
+    action: drop
+    regex: x;500
+`)
+	res := Translate("app/p", testPod(t, nil, mainAndWorker), []*monitoringv1.PodMonitor{pm})
+	if res.Annotations["io.opentelemetry.discovery.metrics.9201/config"] == "" {
+		t.Fatalf("not translated: %v", res.Annotations)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "read __meta_kubernetes_pod_label_app, namespace,") {
+		t.Fatalf("warnings %q", res.Warnings)
+	}
+}
+
 func TestUntranslated(t *testing.T) {
 	pm := podMonitor(t, "app", "pm", `
 selector: {}

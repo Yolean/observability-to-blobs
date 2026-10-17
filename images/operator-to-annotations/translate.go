@@ -258,6 +258,29 @@ func relabelConfigs(in []monitoringv1.RelabelConfig) []relabelConfig {
 	return out
 }
 
+// targetLabels are what Prometheus gives a PodMonitor target besides the
+// sample's own labels, which its metricRelabelings can read; the agent's
+// rules see the sample's labels only (README.md, "Metric relabeling").
+var targetLabels = map[string]bool{"job": true, "instance": true, "namespace": true, "pod": true,
+	"container": true, "endpoint": true, "service": true}
+
+// targetLabelsRead are the labels of rules that a PodMonitor target has in
+// Prometheus and an agent's sample has only if it exposes one so named.
+func targetLabelsRead(rules []relabelConfig) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range rules {
+		for _, l := range r.SourceLabels {
+			if (targetLabels[l] || strings.HasPrefix(l, "__") && l != "__name__") && !seen[l] {
+				seen[l] = true
+				out = append(out, l)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Contribution is what one PodMonitor adds to a pod.
 type Contribution struct {
 	PodMonitor string // namespace/name
@@ -330,6 +353,11 @@ func Translate(podName string, pod *corev1.Pod, selecting []*monitoringv1.PodMon
 				}
 			}
 			cfg := otelConfig{MetricsPath: ep.Path, MetricRelabelConfigs: relabelConfigs(ep.MetricRelabelConfigs)}
+			if read := targetLabelsRead(cfg.MetricRelabelConfigs); len(read) > 0 {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("pod %s, %s: metricRelabelings read %s, which are the target's labels in Prometheus; "+
+					"the agent's rules see the sample's own labels only, so they read a sample label of that name if there is one, and a keep on them can drop every series",
+					podName, where, strings.Join(read, ", ")))
+			}
 			if ep.Interval != "" {
 				d, err := model.ParseDuration(string(ep.Interval))
 				if err != nil || d <= 0 {

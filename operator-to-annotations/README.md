@@ -106,7 +106,11 @@ them, which is what the agent reads (root README, "Metric relabeling"):
 `sourceLabels` as `source_labels`, `targetLabel` as `target_label`, the
 action in lower case, and an unset field left unset, so that
 Prometheus's default applies, as when the operator generates the scrape
-config.
+config. The agent's rules see a sample's own labels, not the target's
+that Prometheus adds (`job`, `instance`, `namespace`, `pod`, `container`,
+`endpoint`, `service`, `__meta_*`): a rule that reads one of those is
+translated with a warning, since it reads the sample's label of that
+name if there is one, and a `keep` on it can drop every series.
 
 - **Only port-scoped keys, always by number.** Never the pod-level
   `io.opentelemetry.discovery.metrics/*` keys, which would enable every
