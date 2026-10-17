@@ -36,7 +36,12 @@ Every line is one event with a `table` field:
   agent's own metrics, with the samples as an array, the target's
   `pod_uid`, `scrape`, the scrape path (`pod` for an annotated pod, `node`
   for node_exporter and the agent's own metrics, `host` for a host
-  agent's), and the pod's controllers ("Workload names" below). A
+  agent's), and the pod's controllers ("Workload names" below).
+
+The raw contract, the columns `compactor/sql/raw.sql` pins, may change
+without compatibility before a 1.0 release: an upgrade that changes it
+moves the agents first, then the compactor and the readers, and what was
+written before it is not read in the new form. A
   target's `metric_relabel_configs` can drop samples and labels before
   they are written ("Metric relabeling" below).
 - **podindex**: pod and container lifecycle events from the CRI
@@ -223,7 +228,11 @@ Where that is wrong:
 - A Job named `<x>-<8 digits>` that runs within a day of that minute is
   taken for a CronJob's, as by the processor.
 - A ReplicaSet orphaned from its Deployment (deleted with
-  `--cascade=orphan`) still names the Deployment.
+  `--cascade=orphan`) still names the Deployment, and a ReplicaSet
+  created on its own, whose pods have no `pod-template-hash`, names
+  nothing.
+- A Job created from a CronJob by hand (`kubectl create job --from`),
+  named as its creator chose, has no CronJob, as by the processor.
 - Other controllers (Argo Rollouts, OpenKruise and the like) give no
   names, or with `controller-revision-hash` look like a DaemonSet.
 - A pod whose owner's name is over 58 characters has a cut generated

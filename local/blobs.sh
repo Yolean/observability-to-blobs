@@ -84,7 +84,7 @@ fi
 # the pods index. An object is plain, {HH}.parquet, or encrypted with the
 # key its name carries, {HH}.k-{id}.parquet. One read takes one key, so a
 # view unites by name a read of the plain objects and one per key id;
-# union_by_name aligns an older hour's columns (raw1 changes are additive),
+# union_by_name aligns hours whose columns differ (a column added to raw1),
 # which DuckDB 1.5 cannot do on an encrypted read, so within one key the
 # first object's columns win. Creating a view binds its globs: a view has
 # only the reads whose glob matches objects, and a table without objects
