@@ -19,6 +19,9 @@
 # PLATFORMS defaults to the release platforms; the itest sets the host's.
 # The Go caches live in a docker volume, not a bind mount: Docker Desktop's
 # file sharing loses files when Go extracts modules into a host directory.
+# A remote daemon (DOCKER_HOST tcp://, such as y-cluster dockerhost) shares
+# no files with this host: the repository is copied into a volume of its
+# own instead of mounted, and what the build writes is copied back.
 [ -z "${DEBUG:-}" ] || set -x
 set -euo pipefail
 
@@ -30,6 +33,8 @@ PLATFORMS=${PLATFORMS:-$RELEASE_PLATFORMS}
 OUT=target/compactor
 PIN=compactor/deploy/release/kustomization.yaml
 CACHE=${BUILD_CACHE_VOLUME:-blobs-compactor-cache}
+REMOTE=
+case "${DOCKER_HOST:-}" in (tcp://*|ssh://*) REMOTE=${BUILD_SRC_VOLUME:-blobs-compactor-src} ;; esac
 
 # The digest is a function of the exact Go release, and GOTOOLCHAIN=auto
 # lets another go win over go.mod's toolchain line:
@@ -61,7 +66,7 @@ BUILDER_ENV=()
 builder() {
   local platform=$1; shift
   docker run --rm --platform "$platform" --user "$(id -u):$(id -g)" \
-    -v "$REPO:/repo" -w /repo/compactor -v "$CACHE:/cache" \
+    -v "${REMOTE:-$REPO}:/repo" -w /repo/compactor -v "$CACHE:/cache" \
     -e HOME=/tmp -e GOCACHE="/cache/go-build/${platform#linux/}" -e GOMODCACHE=/cache/gomod \
     -e GOTOOLCHAIN="$GOTOOLCHAIN" -e GOFLAGS=-mod=readonly -e CGO_ENABLED=1 \
     ${BUILDER_ENV[@]+"${BUILDER_ENV[@]}"} \
@@ -69,9 +74,25 @@ builder() {
 }
 
 # The volume is created by docker as root; the builder runs as the caller.
+# With a remote daemon the repository volume too, which then gets a fresh
+# copy of the repository, without .git and target/.
 cache_init() {
   docker run --rm --platform "$HOST_PLATFORM" -v "$CACHE:/cache" "$(builder_ref "$HOST_PLATFORM")" \
     chown "$(id -u):$(id -g)" /cache
+  [ -n "$REMOTE" ] || return 0
+  docker run --rm --platform "$HOST_PLATFORM" -v "$REMOTE:/repo" "$(builder_ref "$HOST_PLATFORM")" \
+    sh -c 'find /repo -mindepth 1 -maxdepth 1 -exec rm -rf {} + && chown "$1" /repo' sh "$(id -u):$(id -g)"
+  tar -C "$REPO" --exclude=./.git --exclude=./target -cf - . \
+    | docker run -i --rm --platform "$HOST_PLATFORM" --user "$(id -u):$(id -g)" -v "$REMOTE:/repo" \
+      "$(builder_ref "$HOST_PLATFORM")" tar -C /repo -xf -
+}
+
+# copy_back <path...>: with a remote daemon, the build's files at those
+# paths under the repository, from its volume to this host
+copy_back() {
+  [ -n "$REMOTE" ] || return 0
+  docker run --rm --platform "$HOST_PLATFORM" -v "$REMOTE:/repo" "$(builder_ref "$HOST_PLATFORM")" \
+    tar -C /repo -cf - "$@" | tar -C "$REPO" -xf -
 }
 
 platforms() { echo "${PLATFORMS//,/ }"; }
@@ -118,10 +139,20 @@ selftest() {
   local base
   base=$(sed -n 's/^base: //p' "$HERE/contain.yaml")
   log "selftest $HOST_PLATFORM in $base"
+  local mounts=(
+    -v "$REPO/$OUT/app/$HOST_PLATFORM/blobs-compactor:/usr/local/bin/blobs-compactor:ro"
+    -v "$REPO/$OUT/duckdb/$HOST_PLATFORM/httpfs.duckdb_extension:/usr/local/lib/duckdb/httpfs.duckdb_extension:ro"
+  )
+  if [ -n "$REMOTE" ]; then
+    # a volume mounts directories only: the two directories, in place of
+    # the base's (empty) /usr/local/bin and /usr/local/lib/duckdb
+    mounts=(
+      --mount "type=volume,src=$REMOTE,dst=/usr/local/bin,volume-subpath=$OUT/app/$HOST_PLATFORM,readonly"
+      --mount "type=volume,src=$REMOTE,dst=/usr/local/lib/duckdb,volume-subpath=$OUT/duckdb/$HOST_PLATFORM,readonly"
+    )
+  fi
   docker run --rm --platform "$HOST_PLATFORM" --read-only --tmpfs /tmp --user 65532:65534 \
-    -v "$REPO/$OUT/app/$HOST_PLATFORM/blobs-compactor:/usr/local/bin/blobs-compactor:ro" \
-    -v "$REPO/$OUT/duckdb/$HOST_PLATFORM/httpfs.duckdb_extension:/usr/local/lib/duckdb/httpfs.duckdb_extension:ro" \
-    "$base" /usr/local/bin/blobs-compactor selftest >&2
+    "${mounts[@]}" "$base" /usr/local/bin/blobs-compactor selftest >&2
 }
 
 # image [oci-dir]: sets DIGEST. bash runs $( ) without errexit, so image,
@@ -144,6 +175,8 @@ image() {
   builder "$HOST_PLATFORM" go run "github.com/turbokube/contain/cmd/contain@$CONTAIN" \
     build --platforms-env-require --push=false --output "/repo/$oci" --logger plain >&2
   BUILDER_ENV=()
+  rm -rf "${REPO:?}/$oci"
+  copy_back "$OUT/app" "$OUT/duckdb" "$oci"
   # the layout's first manifest is the image index
   DIGEST=$(sed -n 's/.*"digest": *"\(sha256:[0-9a-f]*\)".*/\1/p' "$REPO/$oci/index.json" | head -n 1)
   [ -n "$DIGEST" ] || { log "no image index digest in $oci/index.json"; exit 1; }
@@ -273,6 +306,7 @@ case "$CMD" in
   bump)       bump ;;
   publish)    publish ;;
   host-setup) host_setup ;;
-  tidy)       cache_init; BUILDER_ENV=(-e GOFLAGS=-mod=mod); builder "$HOST_PLATFORM" go mod tidy ;;
+  tidy)       cache_init; BUILDER_ENV=(-e GOFLAGS=-mod=mod); builder "$HOST_PLATFORM" go mod tidy
+              copy_back compactor/go.mod compactor/go.sum ;;
   *)          trap - EXIT; sed -n '2,/^\[ -z/p' "$0" | sed '$d' >&2; exit 2 ;;
 esac

@@ -38,7 +38,9 @@
 #                        tools/y-obs's tests (default: setup-envtest
 #                        downloads them; the itest's are the cluster's release)
 #   IMAGE_BUILDER        docker (default when docker is installed), buildkit
-#                        (buildctl against BUILDKIT_HOST) or cluster (buildctl
+#                        (buildctl against BUILDKIT_HOST, the default when it is
+#                        set; with BUILDKIT_TLS_DIR when that is set too, as
+#                        eval "$(y-cluster dockerhost env)" sets both) or cluster (buildctl
 #                        against a rootless BuildKit pod in the itest cluster,
 #                        default without docker: no daemon on the host at all)
 #
@@ -216,6 +218,12 @@ if [ -z "${IMAGE_BUILDER:-}" ]; then
   else IMAGE_BUILDER=cluster; fi
 fi
 case "$IMAGE_BUILDER" in (docker|buildkit|cluster) ;; (*) fail "IMAGE_BUILDER: docker, buildkit or cluster";; esac
+# a BuildKit that wants client certificates (y-cluster dockerhost); exported
+# for compactor/build.sh and images/fluentbit/host/build.sh too
+if [ "$IMAGE_BUILDER" = buildkit ] && [ -n "${BUILDKIT_TLS_DIR:-}" ]; then
+  buildctl() { command buildctl --tlsdir "$BUILDKIT_TLS_DIR" "$@"; }
+  export -f buildctl
+fi
 BUILD=yes
 if [ -n "${IMAGE_REF:-}" ] || { [ "${SKIP_BUILD:-}" = 1 ] && [ -f target/images/node-agent.tar ]; }; then
   BUILD=no

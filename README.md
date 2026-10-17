@@ -192,6 +192,15 @@ the itest node is a qemu VM (Ubuntu, systemd, containerd: node logs and CRI
 discovery behave as in production); otherwise k3s-in-docker, which has no
 journal. CI runs the same script. The compactor's image is built by
 `compactor/build.sh` for the host's arch, which needs only docker.
+
+A docker daemon elsewhere works too. With
+[y-cluster dockerhost](https://github.com/Yolean/y-cluster) (dockerd and
+BuildKit in a KVM guest), `eval "$(y-cluster dockerhost env)"` sets
+`BUILDKIT_HOST` and `BUILDKIT_TLS_DIR`, so `test.sh` builds through the
+guest's BuildKit, and `DOCKER_HOST`, under which `compactor/build.sh`
+copies the repository into a volume instead of mounting it (a remote
+daemon shares no files), so `build.sh check` and `bump` run there for both
+platforms after one `build.sh host-setup` on the guest.
 `SKIP_BUILD=1 ./test.sh itest` reuses the last images for a quick loop
 against the running cluster.
 
