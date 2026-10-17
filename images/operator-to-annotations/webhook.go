@@ -60,6 +60,9 @@ func (a *podAnnotator) Handle(ctx context.Context, req admission.Request) admiss
 		for _, w := range res.Warnings {
 			a.log.Warn(w, "pod", podName)
 		}
+		for _, m := range res.Info {
+			a.log.Info(m, "pod", podName)
+		}
 	}
 	if len(res.Annotations) == 0 {
 		return admission.Allowed("").WithWarnings(res.Warnings...)

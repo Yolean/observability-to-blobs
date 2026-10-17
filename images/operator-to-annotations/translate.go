@@ -298,6 +298,8 @@ type Result struct {
 	// Preexisting: the pod already has scrape annotations, nothing is added
 	Preexisting bool
 	Warnings    []string
+	// Info is what is logged at level INFO and not returned to the client
+	Info []string
 }
 
 func key(pm *monitoringv1.PodMonitor) string { return pm.Namespace + "/" + pm.Name }
@@ -323,8 +325,8 @@ func Translate(podName string, pod *corev1.Pod, selecting []*monitoringv1.PodMon
 	}
 	if HasScrapeAnnotations(pod.Annotations) {
 		res.Preexisting = true
-		res.Warnings = append(res.Warnings, fmt.Sprintf(
-			"pod %s already has prometheus.io/* or io.opentelemetry.discovery.* annotations: not applying PodMonitor %s",
+		res.Info = append(res.Info, fmt.Sprintf(
+			"pod %s has its own prometheus.io/* or io.opentelemetry.discovery.* annotations: skipped, not applying PodMonitor %s",
 			podName, strings.Join(names, ", ")))
 		for _, n := range names {
 			res.Contributions = append(res.Contributions, Contribution{PodMonitor: n, Reason: "pre-existing scrape annotations"})

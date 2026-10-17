@@ -56,7 +56,13 @@ type Report struct {
 	// first reportSample by name
 	AnnotatedCount int      `json:"annotatedCount"`
 	Annotated      []PodRef `json:"annotated,omitempty"`
-	// Skipped is the selected pods it did not annotate, with the reason
+	// Preannotated is the selected pods with scrape annotations of their
+	// own, which the webhook leaves alone: where the migration to
+	// annotations in the workload's source is done
+	PreannotatedCount int      `json:"preannotatedCount"`
+	Preannotated      []PodRef `json:"preannotated,omitempty"`
+	// Skipped is the selected pods it did not annotate for another reason,
+	// with the reason
 	SkippedCount int          `json:"skippedCount"`
 	Skipped      []SkippedPod `json:"skipped,omitempty"`
 }
@@ -99,18 +105,28 @@ func NewReport(pm *monitoringv1.PodMonitor, pods []corev1.Pod) Report {
 			continue
 		}
 		ref := PodRef{Pod: pod.Namespace + "/" + pod.Name, Created: pod.CreationTimestamp.UTC()}
-		if slices.Contains(MarkedBy(pod.Annotations), r.PodMonitor) {
+		marked := MarkedBy(pod.Annotations)
+		if slices.Contains(marked, r.PodMonitor) {
 			r.AnnotatedCount++
 			r.Annotated = append(r.Annotated, ref)
+			continue
+		}
+		if len(marked) == 0 && HasScrapeAnnotations(pod.Annotations) {
+			r.PreannotatedCount++
+			r.Preannotated = append(r.Preannotated, ref)
 			continue
 		}
 		r.SkippedCount++
 		r.Skipped = append(r.Skipped, SkippedPod{PodRef: ref, Reason: skipReason(pm, pod)})
 	}
 	sort.Slice(r.Annotated, func(i, j int) bool { return r.Annotated[i].Pod < r.Annotated[j].Pod })
+	sort.Slice(r.Preannotated, func(i, j int) bool { return r.Preannotated[i].Pod < r.Preannotated[j].Pod })
 	sort.Slice(r.Skipped, func(i, j int) bool { return r.Skipped[i].Pod < r.Skipped[j].Pod })
 	if len(r.Annotated) > reportSample {
 		r.Annotated = r.Annotated[:reportSample]
+	}
+	if len(r.Preannotated) > reportSample {
+		r.Preannotated = r.Preannotated[:reportSample]
 	}
 	if len(r.Skipped) > reportSample {
 		r.Skipped = r.Skipped[:reportSample]
@@ -124,9 +140,6 @@ func skipReason(pm *monitoringv1.PodMonitor, pod *corev1.Pod) string {
 		return reasonBeforePodMonitor
 	}
 	marked := MarkedBy(pod.Annotations)
-	if len(marked) == 0 && HasScrapeAnnotations(pod.Annotations) {
-		return "pre-existing scrape annotations"
-	}
 	// what this PodMonitor alone would add: a reason of its own (no port,
 	// or a port another PodMonitor took) shows in the translation
 	res := Translate(pod.Namespace+"/"+pod.Name, &corev1.Pod{Spec: pod.Spec}, []*monitoringv1.PodMonitor{pm})

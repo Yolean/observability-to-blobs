@@ -1118,15 +1118,17 @@ ota_report() {
   local pm='"podMonitor":"default/podmonitored"'
   logged "$pm" '"condition":"PartiallyTranslated"' && logged "$pm" 'podMetricsEndpoints[1].scrapeTimeout' &&
     ! logged "$pm" 'metricRelabelings' &&
-    logged "$pm" '"reason":"pre-existing scrape annotations"'
+    logged "$pm" '"preannotated":[{"pod":"default/podmonitored-preannotated"'
 }
 expect "the webhook enables each endpoint's port by number: the main container's 9201, the worker's 9202" ota_ports
 expect "each port's config carries its endpoint's interval, path and metricRelabelings" ota_config
 expect "no pod-level key, and the marker names the PodMonitor" ota_marker_only
 expect "a selected pod with its own scrape annotations is left as it is" ota_preannotated
-expect "the webhook warns about it, naming the pod and the PodMonitor" \
-  logged default/podmonitored-preannotated "not applying PodMonitor default/podmonitored"
-expect "the report: partially translated, scrapeTimeout untranslated, metricRelabelings translated, the pre-annotated pod skipped" ota_report
+ota_preannotated_info() {
+  grep -F "not applying PodMonitor default/podmonitored" <<< "$OTA_LOGS" | grep -F default/podmonitored-preannotated | grep -qF '"level":"INFO"'
+}
+expect "the webhook skips it at level INFO, naming the pod and the PodMonitor" ota_preannotated_info
+expect "the report: partially translated, scrapeTimeout untranslated, metricRelabelings translated, the pre-annotated pod preannotated" ota_report
 expect "a ServiceMonitor is logged as not supported" \
   logged "ServiceMonitor is not supported" default/podmonitored
 assert "the main container's metrics, attributed to it" \
