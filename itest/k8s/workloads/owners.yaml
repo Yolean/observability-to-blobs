@@ -1,0 +1,114 @@
+# One scraped pod per kind of controller, for the workload names the agent
+# derives from the labels each controller puts on its pods (README.md,
+# "Workload names"). Each serves one gauge named after its kind. The
+# Deployment's are the Deployments' elsewhere in the itest.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: owner-sts
+spec:
+  serviceName: owner-sts
+  replicas: 1
+  selector:
+    matchLabels:
+      app: owner-sts
+  template:
+    metadata:
+      labels:
+        app: owner-sts
+      annotations:
+        prometheus.io/scrape: "true"
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+      - name: app
+        image: busybox:1.37
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          mkdir -p /www && printf '# TYPE owner_statefulset gauge\nowner_statefulset 1\n' > /www/metrics
+          exec httpd -f -p 9131 -h /www
+        ports:
+        - containerPort: 9131
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: owner-ds
+spec:
+  selector:
+    matchLabels:
+      app: owner-ds
+  template:
+    metadata:
+      labels:
+        app: owner-ds
+      annotations:
+        prometheus.io/scrape: "true"
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+      - name: app
+        image: busybox:1.37
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          mkdir -p /www && printf '# TYPE owner_daemonset gauge\nowner_daemonset 1\n' > /www/metrics
+          exec httpd -f -p 9132 -h /www
+        ports:
+        - containerPort: 9132
+---
+# test.sh deletes it before each apply, so that every run scrapes it
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: owner-job
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 1
+      containers:
+      - name: app
+        image: busybox:1.37
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          mkdir -p /www && printf '# TYPE owner_job gauge\nowner_job 1\n' > /www/metrics
+          timeout 90 httpd -f -p 9133 -h /www || true
+        ports:
+        - containerPort: 9133
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: owner-cron
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          annotations:
+            prometheus.io/scrape: "true"
+        spec:
+          restartPolicy: Never
+          terminationGracePeriodSeconds: 1
+          containers:
+          - name: app
+            image: busybox:1.37
+            command: ["/bin/sh", "-c"]
+            args:
+            - |
+              mkdir -p /www && printf '# TYPE owner_cronjob gauge\nowner_cronjob 1\n' > /www/metrics
+              timeout 45 httpd -f -p 9134 -h /www || true
+            ports:
+            - containerPort: 9134

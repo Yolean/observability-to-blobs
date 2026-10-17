@@ -29,7 +29,9 @@ type series struct {
 // blobs-to-prometheus's raw.go has them: in the order Prometheus would
 // have them as target labels. A sample label of the same name is renamed
 // exported_<name>, as a scrape with honor_labels: false does.
-var metaLabels = []string{"cluster", "node", "job", "instance", "namespace", "pod", "container"}
+var metaLabels = []string{"cluster", "node", "scrape", "instance", "namespace", "pod", "container",
+	"k8s_deployment_name", "k8s_replicaset_name", "k8s_statefulset_name", "k8s_daemonset_name",
+	"k8s_job_name", "k8s_cronjob_name"}
 
 func isMeta(name string) bool {
 	for _, m := range metaLabels {

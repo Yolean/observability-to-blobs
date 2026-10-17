@@ -45,7 +45,7 @@ func fixture(t *testing.T) (context.Context, *sql.Conn, string, string) {
 		          'n1' AS node, 'journal' AS stream, 'k3s.service' AS unit, 'up' AS message
 		   UNION ALL BY NAME
 		   SELECT 'metrics' AS "table", TIMESTAMP_NS '2026-09-25 14:00:03' AS time, 'itest' AS cluster,
-		          'n1' AS node, 'pod' AS job, 'default' AS namespace, 'p' AS pod, 'u1' AS pod_uid, 'app' AS container, 0 AS restart,
+		          'n1' AS node, 'pod' AS scrape, 'default' AS namespace, 'p' AS pod, 'u1' AS pod_uid, 'app' AS container, 0 AS restart,
 		          [{'name': 'up', 'type': 'gauge', 'labels': MAP {}, 'value': 1.0}] AS samples
 		 ) TO ` + sqlString(b) + ` (FORMAT json, COMPRESSION zstd)`,
 	} {

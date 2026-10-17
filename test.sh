@@ -364,6 +364,8 @@ phase "cluster: apply"
 # manifest must recreate them, so apply always starts from absence
 $KUBECTL delete pod metrics-multi metrics-classic metrics-numeric metrics-optout \
   --ignore-not-found --grace-period=1 >/dev/null
+# and a Job runs once: delete it so that every run scrapes it
+$KUBECTL delete job owner-job --ignore-not-found >/dev/null
 # the prometheus-operator CRDs, as a cluster without the operator gets them
 # (operator-to-annotations/README.md); too large for a client-side apply
 $KUBECTL apply --server-side -k operator-to-annotations/crds >/dev/null
@@ -1048,11 +1050,28 @@ assert "pod without the scrape annotation is not scraped" \
 assert "metrics lines carry the scraped container's restart count, the agent's own included" \
   "SELECT count(*) > 0 AND bool_and(restart IS NOT NULL) FROM metrics WHERE container <> ''"
 assert "pod targets carry pod_uid" \
-  "SELECT bool_and(length(pod_uid) = 36) FROM metrics WHERE job = 'pod'"
+  "SELECT bool_and(length(pod_uid) = 36) FROM metrics WHERE scrape = 'pod'"
 assert "node_exporter metrics arrive via the static target with the agent pod's identity" \
-  "SELECT count(*) > 0 FROM metrics WHERE job = 'node' AND name = 'node_cpu_seconds_total' AND namespace = 'observability' AND pod LIKE 'node-agent-%' AND container = 'agent' AND length(pod_uid) = 36"
+  "SELECT count(*) > 0 FROM metrics WHERE scrape = 'node' AND name = 'node_cpu_seconds_total' AND namespace = 'observability' AND pod LIKE 'node-agent-%' AND container = 'agent' AND length(pod_uid) = 36"
 assert "agent self metrics arrive via the static target" \
-  "SELECT count(*) > 0 FROM metrics WHERE job = 'node' AND name LIKE 'fluentbit_%' AND pod LIKE 'node-agent-%'"
+  "SELECT count(*) > 0 FROM metrics WHERE scrape = 'node' AND name LIKE 'fluentbit_%' AND pod LIKE 'node-agent-%'"
+assert "a Deployment's pod's samples carry its Deployment and ReplicaSet (README.md, \"Workload names\")" \
+  "SELECT count(*) > 0 AND bool_and(k8s_deployment_name = 'podmonitored' AND k8s_replicaset_name LIKE 'podmonitored-%'
+     AND k8s_daemonset_name IS NULL AND k8s_job_name IS NULL) FROM metrics WHERE pod LIKE 'podmonitored-%' AND pod <> 'podmonitored-preannotated'"
+# owners <pod LIKE pattern> <condition>: the workload name columns as k=v,...
+# on the rows of that pod's gauge, meet the condition
+owners() {
+  echo "SELECT count(*) > 0 AND bool_and(concat_ws(',', 'd=' || k8s_deployment_name, 'rs=' || k8s_replicaset_name,
+       'sts=' || k8s_statefulset_name, 'ds=' || k8s_daemonset_name, 'job=' || k8s_job_name, 'cj=' || k8s_cronjob_name) $2)
+     FROM metrics WHERE pod LIKE '$1' AND name LIKE 'owner_%'"
+}
+assert "a StatefulSet's pod carries its StatefulSet only" "$(owners 'owner-sts-%' "= 'sts=owner-sts'")"
+assert "a DaemonSet's pod carries its DaemonSet only" "$(owners 'owner-ds-%' "= 'ds=owner-ds'")"
+assert "a Job's pod carries its Job only" "$(owners 'owner-job-%' "= 'job=owner-job'")"
+assert "a CronJob's pod carries its Job and its CronJob" "$(owners 'owner-cron-%' "SIMILAR TO 'job=owner-cron-[0-9]{8},cj=owner-cron'")"
+assert "a bare pod's samples and the static targets' carry no workload" \
+  "SELECT count(*) > 0 AND bool_and(coalesce(k8s_deployment_name, k8s_replicaset_name, k8s_statefulset_name, k8s_daemonset_name,
+     k8s_job_name, k8s_cronjob_name) IS NULL) FROM metrics WHERE pod = 'metrics-multi' OR scrape = 'node'"
 assert "healthy targets are scraped about every 15s" \
   "SELECT bool_and(coalesce(n, 0) BETWEEN 3 AND 5) FROM $MINUTES LEFT JOIN (SELECT date_trunc('minute', time) AS m, count(*) AS n FROM metrics WHERE pod = 'metrics-multi' AND container = 'app' AND name = 'up' AND time > $SINCE + INTERVAL 3 MINUTE AND time < $NOW - INTERVAL 2 MINUTE GROUP BY m) USING (m)"
 

@@ -31,7 +31,7 @@ func fixture(t *testing.T) string {
 		{"table": "logs", "ts": "2026-10-11T09:03:00Z", "cluster": "c", "node": "n1", "stream": "journal",
 			"unit": "kubelet.service", "priority": 6, "message": "journal line"},
 		{"table": "metrics", "time": "2026-10-11T09:01:30Z", "ts": "2026-10-11T09:01:30Z", "cluster": "c", "node": "n1",
-			"job": "pod", "instance": "10.0.0.1:9090", "namespace": "qa", "pod": "web-1", "pod_uid": "u1", "container": "app", "restart": 0,
+			"scrape": "pod", "instance": "10.0.0.1:9090", "namespace": "qa", "pod": "web-1", "pod_uid": "u1", "container": "app", "restart": 0,
 			"samples": []map[string]any{{"name": "http_requests_total", "type": "counter", "labels": map[string]string{"code": "200"}, "value": 42}}},
 		{"table": "podindex", "time": "2026-10-11T09:04:00Z", "ts": "2026-10-11T09:04:00Z", "cluster": "c", "node": "n1",
 			"kind": "container-exit", "namespace": "qa", "pod": "web-1", "pod_uid": "u1", "container": "app", "restart": 0,

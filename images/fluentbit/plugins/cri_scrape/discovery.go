@@ -61,6 +61,7 @@ type target struct {
 	// relabelErr is why the target's metric_relabel_configs are not
 	// applied; its samples are then shipped as scraped
 	relabelErr string
+	workload   workload // the pod's controllers; none for static targets
 }
 
 func (t target) url() string {
@@ -242,8 +243,10 @@ func podTargets(sb *runtime.PodSandbox, running []*runtime.Container, expanded [
 			restarts[c.Metadata.Name] = containerRestart(c)
 		}
 	}
+	w := workloadOf(sb.Metadata.Name, podLabels(sb.Labels), time.Unix(0, sb.CreatedAt))
 	out := make([]target, 0, len(expanded))
 	for _, t := range expanded {
+		t.workload = w
 		t.namespace = sb.Metadata.Namespace
 		t.pod = sb.Metadata.Name
 		t.podUID = sb.Metadata.Uid

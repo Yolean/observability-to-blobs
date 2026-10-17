@@ -55,11 +55,17 @@ metrics:
 time       TIMESTAMP_NS   scrape start time
 cluster    VARCHAR
 node       VARCHAR
-job        VARCHAR        pod | node
+scrape     VARCHAR        pod | node | host: the scrape path
 instance   VARCHAR        ip:port
-namespace  VARCHAR        '' for job=node
+namespace  VARCHAR        '' for scrape=node
 pod        VARCHAR
 container  VARCHAR
+k8s_deployment_name  VARCHAR   the pod's controllers, NULL when none of the kind
+k8s_replicaset_name  VARCHAR   (README.md, "Workload names")
+k8s_statefulset_name VARCHAR
+k8s_daemonset_name   VARCHAR
+k8s_job_name         VARCHAR
+k8s_cronjob_name     VARCHAR
 name       VARCHAR        metric name as exposed
 type       VARCHAR        counter | gauge | histogram | summary | untyped
 labels     MAP(VARCHAR, VARCHAR)
@@ -271,7 +277,7 @@ Node memory (node_exporter via the static target):
 ```sql
 SELECT time, value / 1024 / 1024 AS available_mib
 FROM metrics
-WHERE job = 'node' AND name = 'node_memory_MemAvailable_bytes'
+WHERE scrape = 'node' AND name = 'node_memory_MemAvailable_bytes'
 ORDER BY time DESC LIMIT 5;
 ```
 

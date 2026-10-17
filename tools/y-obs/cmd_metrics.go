@@ -24,15 +24,16 @@ bucket's retention.
 
 A series is one target (pod_uid, container, instance) and label set.
 --where key=value filters on labels (or namespace, pod, container, node,
-job, instance); --by key,... sums (--agg) across the series that share
-those keys.
+scrape, instance, k8s_deployment_name and the other workload names);
+--by key,... sums (--agg) across the series that share those keys.
 
 Examples:
   y-obs metrics names -n qa --pod '^web-'
   y-obs metrics series container_memory_working_set_bytes --pod '^web-1$' --since 6h --step 1m
   y-obs metrics rate http_requests_total -n qa --by code --since 1h --step 5m
-  y-obs metrics latest up --where job=pod --value 0
-  y-obs metrics series node_load1 --job node --since 7d --step 1h --out inv.duckdb:load
+  y-obs metrics latest up --where scrape=pod --value 0
+  y-obs metrics rate http_requests_total -n qa --by k8s_deployment_name --since 1h
+  y-obs metrics series node_load1 --scrape node --since 7d --step 1h --out inv.duckdb:load
 
 Flags:
 `
@@ -44,7 +45,9 @@ func cmdMetrics(ctx context.Context, args []string) error {
 // seriesCols identify a series; byColumns are the --by keys that are
 // columns rather than labels.
 var seriesCols = []string{"namespace", "pod", "pod_uid", "container", "instance", "labels"}
-var byColumns = map[string]bool{"namespace": true, "pod": true, "pod_uid": true, "container": true, "node": true, "job": true, "instance": true}
+var byColumns = map[string]bool{"namespace": true, "pod": true, "pod_uid": true, "container": true, "node": true, "scrape": true, "instance": true,
+	"k8s_deployment_name": true, "k8s_replicaset_name": true, "k8s_statefulset_name": true, "k8s_daemonset_name": true,
+	"k8s_job_name": true, "k8s_cronjob_name": true}
 
 var labelKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_./-]*$`)
 
@@ -91,14 +94,16 @@ func runMetrics(ctx context.Context, args []string, stdout, stderr io.Writer, no
 		return fail(exitUsage, "metrics %s: use names, series, rate or latest", sub)
 	}
 	c := newSessionCommand("metrics", metricsUsage, limit)
-	var ns, pod, container, job, match, by, agg, stepFlag, value string
+	var ns, pod, container, scrape, match, by, agg, stepFlag, value string
 	var where stringList
 	c.fs.StringVar(&ns, "namespace", "", "only this namespace")
 	c.fs.StringVar(&ns, "n", "", "short for --namespace")
 	c.fs.StringVar(&pod, "pod", "", "pod names matching this RE2 pattern")
 	c.fs.StringVar(&container, "container", "", "only this container")
-	c.fs.StringVar(&job, "job", "", "pod, node or host: application targets, the node's own, a host agent's")
-	c.fs.Var(&where, "where", "key=value a series must have (a label, or namespace/pod/container/node/job/instance); repeatable")
+	c.fs.StringVar(&scrape, "scrape", "", "pod, node or host: application targets, the node's own, a host agent's")
+	// its name before the column was renamed
+	c.fs.StringVar(&scrape, "job", "", "the same as --scrape")
+	c.fs.Var(&where, "where", "key=value a series must have (a label, or namespace/pod/container/node/scrape/instance/k8s_*_name); repeatable")
 	c.fs.StringVar(&match, "match", "", "names: metric names matching this RE2 pattern")
 	c.fs.StringVar(&by, "by", "", "series, rate: aggregate across series by these comma-separated keys")
 	c.fs.StringVar(&agg, "agg", "sum", "series, rate with --by: sum, avg, max or min")
@@ -136,8 +141,8 @@ func runMetrics(ctx context.Context, args []string, stdout, stderr io.Writer, no
 	if container != "" {
 		conds = append(conds, "container = "+sqlString(container))
 	}
-	if job != "" {
-		conds = append(conds, "job = "+sqlString(job))
+	if scrape != "" {
+		conds = append(conds, "scrape = "+sqlString(scrape))
 	}
 	if c.sf.node != "" {
 		conds = append(conds, "node = "+sqlString(c.sf.node))

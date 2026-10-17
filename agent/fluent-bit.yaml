@@ -152,7 +152,7 @@ pipeline:
       scrape_interval: 15s
       scrape_timeout: 10s
       discovery_interval: 10s
-      # job@host:port/path, comma-separated: the agent's own exporter by
+      # scrape@host:port/path, comma-separated: the agent's own exporter by
       # default (agent/daemonset.yaml); an overlay adds, for example, a host
       # agent on the node (HOST_MODE.md)
       static_targets: ${STATIC_TARGETS}

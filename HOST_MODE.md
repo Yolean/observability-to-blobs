@@ -30,7 +30,7 @@ reader of `raw1` reads them:
   are the only extension, documented in `raw.sql`; the audit log is read from its file because
   journald's copy of audit events is best effort. `ts` is the time the agent read the line; the
   line's own stamp (the audit record's `audit(...)`) is in the message.
-- **Metrics** are `metrics` rows as the DaemonSet's node scrape (`job` `node`, `instance`,
+- **Metrics** are `metrics` rows as the DaemonSet's node scrape (`scrape` `node`, `instance`,
   `samples`): today the heartbeat, as one sample, `observability_host_heartbeat{boot_id="..."}`
   (type `counter`) with the counter as value, and `instance` the node's name and the metrics port.
   Rows carry `time` (the script's stamp to the nanosecond, as the node agent's scrapes do) and `ts`
@@ -182,7 +182,7 @@ output records, errors, retries, buffer use). Where to:
   `node@127.0.0.1:2021/metrics,host@$(NODE_IP):2023/metrics` (Kubernetes expands `$(NODE_IP)`,
   the node's address from the downward API, but only from an env entry above it: a strategic merge
   patch puts its own entries first, so it repeats `NODE_IP` ahead of `STATIC_TARGETS`), and the
-  host's series arrive with `job="host"`.
+  host's series arrive with `scrape="host"`.
   The host agent must then listen on the node's address, not 127.0.0.1, and the host's firewall
   must admit the port from the pods only.
 - **On a host without Kubernetes** nothing else exports them. The host agent serves all of them for

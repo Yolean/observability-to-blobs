@@ -72,10 +72,15 @@ func metricsQuery(ms []matcher) (string, error) {
 		}
 		conds = append(conds, c)
 	}
-	q := `SELECT name, coalesce(cluster, '') AS cluster, coalesce(node, '') AS node, coalesce(job, '') AS job,
-  coalesce(instance, '') AS instance, coalesce(nullif(namespace, '_node'), '') AS namespace, coalesce(pod, '') AS pod,
-  coalesce(container, '') AS container, labels,
-  list({'t': epoch_ms(time), 'v': value}) AS s
+	q := "SELECT name"
+	for _, m := range metaLabels {
+		col := m
+		if m == "namespace" {
+			col = "nullif(namespace, '_node')"
+		}
+		q += ", coalesce(" + col + ", '') AS " + m
+	}
+	q += `, labels, list({'t': epoch_ms(time), 'v': value}) AS s
 FROM w_metrics`
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
@@ -96,13 +101,20 @@ func collectSeries(ctx context.Context, s *session, q string, limit int) ([]*ser
 	var order []*series
 	n := 0
 	for rows.Next() {
-		var name, cluster, node, job, instance, namespace, pod, container string
+		var name string
+		values := make([]string, len(metaLabels))
 		var labels, list any
-		if err := rows.Scan(&name, &cluster, &node, &job, &instance, &namespace, &pod, &container, &labels, &list); err != nil {
+		dest := []any{&name}
+		for i := range values {
+			dest = append(dest, &values[i])
+		}
+		if err := rows.Scan(append(dest, &labels, &list)...); err != nil {
 			return nil, n, err
 		}
-		meta := map[string]string{"cluster": cluster, "node": node, "job": job, "instance": instance,
-			"namespace": namespace, "pod": pod, "container": container}
+		meta := make(map[string]string, len(metaLabels))
+		for i, m := range metaLabels {
+			meta[m] = values[i]
+		}
 		ls := seriesLabels(name, meta, labelMap(labels))
 		key := seriesKey(ls)
 		sr, ok := by[key]

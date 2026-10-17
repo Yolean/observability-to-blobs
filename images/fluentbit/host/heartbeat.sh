@@ -99,5 +99,5 @@ PROM
 write_flag_metrics | write_atomic "$prom_file" || echo "heartbeat: cannot write $prom_file" >&2
 
 # the row's time, to the nanosecond as the node agent's scrapes carry it
-printf '{"table":"metrics","time":"%s","job":"node","instance":"%s","samples":[{"name":"observability_host_heartbeat","type":"counter","labels":{"boot_id":"%s"},"value":%s}]}\n' \
+printf '{"table":"metrics","time":"%s","scrape":"node","instance":"%s","samples":[{"name":"observability_host_heartbeat","type":"counter","labels":{"boot_id":"%s"},"value":%s}]}\n' \
   "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" "$(quote "$instance")" "$boot_id" "$counter"

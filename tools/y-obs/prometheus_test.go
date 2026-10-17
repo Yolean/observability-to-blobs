@@ -106,9 +106,9 @@ func TestReadRequestDecode(t *testing.T) {
 }
 
 func TestSeriesLabels(t *testing.T) {
-	ls := seriesLabels("http_requests_total", map[string]string{"job": "pod", "pod": "web-1", "namespace": "", "cluster": "c"},
+	ls := seriesLabels("http_requests_total", map[string]string{"scrape": "pod", "pod": "web-1", "namespace": "", "cluster": "c"},
 		map[string]string{"code": "200", "pod": "inner", "empty": ""})
-	want := []label{{"__name__", "http_requests_total"}, {"cluster", "c"}, {"code", "200"}, {"exported_pod", "inner"}, {"job", "pod"}, {"pod", "web-1"}}
+	want := []label{{"__name__", "http_requests_total"}, {"cluster", "c"}, {"code", "200"}, {"exported_pod", "inner"}, {"pod", "web-1"}, {"scrape", "pod"}}
 	if len(ls) != len(want) {
 		t.Fatalf("%v", ls)
 	}
@@ -178,7 +178,7 @@ func TestRemoteRead(t *testing.T) {
 	if len(got) != 1 || len(got[0]) != 1 || len(got[0][0].samples) != 6 {
 		t.Fatalf("%+v", got)
 	}
-	want := map[string]string{"__name__": "http_requests_total", "cluster": "c", "code": "200", "container": "app", "instance": "10.0.0.1:9090", "job": "pod", "namespace": "qa", "node": "n1", "pod": "web-1"}
+	want := map[string]string{"__name__": "http_requests_total", "cluster": "c", "code": "200", "container": "app", "instance": "10.0.0.1:9090", "namespace": "qa", "node": "n1", "pod": "web-1", "scrape": "pod"}
 	for _, l := range got[0][0].labels {
 		if want[l.name] != l.value {
 			t.Errorf("label %s=%s", l.name, l.value)

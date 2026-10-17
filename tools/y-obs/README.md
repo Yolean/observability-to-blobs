@@ -341,7 +341,8 @@ covers the whole cluster and usually meets the cost guard.
 y-obs metrics names -n qa --pod '^web-'
 y-obs metrics series container_memory_working_set_bytes --pod '^web-1$' --since 6h --step 1m
 y-obs metrics rate http_requests_total -n qa --by code --since 1h --step 5m
-y-obs metrics latest up --where job=pod --value 0
+y-obs metrics latest up --where scrape=pod --value 0
+y-obs metrics rate http_requests_total -n qa --by k8s_deployment_name --since 1h
 ```
 
 Every scraped sample is in the bucket, so there is no allowlist and no
@@ -356,7 +357,9 @@ target (pod_uid, container, instance) and label set. The subcommands:
   at a value.
 
 `--where key=value` and `--by key,...` take labels or the namespace,
-pod, pod_uid, container, node, job and instance columns. `--agg` (sum,
+pod, pod_uid, container, node, scrape (`--scrape`, or `--job` as
+before the column was renamed) and instance columns, and the workload
+names (`k8s_deployment_name` and the rest). `--agg` (sum,
 avg, max, min) combines the series sharing the `--by` keys. An unknown
 name is exit 4, with the closest names in the window.
 
@@ -421,8 +424,9 @@ prints the URL (stdout) and opens it in the browser.
   scrape targets are not targets here; their `up` series are queryable
   as any other.
 - **Series.** The series are blobs-to-prometheus's: `__name__`, the
-  non-empty cluster, node, job, instance, namespace, pod and container,
-  then the sample's labels, renamed `exported_<name>` on a clash.
+  non-empty cluster, node, scrape, instance, namespace, pod, container and
+  workload names, then the sample's labels, renamed `exported_<name>` on
+  a clash.
 - **The server binary.** It is ystack's `y-prometheus` (Prometheus
   3.15.0), `prometheus` on PATH, or `PROMETHEUS`.
 - **Implementation.** `prometheus-serve` is the part that runs detached.
