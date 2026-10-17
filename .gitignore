@@ -12,3 +12,11 @@ itest/cluster/.kubeconfig.y-cluster-lock
 examples/gke/s3-credentials.env
 # release.sh puts the extension here for the build, then removes it
 tools/y-obs/httpfs/
+# what go build leaves in a module's directory
+compactor/compactor
+images/blobs-to-prometheus/blobs-to-prometheus
+images/operator-to-annotations/operator-to-annotations
+images/fluentbit/plugins/cri_scrape/cri_scrape
+images/fluentbit/plugins/k8s_objects/k8s_objects
+tools/rules-manifest/rules-manifest
+tools/y-obs/y-obs
