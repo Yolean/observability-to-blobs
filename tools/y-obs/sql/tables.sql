@@ -4,8 +4,7 @@
 -- have only the microsecond ts. Rows with no namespace (the node's journal)
 -- get the pseudo-namespace _node, which no Kubernetes namespace can be;
 -- metrics lines always carry one, the agent's own for node-level scrapes.
--- metrics is one row per sample; its scrape is the raw line's job in
--- objects written before the column was renamed.
+-- metrics is one row per sample.
 --
 -- Names resolve when a query runs, and a temp table takes precedence over
 -- a view of the same name, even qualified as main.<name> (temp tables live
@@ -19,7 +18,7 @@ CREATE OR REPLACE VIEW logs AS
   FROM raw WHERE "table" = 'logs';
 
 CREATE OR REPLACE VIEW metrics AS
-  SELECT time, cluster, node, coalesce(scrape, job) AS scrape, instance, coalesce(namespace, '_node') AS namespace,
+  SELECT time, cluster, node, scrape, instance, coalesce(namespace, '_node') AS namespace,
          pod, pod_uid, container, restart, k8s_deployment_name, k8s_replicaset_name, k8s_statefulset_name,
          k8s_daemonset_name, k8s_job_name, k8s_cronjob_name,
          s.name AS name, s.type AS type, s.labels AS labels, s.value AS value,

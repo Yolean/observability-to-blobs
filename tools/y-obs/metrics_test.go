@@ -14,7 +14,7 @@ func metricsRun(ctx context.Context, args []string, o, e *bytes.Buffer) error {
 }
 
 func scrape(at, pod string, samples ...map[string]interface{}) map[string]interface{} {
-	return map[string]interface{}{"table": "metrics", "time": at, "ts": at, "cluster": "c", "node": "n1", "job": "pod",
+	return map[string]interface{}{"table": "metrics", "time": at, "ts": at, "cluster": "c", "node": "n1", "scrape": "pod",
 		"instance": "10.0.0.1:9090", "namespace": "qa", "pod": pod, "pod_uid": pod + "-uid", "container": "app", "restart": 0, "samples": samples}
 }
 

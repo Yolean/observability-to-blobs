@@ -36,7 +36,6 @@ CREATE OR REPLACE VIEW raw AS
       -- metrics: one line per scrape
       scrape:'VARCHAR',             -- the scrape path: pod (annotations) | node (the agent's
                                     -- node_exporter and own metrics) | host (a host agent)
-      job:'VARCHAR',                -- scrape's name in objects written before it was renamed
       instance:'VARCHAR',           -- ip:port
       -- the pod's controllers, by the OpenTelemetry semantic conventions' k8s.*.name
       -- (README.md, "Workload names"); absent when the pod has none of that kind

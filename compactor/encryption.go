@@ -268,19 +268,6 @@ func (c *compactor) readTier(objs []tierObject, opts string) string {
 	return readTier(c.tiers, objs, opts)
 }
 
-// tierRows is a read of table's tier objects, as readTier. Metrics objects
-// written before job was renamed scrape have job: their rows come with
-// scrape, so that a fold or rollup over older and newer objects writes the
-// one column.
-func (c *compactor) tierRows(table string, objs []tierObject) string {
-	q := c.readTier(objs, "")
-	if table != "metrics" {
-		return q
-	}
-	return "SELECT * EXCLUDE (job) REPLACE (coalesce(scrape, job) AS scrape) FROM (" + q +
-		" UNION ALL BY NAME SELECT NULL::VARCHAR AS job, NULL::VARCHAR AS scrape WHERE false)"
-}
-
 func readTier(tiers TierStore, objs []tierObject, opts string) string {
 	var plain, parts []string
 	for _, o := range objs {

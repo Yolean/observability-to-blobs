@@ -889,17 +889,7 @@ func (s *session) tierView(view string, files []string) (string, error) {
 		}
 		reads = append(reads, fmt.Sprintf("SELECT * FROM read_parquet(%s, filename = true, encryption_config = {footer_key: %s}%s)", sqlList(byKey[id]), sqlString(id), hive))
 	}
-	q := strings.Join(reads, " UNION ALL BY NAME ")
-	if q != "" && strings.HasSuffix(view, "_metrics") {
-		// objects written before job was renamed scrape, and before the
-		// workload names, read with the columns of the newer ones
-		q = "SELECT * EXCLUDE (job) REPLACE (coalesce(scrape, job) AS scrape) FROM (" + q +
-			" UNION ALL BY NAME SELECT NULL::VARCHAR AS job, NULL::VARCHAR AS scrape" +
-			", NULL::VARCHAR AS k8s_deployment_name, NULL::VARCHAR AS k8s_replicaset_name" +
-			", NULL::VARCHAR AS k8s_statefulset_name, NULL::VARCHAR AS k8s_daemonset_name" +
-			", NULL::VARCHAR AS k8s_job_name, NULL::VARCHAR AS k8s_cronjob_name WHERE false)"
-	}
-	return q, nil
+	return strings.Join(reads, " UNION ALL BY NAME "), nil
 }
 
 // emptyRaw writes a zstd file with no lines: raw.sql then binds its

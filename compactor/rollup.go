@@ -122,7 +122,7 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 		hourlyObjs[t] = objs
 		hourly[t] = "(SELECT * FROM empty_" + t
 		if len(objs) > 0 {
-			hourly[t] += " UNION ALL BY NAME " + c.tierRows(t, objs)
+			hourly[t] += " UNION ALL BY NAME " + c.readTier(objs, "")
 		}
 		hourly[t] += ")"
 	}

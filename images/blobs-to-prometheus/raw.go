@@ -38,7 +38,6 @@ type rawLine struct {
 	Cluster   string `json:"cluster"`
 	Node      string `json:"node"`
 	Scrape    string `json:"scrape"`
-	Job       string `json:"job"` // scrape, in lines written before it was renamed
 	Instance  string `json:"instance"`
 	Namespace string `json:"namespace"`
 	Pod       string `json:"pod"`
@@ -142,11 +141,7 @@ func decodeLines(r io.Reader, keep *selectorSet) (*batch, error) {
 			continue
 		}
 		b.lines++
-		scrape := l.Scrape
-		if scrape == "" {
-			scrape = l.Job
-		}
-		meta := map[string]string{"cluster": l.Cluster, "node": l.Node, "scrape": scrape,
+		meta := map[string]string{"cluster": l.Cluster, "node": l.Node, "scrape": l.Scrape,
 			"instance": l.Instance, "namespace": l.Namespace, "pod": l.Pod, "container": l.Container,
 			"k8s_deployment_name": l.Deployment, "k8s_replicaset_name": l.ReplicaSet,
 			"k8s_statefulset_name": l.StatefulSet, "k8s_daemonset_name": l.DaemonSet,

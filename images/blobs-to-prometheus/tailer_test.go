@@ -372,19 +372,3 @@ func TestTailerEveryCluster(t *testing.T) {
 		t.Fatalf("pushed %q after c3 appeared", got)
 	}
 }
-
-// A line written before job was renamed scrape: its job is the scrape.
-func TestDecodeLegacyJob(t *testing.T) {
-	at := time.Date(2026, 10, 8, 14, 0, 5, 0, time.UTC)
-	line := strings.Replace(metricsLine(at, "n1", "node", "ns1", `{"name":"up","type":"gauge","labels":{},"value":1}`), `"scrape":`, `"job":`, 1)
-	b, err := decodeObject(zstdLines(t, line), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := labelValue(b.series[b.order[0]].labels, "scrape"); got != "node" {
-		t.Fatalf("scrape %q, want node", got)
-	}
-	if got := labelValue(b.series[b.order[0]].labels, "job"); got != "" {
-		t.Fatalf("job %q, want none", got)
-	}
-}

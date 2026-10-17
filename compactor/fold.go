@@ -454,7 +454,7 @@ func (c *compactor) foldKeys(ctx context.Context, conn *sql.Conn, h time.Time, k
 		q := fmt.Sprintf("CREATE TEMP TABLE %s AS SELECT DISTINCT * EXCLUDE (filename) FROM %s", t, t)
 		if union && exists[t] {
 			q = fmt.Sprintf("CREATE TEMP TABLE %s AS SELECT DISTINCT * FROM (SELECT * EXCLUDE (filename) FROM %s "+
-				"UNION ALL BY NAME %s)", t, t, c.tierRows(t, []tierObject{objs[t]}))
+				"UNION ALL BY NAME %s)", t, t, c.readTier([]tierObject{objs[t]}, ""))
 		}
 		if err := c.exec(ctx, conn, q); err != nil {
 			return nil, err

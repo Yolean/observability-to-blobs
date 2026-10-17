@@ -919,8 +919,7 @@ assert "container log lines carry exactly the contract keys (no Lua, no leaked p
 # does not pin would be silently ignored, a pinned field no line carries
 # is a rename or a typo. Journal-only fields are absent on the docker
 # backend; exit_message is only set when the runtime has one.
-# job is scrape's name in older objects; no line has it now.
-if [ "$BACKEND" = docker ]; then ABSENT_OK="['unit', 'priority', 'exit_message', 'job']"; else ABSENT_OK="['exit_message', 'job']"; fi
+if [ "$BACKEND" = docker ]; then ABSENT_OK="['unit', 'priority', 'exit_message']"; else ABSENT_OK="['exit_message']"; fi
 assert "every field the agent emits is a pinned column of compactor/sql/raw.sql (offenders listed)" \
   "WITH seen AS (SELECT list_distinct(flatten(list(json_keys(json)))) AS keys FROM $RAW_OBJECTS),
         pinned AS (SELECT list(column_name) AS cols FROM (DESCRIBE raw))
@@ -1056,8 +1055,6 @@ assert "node_exporter metrics arrive via the static target with the agent pod's 
   "SELECT count(*) > 0 FROM metrics WHERE scrape = 'node' AND name = 'node_cpu_seconds_total' AND namespace = 'observability' AND pod LIKE 'node-agent-%' AND container = 'agent' AND length(pod_uid) = 36"
 assert "agent self metrics arrive via the static target" \
   "SELECT count(*) > 0 FROM metrics WHERE scrape = 'node' AND name LIKE 'fluentbit_%' AND pod LIKE 'node-agent-%'"
-assert "no metrics line has job: scrape names the scrape path" \
-  "SELECT count(*) = 0 FROM raw WHERE \"table\" = 'metrics' AND job IS NOT NULL"
 assert "a Deployment's pod's samples carry its Deployment and ReplicaSet (README.md, \"Workload names\")" \
   "SELECT count(*) > 0 AND bool_and(k8s_deployment_name = 'podmonitored' AND k8s_replicaset_name LIKE 'podmonitored-%'
      AND k8s_daemonset_name IS NULL AND k8s_job_name IS NULL) FROM metrics WHERE pod LIKE 'podmonitored-%' AND pod <> 'podmonitored-preannotated'"

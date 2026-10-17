@@ -55,7 +55,7 @@ metrics:
 time       TIMESTAMP_NS   scrape start time
 cluster    VARCHAR
 node       VARCHAR
-scrape     VARCHAR        pod | node | host: the scrape path (job in older objects)
+scrape     VARCHAR        pod | node | host: the scrape path
 instance   VARCHAR        ip:port
 namespace  VARCHAR        '' for scrape=node
 pod        VARCHAR
