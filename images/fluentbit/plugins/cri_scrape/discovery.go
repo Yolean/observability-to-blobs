@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/prometheus/model/relabel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"gopkg.in/yaml.v3"
@@ -56,6 +57,10 @@ type target struct {
 	port      int
 	path      string
 	interval  time.Duration // 0 means the scraper's default
+	relabel   []*relabel.Config
+	// relabelErr is why the target's metric_relabel_configs are not
+	// applied; its samples are then shipped as scraped
+	relabelErr string
 }
 
 func (t target) url() string {
@@ -89,6 +94,9 @@ type otelConfig struct {
 	Endpoint           string `yaml:"endpoint"`
 	MetricsPath        string `yaml:"metrics_path"`
 	CollectionInterval string `yaml:"collection_interval"`
+	// decoded per target, so that a malformed list does not take the
+	// other fields with it
+	MetricRelabelConfigs yaml.Node `yaml:"metric_relabel_configs"`
 }
 
 type criDiscoverer struct {
@@ -412,6 +420,9 @@ func (c otelConfig) over(base otelConfig) otelConfig {
 	if c.CollectionInterval == "" {
 		c.CollectionInterval = base.CollectionInterval
 	}
+	if c.MetricRelabelConfigs.Kind == 0 {
+		c.MetricRelabelConfigs = base.MetricRelabelConfigs
+	}
 	return c
 }
 
@@ -426,6 +437,12 @@ func otelTarget(dp declaredPort, h otelHint) target {
 		if d, err := time.ParseDuration(h.config.CollectionInterval); err == nil && d > 0 {
 			t.interval = d
 		}
+	}
+	cfgs, err := parseRelabel(h.config.MetricRelabelConfigs)
+	if err != nil {
+		t.relabelErr = err.Error()
+	} else {
+		t.relabel = cfgs
 	}
 	return t
 }
