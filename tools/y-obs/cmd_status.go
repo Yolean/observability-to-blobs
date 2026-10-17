@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -112,7 +113,7 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer, now
 		st, _, err := storeFor(ctx, *contextFlag, *bucketFlag)
 		if err != nil {
 			notes = append(notes, "no data section: "+err.Error())
-			if exitOf(err) == exitAuth {
+			if ee := (*exitError)(nil); errors.As(err, &ee) && ee.code == exitAuth {
 				authErr = err
 			}
 			break
