@@ -175,7 +175,9 @@ image() {
   builder "$HOST_PLATFORM" go run "github.com/turbokube/contain/cmd/contain@$CONTAIN" \
     build --platforms-env-require --push=false --output "/repo/$oci" --logger plain >&2
   BUILDER_ENV=()
-  rm -rf "${REPO:?}/$oci"
+  # with a remote daemon the layout was written in the volume: replace the
+  # host's copy; with a local one it is the host's already
+  [ -z "$REMOTE" ] || rm -rf "${REPO:?}/$oci"
   copy_back "$OUT/app" "$OUT/duckdb" "$oci"
   # the layout's first manifest is the image index
   DIGEST=$(sed -n 's/.*"digest": *"\(sha256:[0-9a-f]*\)".*/\1/p' "$REPO/$oci/index.json" | head -n 1)
