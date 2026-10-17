@@ -36,8 +36,6 @@ spec:
           capabilities:
             drop: [ALL]
         env:
-        - name: CLUSTER_NAME
-          value: dev
         - name: NODE_NAME
           valueFrom:
             fieldRef:

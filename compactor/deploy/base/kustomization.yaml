@@ -2,8 +2,10 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# Base. Overlays set the namespace, CLUSTER_NAME (as the node agent names
-# the cluster), S3_BUCKET, S3_ENDPOINT and the blobs-compactor-s3 secret
+# Base. Overlays set the namespace, CLUSTER_NAME when the compactor is one
+# cluster's (as the node agent names it; without it the compactor folds
+# every cluster in the bucket), S3_BUCKET, S3_ENDPOINT and the
+# blobs-compactor-s3 secret
 # (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY: read on raw1/, read and write
 # on hourly/ and daily/; delete on raw1/ only with RAW_DELETE=after-final).
 # Parquet encryption is off: an overlay turns it on by mounting a Secret

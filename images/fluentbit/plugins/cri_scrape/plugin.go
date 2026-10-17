@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -73,9 +74,14 @@ func FLBPluginInit(plugin unsafe.Pointer) int {
 		return input.FLB_ERROR
 	}
 
+	cluster := get("cluster", os.Getenv("CLUSTER_NAME"))
+	if err := checkCluster(cluster); err != nil {
+		log.Printf("[cri_scrape] %v", err)
+		return input.FLB_ERROR
+	}
 	st := &pluginState{
 		queueMax: cfg.queueMax,
-		cluster:  get("cluster", os.Getenv("CLUSTER_NAME")),
+		cluster:  cluster,
 		node:     get("node", os.Getenv("NODE_NAME")),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -471,3 +477,20 @@ func parseDuration(s string) (time.Duration, error) {
 }
 
 func main() {}
+
+// clusterRE is the compactor's rule for a cluster name: one plain key
+// segment, as raw1/{cluster}/ needs.
+var clusterRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9_.]*[a-z0-9])?$`)
+
+// checkCluster refuses a missing or unusable cluster name, so that an
+// agent that is not configured stops instead of writing under a wrong
+// prefix: the manifests have no default.
+func checkCluster(name string) error {
+	if name == "" {
+		return fmt.Errorf("CLUSTER_NAME is required: the cluster's name, the first segment of every key the agent writes")
+	}
+	if !clusterRE.MatchString(name) {
+		return fmt.Errorf("CLUSTER_NAME %q: want a lowercase name of letters, digits, '-', '_' and '.'", name)
+	}
+	return nil
+}

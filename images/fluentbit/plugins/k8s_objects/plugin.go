@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -153,7 +154,13 @@ func FLBPluginInit(plugin unsafe.Pointer) int {
 		log.Printf("[k8s_objects] %v", err)
 		return input.FLB_ERROR
 	}
-	st := &pluginState{queueMax: cfg.queueMax, cluster: get("cluster", os.Getenv("CLUSTER_NAME"))}
+	cluster := get("cluster", os.Getenv("CLUSTER_NAME"))
+	if !clusterRE.MatchString(cluster) {
+		// no default in the manifests: an agent not configured stops
+		log.Printf("[k8s_objects] CLUSTER_NAME %q: required, a lowercase name of letters, digits, '-', '_' and '.'", cluster)
+		return input.FLB_ERROR
+	}
+	st := &pluginState{queueMax: cfg.queueMax, cluster: cluster}
 	// no discovery cache: with aggregated discovery a run is two requests
 	st.watcher = kobjects.NewWatcher(cfg.watcher, dc, dyn, st.enqueue)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -246,3 +253,7 @@ func FLBPluginExit() int {
 }
 
 func main() {}
+
+// clusterRE is the compactor's rule for a cluster name: one plain key
+// segment, as raw1/{cluster}/ needs.
+var clusterRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9_.]*[a-z0-9])?$`)

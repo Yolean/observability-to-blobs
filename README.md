@@ -279,6 +279,28 @@ parameters, target relabeling (`relabel_configs`) and `honor_labels`.
 | `examples/gke/` | sketch of a production overlay |
 | `test.sh` | the one command |
 
+## Secrets
+
+What each component needs, by the names the manifests use; whatever
+writes the Secrets (by hand, External Secrets, a sealed-secrets
+controller) writes these names and keys. The namespace is the overlay's,
+`observability` in the bases.
+
+| component | Secret | keys | access it needs | when |
+|---|---|---|---|---|
+| node agent (`agent/`) | `node-agent-s3` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | write on `raw1/{cluster}/` | always |
+| cluster agent (`k8sagent/`) | `node-agent-s3` | the same | write on `raw1/{cluster}/`, where it writes `_k8sagent/` | always |
+| compactor (`compactor/deploy/base`) | `blobs-compactor-s3` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | list and read on `raw1/`; list, read and write on `hourly/` and `daily/`; delete on their `_tmp/`, and on `raw1/` with `RAW_DELETE=after-final` | always; without `CLUSTER_NAME` for every cluster in the bucket |
+| compactor, tier encryption | the overlay's, `blobs-compactor-parquet-keys` in `itest/compactor` | one file per key id, named by the id, holding a base64 key of 32 characters | mounted at `PARQUET_KEYS_DIR` | with `PARQUET_KEY_ID` (`compactor/README.md`, "Encryption") |
+| compactor, spool mode (`compactor/deploy/spool`) | `blobs-compactor-put` | `PUT_ACCESS_KEY_ID`, `PUT_SECRET_ACCESS_KEY` | the key pair the shippers sign their PUTs with | spool mode |
+| operator-to-annotations | `operator-to-annotations-tls` | written by cert-manager | none to supply | with the webhook |
+| host agent (`HOST_MODE.md`) | no Secret: a root-only file in the AWS shared credentials format, `/etc/observability-host/s3-credentials` | `aws_access_key_id`, `aws_secret_access_key` | write on `raw1/{cluster}/` | host mode |
+| y-obs | none: an AWS profile (`tools/y-obs/README.md`, "S3 access") | | list and read on the tiers it reads | |
+
+`CLUSTER_NAME` has no default anywhere: the agents refuse to start
+without one, and a compactor without one compacts every cluster in its
+bucket.
+
 ## Running
 
 ```bash

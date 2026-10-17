@@ -2,7 +2,8 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# Base. Overlays set the image tag, CLUSTER_NAME, S3_* env and the
+# Base. Overlays set the image tag, CLUSTER_NAME (required: there is no
+# default, and the agent does not start without one), S3_* env and the
 # node-agent-s3 secret (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY), and can
 # replace pipeline-extra.yaml (configMapGenerator behavior: merge) to add
 # filters and outputs, e.g. signal forwarding. itest/k8s shows how.
