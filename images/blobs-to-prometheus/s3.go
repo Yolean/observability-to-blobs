@@ -28,37 +28,55 @@ type s3Store struct {
 }
 
 func (s *s3Store) list(ctx context.Context, prefix string) ([]string, error) {
+	keys, _, err := s.listing(ctx, prefix, "")
+	return keys, err
+}
+
+func (s *s3Store) dirs(ctx context.Context, prefix string) ([]string, error) {
+	_, dirs, err := s.listing(ctx, prefix, "/")
+	return dirs, err
+}
+
+// listing is a ListObjectsV2 of prefix, every page: the keys, and with a
+// delimiter the common prefixes.
+func (s *s3Store) listing(ctx context.Context, prefix, delimiter string) (keys, dirs []string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	var keys []string
 	token := ""
 	for {
 		q := url.Values{"list-type": {"2"}, "prefix": {prefix}}
+		if delimiter != "" {
+			q.Set("delimiter", delimiter)
+		}
 		if token != "" {
 			q.Set("continuation-token", token)
 		}
 		res, err := s.do(ctx, "", q)
 		if err != nil {
-			return nil, fmt.Errorf("list %s: %w", prefix, err)
+			return nil, nil, fmt.Errorf("list %s: %w", prefix, err)
 		}
 		var page struct {
 			IsTruncated           bool
 			NextContinuationToken string
 			Contents              []struct{ Key string }
+			CommonPrefixes        []struct{ Prefix string }
 		}
 		err = xml.NewDecoder(res.Body).Decode(&page)
 		res.Body.Close()
 		if err != nil {
-			return nil, fmt.Errorf("list %s: %w", prefix, err)
+			return nil, nil, fmt.Errorf("list %s: %w", prefix, err)
 		}
 		for _, c := range page.Contents {
 			keys = append(keys, c.Key)
 		}
+		for _, p := range page.CommonPrefixes {
+			dirs = append(dirs, p.Prefix)
+		}
 		if !page.IsTruncated {
-			return keys, nil
+			return keys, dirs, nil
 		}
 		if page.NextContinuationToken == "" {
-			return nil, fmt.Errorf("list %s: truncated page without a continuation token", prefix)
+			return nil, nil, fmt.Errorf("list %s: truncated page without a continuation token", prefix)
 		}
 		token = page.NextContinuationToken
 	}
