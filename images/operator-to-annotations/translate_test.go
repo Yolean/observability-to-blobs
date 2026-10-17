@@ -218,6 +218,52 @@ func TestSelects(t *testing.T) {
 	}
 }
 
+// metricRelabelings become the metric_relabel_configs of the config hint,
+// as a Prometheus scrape config writes them: snake_case, the action in
+// lower case, unset fields left to Prometheus's defaults.
+func TestTranslateMetricRelabelings(t *testing.T) {
+	pm := podMonitor(t, "app", "pm", `
+selector: {}
+podMetricsEndpoints:
+- port: metrics
+  path: /stats/prometheus
+  metricRelabelings:
+  - sourceLabels: [__name__, envoy_cluster_name]
+    separator: ';'
+    regex: envoy_cluster_membership_.*;(a|b)
+    action: Drop
+  - regex: worker
+    action: labeldrop
+  - sourceLabels: [__name__]
+    targetLabel: __name__
+    replacement: ""
+    regex: gone
+`)
+	res := Translate("app/p", testPod(t, nil, mainAndWorker), []*monitoringv1.PodMonitor{pm})
+	want := `metric_relabel_configs:
+- action: drop
+  regex: envoy_cluster_membership_.*;(a|b)
+  separator: ;
+  source_labels:
+  - __name__
+  - envoy_cluster_name
+- action: labeldrop
+  regex: worker
+- regex: gone
+  replacement: ""
+  source_labels:
+  - __name__
+  target_label: __name__
+metrics_path: /stats/prometheus
+`
+	if got := res.Annotations["io.opentelemetry.discovery.metrics.9201/config"]; got != want {
+		t.Fatalf("config:\n%s\nwant:\n%s", got, want)
+	}
+	if spec, eps := Untranslated(pm); len(spec) != 0 || len(eps[0]) != 0 {
+		t.Fatalf("untranslated %v %v", spec, eps)
+	}
+}
+
 func TestUntranslated(t *testing.T) {
 	pm := podMonitor(t, "app", "pm", `
 selector: {}
@@ -252,7 +298,7 @@ podMetricsEndpoints:
 	if len(eps[0]) != 0 {
 		t.Fatalf("endpoint 0 %v", eps[0])
 	}
-	want := []string{"basicAuth", "honorLabels", "metricRelabelings", "params", "relabelings", "scheme", "scrapeTimeout", "tlsConfig"}
+	want := []string{"basicAuth", "honorLabels", "params", "relabelings", "scheme", "scrapeTimeout", "tlsConfig"}
 	if !reflect.DeepEqual(eps[1], want) {
 		t.Fatalf("endpoint 1 %v", eps[1])
 	}

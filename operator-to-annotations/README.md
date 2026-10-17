@@ -95,10 +95,18 @@ endpoint resolves to:
 
 ```yaml
 io.opentelemetry.discovery.metrics.<containerPort number>/enabled: "true"
-io.opentelemetry.discovery.metrics.<containerPort number>/config: |  # when path or interval is set
+io.opentelemetry.discovery.metrics.<containerPort number>/config: |  # when any of these is set
   metrics_path: <path>
   collection_interval: <interval>
+  metric_relabel_configs: <metricRelabelings>
 ```
+
+`metricRelabelings` are written as a Prometheus scrape config writes
+them, which is what the agent reads (root README, "Metric relabeling"):
+`sourceLabels` as `source_labels`, `targetLabel` as `target_label`, the
+action in lower case, and an unset field left unset, so that
+Prometheus's default applies, as when the operator generates the scrape
+config.
 
 - **Only port-scoped keys, always by number.** Never the pod-level
   `io.opentelemetry.discovery.metrics/*` keys, which would enable every
@@ -171,17 +179,17 @@ exist so that manifests apply; rules are a separate concern
 
 ### Not translated
 
-The annotations carry a port, a path and an interval. Everything else is
-warned about and left out; `scheme: http`, `honorLabels: false`,
-`filterRunning: true`, `followRedirects: true` and `enableHttp2` are what
-the agent does anyway, and are not.
+The annotations carry a port, a path, an interval and the metric
+relabelings. Everything else is warned about and left out; `scheme:
+http`, `honorLabels: false`, `filterRunning: true`, `followRedirects:
+true` and `enableHttp2` are what the agent does anyway, and are not.
 
 | field | why |
 |---|---|
 | `scheme: https`, `tlsConfig`, `authorization`, `basicAuth`, `oauth2`, `bearerTokenSecret`, proxy settings | the agent scrapes plain http with no credentials (root README, "What the annotations cannot do"); the target is annotated and fails its scrape, `up` 0 |
 | `scrapeTimeout` | the agent has one timeout for every target |
 | `params` | no URL parameters in the annotations |
-| `relabelings`, `metricRelabelings`, `honorLabels: true`, `honorTimestamps`, `trackTimestampsStaleness` | the agent ships samples as scraped, with the pod's identity; selection and relabeling belong to the consumers |
+| `relabelings`, `honorLabels: true`, `honorTimestamps`, `trackTimestampsStaleness` | the target is the pod's address and port, and its identity is in each row's columns, so there are no target labels to relabel or to conflict with; a sample's own timestamp is not kept, each row has the scrape's time |
 | spec `sampleLimit`, `targetLimit`, label limits, `bodySizeLimit`, `keepDroppedTargets`, scrape protocols, native histogram settings, `scrapeClass` | settings of a Prometheus server, not of a scrape target |
 
 `jobLabel`, `podTargetLabels` and `attachMetadata` are not counted as
@@ -190,9 +198,11 @@ carry the pod's identity (namespace, pod, `pod_uid`, container) instead,
 with the pod's labels in the podindex. A consumer that expects the
 operator's `job` label or label copies on each sample joins for them.
 
-**Volume.** A PodMonitor written for prometheus-operator may count on its
-`metricRelabelings` to drop series. They are not applied here (the report
-lists them as untranslated), so every series of its targets is shipped.
+**Rules the agent cannot apply.** `metricRelabelings` that do not validate
+(the CRD's schema lets some through, a `replace` with no `targetLabel`
+for one) are still written; the agent then applies none of the
+endpoint's rules and ships every series, and logs why. The report does
+not show it.
 
 ### Reporting
 

@@ -175,7 +175,8 @@ var agentEquivalent = map[string]func(v any) bool{
 
 var (
 	// endpoint fields the translation carries
-	translatedEndpointFields = map[string]bool{"port": true, "portNumber": true, "targetPort": true, "path": true, "interval": true}
+	translatedEndpointFields = map[string]bool{"port": true, "portNumber": true, "targetPort": true, "path": true, "interval": true,
+		"metricRelabelings": true}
 	// spec fields the selection carries; selectorMechanism only chooses
 	// how the operator implements the same selection. jobLabel,
 	// podTargetLabels and attachMetadata label a target with pod metadata:
@@ -226,8 +227,35 @@ func Untranslated(pm *monitoringv1.PodMonitor) (spec []string, endpoints [][]str
 }
 
 type otelConfig struct {
-	MetricsPath        string `json:"metrics_path,omitempty"`
-	CollectionInterval string `json:"collection_interval,omitempty"`
+	MetricsPath          string          `json:"metrics_path,omitempty"`
+	CollectionInterval   string          `json:"collection_interval,omitempty"`
+	MetricRelabelConfigs []relabelConfig `json:"metric_relabel_configs,omitempty"`
+}
+
+// relabelConfig is a RelabelConfig as a Prometheus scrape config writes
+// it. Unset fields stay unset, so that Prometheus's defaults apply, as
+// they do when the operator generates the scrape config.
+type relabelConfig struct {
+	SourceLabels []string `json:"source_labels,omitempty"`
+	Separator    *string  `json:"separator,omitempty"`
+	TargetLabel  string   `json:"target_label,omitempty"`
+	Regex        string   `json:"regex,omitempty"`
+	Modulus      int64    `json:"modulus,omitempty"`
+	Replacement  *string  `json:"replacement,omitempty"`
+	Action       string   `json:"action,omitempty"`
+}
+
+func relabelConfigs(in []monitoringv1.RelabelConfig) []relabelConfig {
+	var out []relabelConfig
+	for _, c := range in {
+		r := relabelConfig{Separator: c.Separator, TargetLabel: c.TargetLabel, Regex: c.Regex,
+			Modulus: c.Modulus, Replacement: c.Replacement, Action: strings.ToLower(c.Action)}
+		for _, l := range c.SourceLabels {
+			r.SourceLabels = append(r.SourceLabels, string(l))
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // Contribution is what one PodMonitor adds to a pod.
@@ -253,8 +281,9 @@ func key(pm *monitoringv1.PodMonitor) string { return pm.Namespace + "/" + pm.Na
 
 // Translate adds, for each endpoint of each PodMonitor that selects the
 // pod, the port-scoped OpenTelemetry annotations of each port it
-// resolves to, by number: enabled, and config with metrics_path and
-// collection_interval when the endpoint sets them. Never the pod-level
+// resolves to, by number: enabled, and config with metrics_path,
+// collection_interval and metric_relabel_configs when the endpoint sets
+// them. Never the pod-level
 // keys. selecting must hold only PodMonitors that select the pod; podName
 // names it in warnings. A port that two endpoints resolve to keeps the
 // first, PodMonitors in namespace/name order and endpoints in theirs.
@@ -281,8 +310,8 @@ func Translate(podName string, pod *corev1.Pod, selecting []*monitoringv1.PodMon
 	}
 
 	type taken struct {
-		by  string
-		cfg otelConfig
+		by     string
+		config string // the config annotation's value, "" when it has none
 	}
 	byPort := map[int32]taken{}
 	ann := map[string]string{}
@@ -300,7 +329,7 @@ func Translate(podName string, pod *corev1.Pod, selecting []*monitoringv1.PodMon
 					reasons = append(reasons, msg)
 				}
 			}
-			cfg := otelConfig{MetricsPath: ep.Path}
+			cfg := otelConfig{MetricsPath: ep.Path, MetricRelabelConfigs: relabelConfigs(ep.MetricRelabelConfigs)}
 			if ep.Interval != "" {
 				d, err := model.ParseDuration(string(ep.Interval))
 				if err != nil || d <= 0 {
@@ -309,20 +338,23 @@ func Translate(podName string, pod *corev1.Pod, selecting []*monitoringv1.PodMon
 					cfg.CollectionInterval = time.Duration(d).String()
 				}
 			}
+			config := ""
+			if y, _ := yaml.Marshal(cfg); string(y) != "{}\n" {
+				config = string(y)
+			}
 			for _, p := range ports {
 				if t, ok := byPort[p.Number]; ok {
-					if t.cfg != cfg {
+					if t.config != config {
 						res.Warnings = append(res.Warnings, fmt.Sprintf("pod %s, %s: port %d is already scraped as %s says", podName, where, p.Number, t.by))
 					}
 					reasons = append(reasons, fmt.Sprintf("port %d taken by %s", p.Number, t.by))
 					continue
 				}
-				byPort[p.Number] = taken{by: where, cfg: cfg}
+				byPort[p.Number] = taken{by: where, config: config}
 				prefix := "io.opentelemetry.discovery.metrics." + strconv.Itoa(int(p.Number))
 				ann[prefix+"/enabled"] = "true"
-				if cfg != (otelConfig{}) {
-					y, _ := yaml.Marshal(cfg)
-					ann[prefix+"/config"] = string(y)
+				if config != "" {
+					ann[prefix+"/config"] = config
 				}
 				c.Ports = append(c.Ports, p)
 			}
