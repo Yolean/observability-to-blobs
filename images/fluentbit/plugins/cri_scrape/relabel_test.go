@@ -194,6 +194,23 @@ func TestScrapeCountsBeforeAndAfterRelabeling(t *testing.T) {
 	if _, ok := values["b"]; ok {
 		t.Errorf("b was not dropped: %v", values)
 	}
+	if _, ok := values["scrape_metric_relabel_configs_invalid"]; ok {
+		t.Errorf("a valid list is reported invalid: %v", values)
+	}
+
+	// a list that is not applied says so in every scrape of the target
+	got = nil
+	tg = target{key: "test", scheme: "http", host: host, port: p, path: "/metrics", relabelErr: "rule 0: unknown action"}
+	if err := sc.scrapeOnce(context.Background(), tg, "pod", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	values = map[string]float64{}
+	for _, s := range got[0].Samples {
+		values[s.Name] = s.Value
+	}
+	if values["scrape_metric_relabel_configs_invalid"] != 1 || values["scrape_samples_post_metric_relabeling"] != 3 {
+		t.Errorf("an invalid list: %v, want every sample and scrape_metric_relabel_configs_invalid 1", values)
+	}
 }
 
 // The config operator-to-annotations writes for a PodMonitor's

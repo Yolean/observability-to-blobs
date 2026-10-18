@@ -188,7 +188,11 @@ io.opentelemetry.discovery.metrics.9901/config: |
   target's rules drop.
 - **A list that does not parse or validate is not applied**: the target is
   scraped, every sample is shipped, and the agent logs why when it adds
-  the target. A filter that is wrong costs volume, never an alert input.
+  the target. Every scrape of such a target also writes the sample
+  `scrape_metric_relabel_configs_invalid` with the value 1, which
+  Prometheus has no counterpart for (its configuration would not load):
+  `scrape_metric_relabel_configs_invalid == 1` finds the targets. A
+  filter that is wrong costs volume, never an alert input.
 - **A rule can rewrite as well as drop.** `replace`, `labelmap` and the
   other actions do what they do in Prometheus, so the rows hold what the
   rules made of the samples, not what the pod served.

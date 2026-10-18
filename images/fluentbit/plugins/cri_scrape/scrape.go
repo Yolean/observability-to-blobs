@@ -139,6 +139,11 @@ func (s *scraper) scrapeOnce(parent context.Context, t target, scrapePath string
 			synthetic("scrape_duration_seconds", d),
 			synthetic("scrape_samples_scraped", float64(scraped)),
 			synthetic("scrape_samples_post_metric_relabeling", float64(kept)))
+		// not Prometheus's: its config would not load with such a list,
+		// where here the target is scraped without it
+		if t.relabelErr != "" {
+			out.Samples = append(out.Samples, synthetic("scrape_metric_relabel_configs_invalid", 1))
+		}
 		s.emit(out)
 	}()
 
