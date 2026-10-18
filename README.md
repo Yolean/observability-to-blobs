@@ -207,6 +207,30 @@ annotate such a pod yourself: the webhook leaves a pod with any
 every port included, so one port annotated by hand turns off the
 PodMonitor's other ports for that pod.
 
+### honor_labels
+
+Where rows become series (the tailer, `y-obs prometheus`), the row's
+columns are the target's labels: cluster, node, `scrape`, instance,
+namespace, pod, container and the workload names. A sample label of the
+same name is stored as `exported_<name>`, as Prometheus does with
+`honor_labels: false`. An exporter that reports on other objects, such
+as kube-state-metrics with its own `namespace` and `pod` labels, sets
+`honor_labels: true` in its config hint, and its samples' labels then
+win, as in Prometheus: the column of that name is left out of the
+series.
+
+```yaml
+io.opentelemetry.discovery.metrics.8080/enabled: "true"
+io.opentelemetry.discovery.metrics.8080/config: |
+  honor_labels: true
+```
+
+The rows keep both: the columns are the scraped pod's, the labels the
+samples' own, and `honor_labels` is a column of `metrics`, true for such
+a target's rows. A port-scoped config's `honor_labels` replaces the
+pod-level one. operator-to-annotations translates a PodMonitor
+endpoint's `honorLabels`. `prometheus.io/*` has no counterpart.
+
 ### Workload names
 
 Each scraped pod's rows carry the pod's controllers, named as the
@@ -268,7 +292,7 @@ By design, and so permanently:
 
 Not built: a scrape timeout or TLS settings per target, in either form;
 and in the OpenTelemetry form a `scheme` (it is always `http`), auth, URL
-parameters, target relabeling (`relabel_configs`) and `honor_labels`.
+parameters and target relabeling (`relabel_configs`).
 
 ## Layout
 
@@ -592,7 +616,8 @@ The alerting tailer (`images/blobs-to-prometheus`, reading `raw1/`):
 - The series' labels are the row's cluster, node, `scrape`, instance,
   namespace, pod, container and workload names ("Workload names"), then
   the sample's own. A sample label named like one of those is stored as
-  `exported_<name>`, as a scrape with `honor_labels: false` does. There is
+  `exported_<name>`, as a scrape with `honor_labels: false` does, unless
+  the target sets `honor_labels` ("honor_labels" above). There is
   no `job` among them, so a target's own `job` stays `job`: the
   compactor's (rolling, past, rollup) is selected as
   `blobs_compactor_last_success_timestamp_seconds{job="rolling"}`. Its

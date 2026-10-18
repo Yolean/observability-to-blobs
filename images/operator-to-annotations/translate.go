@@ -168,7 +168,6 @@ func number(spec *corev1.PodSpec, n int32) ([]Port, string) {
 // translation and no warning.
 var agentEquivalent = map[string]func(v any) bool{
 	"scheme":          func(v any) bool { return strings.EqualFold(fmt.Sprint(v), "http") },
-	"honorLabels":     func(v any) bool { return v == false },
 	"filterRunning":   func(v any) bool { return v == true },
 	"followRedirects": func(v any) bool { return v == true },
 	// no effect on a plain http scrape
@@ -178,7 +177,7 @@ var agentEquivalent = map[string]func(v any) bool{
 var (
 	// endpoint fields the translation carries
 	translatedEndpointFields = map[string]bool{"port": true, "portNumber": true, "targetPort": true, "path": true, "interval": true,
-		"metricRelabelings": true}
+		"metricRelabelings": true, "honorLabels": true}
 	// spec fields the selection carries; selectorMechanism only chooses
 	// how the operator implements the same selection. jobLabel,
 	// podTargetLabels and attachMetadata label a target with pod metadata:
@@ -237,6 +236,7 @@ func Untranslated(pm *monitoringv1.PodMonitor) (spec []string, endpoints [][]str
 type otelConfig struct {
 	MetricsPath          string          `json:"metrics_path,omitempty"`
 	CollectionInterval   string          `json:"collection_interval,omitempty"`
+	HonorLabels          bool            `json:"honor_labels,omitempty"`
 	MetricRelabelConfigs []relabelConfig `json:"metric_relabel_configs,omitempty"`
 }
 
@@ -341,8 +341,8 @@ func key(pm *monitoringv1.PodMonitor) string { return pm.Namespace + "/" + pm.Na
 // Translate adds, for each endpoint of each PodMonitor that selects the
 // pod, the port-scoped OpenTelemetry annotations of each port it
 // resolves to, by number: enabled, and config with metrics_path,
-// collection_interval and metric_relabel_configs when the endpoint sets
-// them. Never the pod-level
+// collection_interval, honor_labels and metric_relabel_configs when the
+// endpoint sets them. Never the pod-level
 // keys. selecting must hold only PodMonitors that select the pod; podName
 // names it in warnings. A port that two endpoints resolve to keeps the
 // first, PodMonitors in namespace/name order and endpoints in theirs.
@@ -388,7 +388,8 @@ func Translate(podName string, pod *corev1.Pod, selecting []*monitoringv1.PodMon
 					reasons = append(reasons, msg)
 				}
 			}
-			cfg := otelConfig{MetricsPath: ep.Path, MetricRelabelConfigs: relabelConfigs(ep.MetricRelabelConfigs)}
+			cfg := otelConfig{MetricsPath: ep.Path, MetricRelabelConfigs: relabelConfigs(ep.MetricRelabelConfigs),
+				HonorLabels: ep.HonorLabels}
 			if err := validateRelabel(cfg.MetricRelabelConfigs); err != nil {
 				res.Warnings = append(res.Warnings, fmt.Sprintf("pod %s, %s: metricRelabelings do not validate, not translated: every sample is shipped: %v",
 					podName, where, err))

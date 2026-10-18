@@ -32,7 +32,9 @@ type scrape struct {
 	Container string
 	Restart   *int32 // absent when the target names no running container
 	Workload  workload
-	Samples   []sample
+	// HonorLabels is the target's honor_labels, written only when set
+	HonorLabels bool
+	Samples     []sample
 }
 
 type sample struct {
@@ -121,7 +123,8 @@ func (s *scraper) scrapeOnce(parent context.Context, t target, scrapePath string
 	defer cancel()
 
 	out := scrape{Time: start, Scrape: scrapePath, Instance: t.instance(),
-		Namespace: t.namespace, Pod: t.pod, PodUID: t.podUID, Container: t.container, Restart: t.restart, Workload: t.workload}
+		Namespace: t.namespace, Pod: t.pod, PodUID: t.podUID, Container: t.container, Restart: t.restart, Workload: t.workload,
+		HonorLabels: t.honorLabels}
 	up := 0.0
 	scraped := 0
 	defer func() {

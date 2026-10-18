@@ -196,17 +196,17 @@ exist so that manifests apply; rules are a separate concern
 
 ### Not translated
 
-The annotations carry a port, a path, an interval and the metric
-relabelings. Everything else is warned about and left out; `scheme:
-http`, `honorLabels: false`, `filterRunning: true`, `followRedirects:
-true` and `enableHttp2` are what the agent does anyway, and are not.
+The annotations carry a port, a path, an interval, `honorLabels` and the
+metric relabelings. Everything else is warned about and left out;
+`scheme: http`, `filterRunning: true`, `followRedirects: true` and
+`enableHttp2` are what the agent does anyway, and are not.
 
 | field | why |
 |---|---|
 | `scheme: https`, `tlsConfig`, `authorization`, `basicAuth`, `oauth2`, `bearerTokenSecret`, proxy settings | the agent scrapes plain http with no credentials (root README, "What the annotations cannot do"); the target is annotated and fails its scrape, `up` 0 |
 | `scrapeTimeout` | the agent has one timeout for every target |
 | `params` | no URL parameters in the annotations |
-| `relabelings`, `honorLabels: true`, `honorTimestamps`, `trackTimestampsStaleness` | the target is the pod's address and port, and its identity is in each row's columns, so there are no target labels to relabel or to conflict with; a sample's own timestamp is not kept, each row has the scrape's time |
+| `relabelings`, `honorTimestamps`, `trackTimestampsStaleness` | the target is the pod's address and port, and its identity is in each row's columns, so there are no target labels to relabel; a sample's own timestamp is not kept, each row has the scrape's time |
 | spec `sampleLimit`, `targetLimit`, label limits, `bodySizeLimit`, `keepDroppedTargets`, scrape protocols, native histogram settings, `scrapeClass` | settings of a Prometheus server, not of a scrape target |
 
 `jobLabel`, `podTargetLabels` and `attachMetadata` are not counted as

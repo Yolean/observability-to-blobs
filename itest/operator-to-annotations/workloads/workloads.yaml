@@ -4,7 +4,8 @@
 # container, so each is a target of its own, attributed to its container.
 # The main container's endpoint has metricRelabelings, which the agent
 # applies: a series dropped by name, and a label dropped, which leaves two
-# series equal, so the second is dropped too.
+# series equal, so the second is dropped too. The worker's endpoint has
+# honorLabels, and the worker serves a series with a pod label of its own.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -40,7 +41,7 @@ spec:
         command: ["/bin/sh", "-c"]
         args:
         - |
-          mkdir -p /www && printf '# TYPE podmonitored_worker_up gauge\npodmonitored_worker_up 1\n' > /www/metrics
+          mkdir -p /www && printf '# TYPE podmonitored_worker_up gauge\npodmonitored_worker_up 1\npodmonitored_worker_reported{pod="elsewhere"} 1\n' > /www/metrics
           exec httpd -f -p 9202 -h /www
         ports:
         - name: worker-metrics
@@ -65,6 +66,7 @@ spec:
       action: labeldrop
   - port: worker-metrics
     path: /metrics
+    honorLabels: true
     # not translated: a warning, and the rest of the endpoint is
     scrapeTimeout: 5s
 ---

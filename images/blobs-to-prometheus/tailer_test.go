@@ -84,6 +84,28 @@ func TestDecodeLines(t *testing.T) {
 	}
 }
 
+// A line with honor_labels: a sample's own label keeps its name and the
+// column of that name is left out; without it, the label is exported_.
+func TestDecodeLinesHonorLabels(t *testing.T) {
+	at := time.Date(2026, 10, 8, 14, 0, 5, 0, time.UTC)
+	sample := `{"name":"kube_pod_info","type":"gauge","labels":{"namespace":"qa","pod":"web-1"},"value":1}`
+	honored := strings.Replace(metricsLine(at, "n1", "pod", "ns1", sample), `"samples"`, `"honor_labels":true,"samples"`, 1)
+	for _, c := range []struct{ line, want string }{
+		{metricsLine(at, "n1", "pod", "ns1", sample),
+			"__name__=kube_pod_info cluster=c1 container=c exported_namespace=qa exported_pod=web-1 instance=10.0.0.1:9100 k8s_deployment_name=web k8s_replicaset_name=web-5d8f7c9b4f namespace=ns1 node=n1 pod=p scrape=pod"},
+		{honored,
+			"__name__=kube_pod_info cluster=c1 container=c instance=10.0.0.1:9100 k8s_deployment_name=web k8s_replicaset_name=web-5d8f7c9b4f namespace=qa node=n1 pod=web-1 scrape=pod"},
+	} {
+		b, err := decodeObject(zstdLines(t, c.line), nil)
+		if err != nil || len(b.order) != 1 {
+			t.Fatalf("%v %v", b, err)
+		}
+		if got := fmtLabels(b.series[b.order[0]].labels); got != c.want {
+			t.Errorf("labels\n got %s\nwant %s", got, c.want)
+		}
+	}
+}
+
 func fmtLabels(ls []label) string {
 	var s []string
 	for _, l := range ls {

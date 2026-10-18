@@ -45,6 +45,8 @@ CREATE OR REPLACE VIEW raw AS
       k8s_daemonset_name:'VARCHAR',
       k8s_job_name:'VARCHAR',
       k8s_cronjob_name:'VARCHAR',
+      honor_labels:'BOOLEAN',       -- true when the target sets honor_labels: its samples' own
+                                    -- labels win over these columns (README.md, "honor_labels")
       samples:'STRUCT(name VARCHAR, type VARCHAR, labels MAP(VARCHAR, VARCHAR), value DOUBLE)[]',
       -- podindex: pod-observed | pod-checkpoint | pod-deleted | container | container-exit
       kind:'VARCHAR',

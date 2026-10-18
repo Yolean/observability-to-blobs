@@ -28,7 +28,8 @@ type series struct {
 // metaLabels are the metrics columns that become series labels, as
 // blobs-to-prometheus's raw.go has them: in the order Prometheus would
 // have them as target labels. A sample label of the same name is renamed
-// exported_<name>, as a scrape with honor_labels: false does.
+// exported_<name>, as a scrape with honor_labels: false does, unless the
+// row's honor_labels is set.
 var metaLabels = []string{"cluster", "node", "scrape", "instance", "namespace", "pod", "container",
 	"k8s_deployment_name", "k8s_replicaset_name", "k8s_statefulset_name", "k8s_daemonset_name",
 	"k8s_job_name", "k8s_cronjob_name"}
@@ -44,12 +45,13 @@ func isMeta(name string) bool {
 
 // seriesLabels is the label set Prometheus stores for a sample: __name__,
 // the non-empty meta labels, and the sample's labels, renamed on a clash;
-// sorted by name.
-func seriesLabels(name string, meta map[string]string, labels map[string]string) []label {
+// with honor, as with honor_labels: true, a sample label keeps its name
+// and the meta label of that name is left out. Sorted by name.
+func seriesLabels(name string, meta map[string]string, labels map[string]string, honor bool) []label {
 	ls := make([]label, 0, 1+len(metaLabels)+len(labels))
 	ls = append(ls, label{"__name__", name})
 	for _, m := range metaLabels {
-		if v := meta[m]; v != "" {
+		if v := meta[m]; v != "" && !(honor && labels[m] != "") {
 			ls = append(ls, label{m, v})
 		}
 	}
@@ -57,7 +59,7 @@ func seriesLabels(name string, meta map[string]string, labels map[string]string)
 		if v == "" {
 			continue
 		}
-		if k == "__name__" || meta[k] != "" {
+		if k == "__name__" || meta[k] != "" && !honor {
 			k = "exported_" + k
 		}
 		ls = append(ls, label{k, v})

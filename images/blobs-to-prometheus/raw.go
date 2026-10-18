@@ -24,9 +24,10 @@ import (
 // metaLabels are the line's columns that become series labels, in the
 // order Prometheus would have them as target labels. A sample label of
 // the same name is renamed exported_<name>, as a Prometheus scrape with
-// honor_labels: false does, so no series carries a label twice. There is
-// no job: scrape names the scrape path, so a target's own job label stays
-// job.
+// honor_labels: false does, so no series carries a label twice; on a line
+// with honor_labels the sample's label wins and the column is left out.
+// There is no job: scrape names the scrape path, so a target's own job
+// label stays job.
 var metaLabels = []string{"cluster", "node", "scrape", "instance", "namespace", "pod", "container",
 	"k8s_deployment_name", "k8s_replicaset_name", "k8s_statefulset_name", "k8s_daemonset_name",
 	"k8s_job_name", "k8s_cronjob_name"}
@@ -49,6 +50,7 @@ type rawLine struct {
 	DaemonSet   string      `json:"k8s_daemonset_name"`
 	K8sJob      string      `json:"k8s_job_name"`
 	CronJob     string      `json:"k8s_cronjob_name"`
+	HonorLabels bool        `json:"honor_labels"`
 	Samples     []rawSample `json:"samples"`
 }
 
@@ -155,7 +157,7 @@ func decodeLines(r io.Reader, keep *selectorSet) (*batch, error) {
 				b.skipped++
 				continue
 			}
-			ls := seriesLabels(s.Name, meta, s.Labels)
+			ls := seriesLabels(s.Name, meta, s.Labels, l.HonorLabels)
 			if keep != nil && !keep.matches(ls) {
 				continue
 			}
@@ -205,13 +207,14 @@ func parseValue(raw json.RawMessage) (float64, error) {
 
 // seriesLabels is the label set Prometheus would store for the sample:
 // __name__, the line's non-empty meta labels, and the sample's labels,
-// those named like a set meta label renamed exported_<name>; sorted by
-// name.
-func seriesLabels(name string, meta, labels map[string]string) []label {
+// those named like a set meta label renamed exported_<name>; with honor,
+// as with honor_labels: true, a sample label keeps its name and the meta
+// label of that name is left out. Sorted by name.
+func seriesLabels(name string, meta, labels map[string]string, honor bool) []label {
 	ls := make([]label, 0, 1+len(metaLabels)+len(labels))
 	ls = append(ls, label{"__name__", name})
 	for _, m := range metaLabels {
-		if v := meta[m]; v != "" {
+		if v := meta[m]; v != "" && !(honor && labels[m] != "") {
 			ls = append(ls, label{m, v})
 		}
 	}
@@ -219,7 +222,7 @@ func seriesLabels(name string, meta, labels map[string]string) []label {
 		if k == "__name__" || v == "" {
 			continue
 		}
-		if meta[k] != "" {
+		if meta[k] != "" && !honor {
 			k = "exported_" + k
 		}
 		ls = append(ls, label{k, v})

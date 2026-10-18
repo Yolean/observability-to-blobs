@@ -9,22 +9,23 @@ import (
 	"time"
 )
 
-// matcherSQL is a Prometheus label matcher as a condition on w_metrics.
-// __name__ is the name column, the meta labels their columns, exported_X
-// the sample label X that clashed with meta label X, anything else a
-// sample label. An absent label is the empty string, as in PromQL, and a
-// regular expression matches the whole value.
+// matcherSQL is a Prometheus label matcher as a condition on w_metrics,
+// with the label values seriesLabels gives: __name__ is the name column;
+// a meta label its column, or the sample label of its name where the
+// column is empty or the row honors labels; exported_X the sample label X
+// that clashed with meta label X; anything else a sample label. An absent
+// label is the empty string, as in PromQL, and a regular expression
+// matches the whole value.
 func matcherSQL(m matcher) (string, error) {
 	var col string
 	switch {
 	case m.name == "__name__":
 		col = "name"
-	case m.name == "namespace":
-		col = "nullif(namespace, '_node')"
 	case isMeta(m.name):
-		col = m.name
+		col = "CASE WHEN " + honored(m.name) + " THEN " + sampleLabel(m.name) + " ELSE " + metaColumn(m.name) + " END"
 	case strings.HasPrefix(m.name, "exported_") && isMeta(strings.TrimPrefix(m.name, "exported_")):
-		col = "labels[" + sqlString(strings.TrimPrefix(m.name, "exported_")) + "]"
+		x := strings.TrimPrefix(m.name, "exported_")
+		col = "CASE WHEN " + honored(x) + " THEN NULL ELSE " + sampleLabel(x) + " END"
 	default:
 		col = "labels[" + sqlString(m.name) + "]"
 	}
@@ -45,6 +46,22 @@ func matcherSQL(m matcher) (string, error) {
 		return e, nil
 	}
 	return "", fmt.Errorf("matcher %s: unknown type %d", m, m.typ)
+}
+
+// metaColumn is a meta label's column, ” for none.
+func metaColumn(m string) string {
+	if m == "namespace" {
+		return "coalesce(nullif(namespace, '_node'), '')"
+	}
+	return "coalesce(" + m + ", '')"
+}
+
+func sampleLabel(m string) string { return "coalesce(labels[" + sqlString(m) + "], '')" }
+
+// honored is whether a row's series has the sample label m in place of
+// meta label m: the row honors labels and has it, or has no column value.
+func honored(m string) string {
+	return "(" + sampleLabel(m) + " <> '' AND (coalesce(honor_labels, false) OR " + metaColumn(m) + " = ''))"
 }
 
 // namespaceOf is the namespace an equality matcher pins, for the daily
@@ -80,7 +97,7 @@ func metricsQuery(ms []matcher) (string, error) {
 		}
 		q += ", coalesce(" + col + ", '') AS " + m
 	}
-	q += `, labels, list({'t': epoch_ms(time), 'v': value}) AS s
+	q += `, labels, coalesce(honor_labels, false) AS honor_labels, list({'t': epoch_ms(time), 'v': value}) AS s
 FROM w_metrics`
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
@@ -104,18 +121,19 @@ func collectSeries(ctx context.Context, s *session, q string, limit int) ([]*ser
 		var name string
 		values := make([]string, len(metaLabels))
 		var labels, list any
+		var honor bool
 		dest := []any{&name}
 		for i := range values {
 			dest = append(dest, &values[i])
 		}
-		if err := rows.Scan(append(dest, &labels, &list)...); err != nil {
+		if err := rows.Scan(append(dest, &labels, &honor, &list)...); err != nil {
 			return nil, n, err
 		}
 		meta := make(map[string]string, len(metaLabels))
 		for i, m := range metaLabels {
 			meta[m] = values[i]
 		}
-		ls := seriesLabels(name, meta, labelMap(labels))
+		ls := seriesLabels(name, meta, labelMap(labels), honor)
 		key := seriesKey(ls)
 		sr, ok := by[key]
 		if !ok {

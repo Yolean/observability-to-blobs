@@ -138,6 +138,23 @@ func TestParseRelabelRejects(t *testing.T) {
 	}
 }
 
+// honor_labels is a field of the config like the others: a port's value
+// replaces the pod's, and an absent one inherits it.
+func TestExpandTargetsOtelHonorLabels(t *testing.T) {
+	d := declared(
+		container("app", `[{"name":"a","containerPort":9101,"protocol":"TCP"},{"name":"b","containerPort":9102,"protocol":"TCP"},{"name":"c","containerPort":9103,"protocol":"TCP"}]`),
+	)
+	got := expandTargets(map[string]string{
+		"io.opentelemetry.discovery.metrics/enabled":     "true",
+		"io.opentelemetry.discovery.metrics/config":      "honor_labels: true\n",
+		"io.opentelemetry.discovery.metrics.9102/config": "honor_labels: false\n",
+		"io.opentelemetry.discovery.metrics.9103/config": "metrics_path: /c\n",
+	}, d)
+	if len(got) != 3 || !got[0].honorLabels || got[1].honorLabels || !got[2].honorLabels || got[2].path != "/c" {
+		t.Fatalf("unexpected %+v", got)
+	}
+}
+
 func TestExpandTargetsOtelMetricRelabelConfigs(t *testing.T) {
 	d := declared(
 		container("app", `[{"name":"a","containerPort":9101,"protocol":"TCP"},{"name":"b","containerPort":9102,"protocol":"TCP"},{"name":"c","containerPort":9103,"protocol":"TCP"}]`),

@@ -311,6 +311,9 @@ func (st *pluginState) enqueueScrape(s scrape) {
 	if s.Restart != nil {
 		rec["restart"] = *s.Restart
 	}
+	if s.HonorLabels {
+		rec["honor_labels"] = true
+	}
 	for k, v := range s.Workload.fields() {
 		rec[k] = v
 	}

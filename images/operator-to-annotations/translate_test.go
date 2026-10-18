@@ -318,6 +318,26 @@ podMetricsEndpoints:
 	}
 }
 
+// honorLabels: true is the config's honor_labels; false is the default
+// and is not written.
+func TestTranslateHonorLabels(t *testing.T) {
+	pm := podMonitor(t, "app", "pm", `
+selector: {}
+podMetricsEndpoints:
+- port: metrics
+  honorLabels: true
+- port: worker-metrics
+  honorLabels: false
+`)
+	res := Translate("app/p", testPod(t, nil, mainAndWorker), []*monitoringv1.PodMonitor{pm})
+	if got := res.Annotations["io.opentelemetry.discovery.metrics.9201/config"]; got != "honor_labels: true\n" {
+		t.Fatalf("config %q", got)
+	}
+	if got, ok := res.Annotations["io.opentelemetry.discovery.metrics.9202/config"]; ok {
+		t.Fatalf("config %q, want none", got)
+	}
+}
+
 func TestUntranslated(t *testing.T) {
 	pm := podMonitor(t, "app", "pm", `
 selector: {}
@@ -352,7 +372,7 @@ podMetricsEndpoints:
 	if len(eps[0]) != 0 {
 		t.Fatalf("endpoint 0 %v", eps[0])
 	}
-	want := []string{"basicAuth", "honorLabels", "params", "relabelings", "scheme", "scrapeTimeout", "tlsConfig"}
+	want := []string{"basicAuth", "params", "relabelings", "scheme", "scrapeTimeout", "tlsConfig"}
 	if !reflect.DeepEqual(eps[1], want) {
 		t.Fatalf("endpoint 1 %v", eps[1])
 	}
