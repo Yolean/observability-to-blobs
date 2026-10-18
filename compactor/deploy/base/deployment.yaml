@@ -54,7 +54,7 @@ spec:
           value: "4"
         - name: DUCKDB_HTTP_RETRIES
           value: "5"
-        # bytes; DuckDB is given 75% of it
+        # bytes; DuckDB is given 60% of it
         - name: DUCKDB_MEMORY_LIMIT
           valueFrom:
             resourceFieldRef:

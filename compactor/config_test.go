@@ -30,8 +30,8 @@ func TestConfigDefaults(t *testing.T) {
 	if c.rolling != 2*time.Minute || c.grace != 10*time.Minute || c.past != time.Hour || c.rawDelete {
 		t.Fatalf("cadence %s %s %s delete %v", c.rolling, c.grace, c.past, c.rawDelete)
 	}
-	if c.memoryLimit != 3<<30 {
-		t.Fatalf("memory limit %d, want 75%% of 4 GiB", c.memoryLimit)
+	if c.memoryLimit != 4<<30/5*3 {
+		t.Fatalf("memory limit %d, want 60%% of 4 GiB", c.memoryLimit)
 	}
 	if c.threads != 4 || c.httpRetries != 5 {
 		t.Fatalf("threads %d retries %d", c.threads, c.httpRetries)
@@ -41,10 +41,9 @@ func TestConfigDefaults(t *testing.T) {
 		t.Fatalf("logs API %q lookback %s timeout %s concurrency %d memory %d", c.logsListen, c.logsLookback,
 			c.logsTimeout, c.logsConcurrency, c.logsMemoryLimit)
 	}
-	// with the logs API on, its engine takes a quarter of the container's
-	// memory from the fold's three quarters
+	// with the logs API on, its engine takes a third of the engines' share
 	c, err = parseConfig(envOf(bucketEnv(map[string]string{"DUCKDB_MEMORY_LIMIT": "4294967296", "LOGS_LISTEN": ":8080"})))
-	if err != nil || c.memoryLimit != 2<<30 || c.logsMemoryLimit != 1<<30 {
+	if err != nil || c.memoryLimit != 4<<30/5*3/3*2 || c.logsMemoryLimit != 4<<30/5*3/3 {
 		t.Fatalf("with LOGS_LISTEN: fold %d, logs %d, %v", c.memoryLimit, c.logsMemoryLimit, err)
 	}
 }

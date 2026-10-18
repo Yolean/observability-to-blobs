@@ -12,7 +12,7 @@ CREATE OR REPLACE VIEW pods AS
   l AS (
     SELECT pod_uid, container, restart, any_value(namespace) AS namespace, any_value(pod) AS pod,
            any_value(node) AS node, min(time) AS first_log, max(time) AS last_log,
-           count(*) AS lines, sum(length(message)) AS bytes
+           count(*) AS lines, sum(length(message))::BIGINT AS bytes
     FROM logs WHERE pod_uid IS NOT NULL GROUP BY ALL),
   -- restart is absent on scrapes of a target that names no running
   -- container; those rows keep a NULL restart and join null-safely

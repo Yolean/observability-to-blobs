@@ -218,7 +218,7 @@ this design rests on:
 
 1. **The hourly tier is one object per table per hour**,
    `hourly/{cluster}/{table}/{date}/{HH}.parquet`, for `logs`, `metrics`,
-   `podindex` and `pods`. Current and past hours use the same layout, so
+   `podindex`, `apiserver` and `pods`. Current and past hours use the same layout, so
    there is no layout switch and no deletes. Sorting and row groups replace
    partitioning (logs: `namespace, pod, pod_uid, container, restart, time`;
    metrics: `namespace, name, pod, pod_uid, container, restart, time`; 20k-row row
@@ -252,10 +252,10 @@ this design rests on:
 The tiers' keys:
 
 ```
-hourly/{cluster}/{logs,metrics,podindex,pods}/{date}/{HH}.parquet
+hourly/{cluster}/{logs,metrics,podindex,apiserver,pods}/{date}/{HH}.parquet
 hourly/{cluster}/_folded/{date}/{HH}.csv              key,final: the raw keys folded in, written last
 daily/{cluster}/{logs,metrics}/{date}/namespace={namespace}/data_0.parquet
-daily/{cluster}/{podindex,pods}/{date}.parquet
+daily/{cluster}/{podindex,apiserver,pods}/{date}.parquet
 daily/{cluster}/_folded/{date}.csv.zst                key: the raw keys rolled into the day, written last
 {hourly,daily}/{cluster}/_tmp/{random}.tmp             a write in progress, or one a failed job left
 ```
@@ -267,6 +267,16 @@ The namespace in a daily key is path-escaped the way DuckDB's hive
 partitioning writes it, and the column is in the file too, so readers can
 use `hive_partitioning` to skip the other namespaces' objects or ignore
 the path. Journal rows are in `_node`.
+
+**An hour's object is not a time partition.** It holds the rows of the
+raw objects whose key names the hour, and an agent keys an object by the
+time of its first record, so rows from up to one upload interval past
+the hour land in the hour's object: on a test cluster 0.8% of an hour's
+samples were in the previous hour's object, an apiserver snapshot can be
+split over two hours, and a container exit that the agent replays after
+its own restart lands in the hour of the replay. A reader of the time
+range [t0, t1) reads the hourly objects from the hour before t0's to
+t1's, or the days that hold them, and filters on `time`.
 
 ### The SQL, and the engine behaviour it relies on
 
@@ -358,6 +368,9 @@ killed process leaves, the past pass deletes: every object under the
 job can own. An operator can also give those two prefixes a short
 lifecycle rule (a day, say), and the bucket a rule that aborts incomplete
 multipart uploads, which an interrupted `COPY` that httpfs aborts leaves.
+A lifecycle rule's prefix is literal, so a bucket of several clusters
+needs the two rules for each cluster: `hourly/{cluster}/_tmp/` and
+`daily/{cluster}/_tmp/`.
 CopyObject takes objects up to 5 GiB, which bounds one namespace's daily
 `logs` or `metrics` object.
 
@@ -576,7 +589,7 @@ segment, so lifecycle rules keep matching literal prefixes:
 ```
 hourly/{cluster}/{table}/{date}/{HH}.k-{id}.parquet
 daily/{cluster}/{logs,metrics}/{date}/namespace={namespace}/data_0.k-{id}.parquet
-daily/{cluster}/{podindex,pods}/{date}.k-{id}.parquet
+daily/{cluster}/{podindex,apiserver,pods}/{date}.k-{id}.parquet
 ```
 
 Plain objects keep their names. A plain reader's globs are
@@ -929,8 +942,8 @@ one of `LOGS_CONCURRENCY` (default 4) slots. The API has a DuckDB
 database of its own, so its memory limit and spill directory
 (`DUCKDB_TEMP_DIRECTORY/logs`) are its own and a request cannot take a
 fold's memory: in `run` with `LOGS_LISTEN` set, `DUCKDB_MEMORY_LIMIT` is
-split 50% to the fold and 25% to the API (75% to the fold without it);
-`serve` gives the API 75%.
+split 40% to the fold and 20% to the API (60% to the fold without it);
+`serve` gives the API 60%.
 
 **Running it.** `run` serves the API when `LOGS_LISTEN` is set (`:8080`
 in `deploy/logs`), beside `/metrics` and the put endpoint, from the
@@ -980,19 +993,30 @@ Service from everyone else.
   API in `run`; `:8080` for `serve`), which `deploy/logs` sets,
   `LOGS_LOOKBACK` (48h), `LOGS_TIMEOUT` (30s) and `LOGS_CONCURRENCY` (4).
 - `DUCKDB_MEMORY_LIMIT` from `resourceFieldRef: limits.memory`, with
-  DuckDB given 75% of it (with the logs API on, 50% to the fold and 25%
+  DuckDB given 60% of it (with the logs API on, 40% to the fold and 20%
   to the API's engine). `/scratch` is an emptyDir for `temp_directory`
   (`DUCKDB_TEMP_DIRECTORY`), `/tmp` a small one. Starting values:
-  requests 250m/1Gi, limit 4Gi, scratch 10Gi. What they hold, measured
-  on a single node's day of 35M `metrics` rows (16k series every 15 s,
-  1.5M rows an hour, 3 MB of Parquet an hour) with the logs API on: the
-  rollup peaks at about 100 MB of scratch, one namespace's input and its
-  runs, and the process at 2.5-2.9 GB resident, the fold engine's 2 GiB
-  share at its limit, in about 80 s. A fold of an hour holds one run of
-  it at a time, and its scratch the hour's compressed rows. The scratch a
-  rollup needs grows with its largest namespace's compressed rows, not
-  with the day in the engine's format, and the memory share sets the run
-  size.
+  requests 250m/1Gi, limit 4Gi, scratch 10Gi. A fold of an hour holds
+  one run of it at a time, and its scratch the hour's compressed rows.
+  The scratch a rollup needs grows with its largest namespace's
+  compressed rows, not with the day in the engine's format, and the
+  memory share sets the run size.
+
+  **Sizing by rows an hour.** DuckDB uses its whole share, spilling to
+  scratch beyond it, and the process needs more than the share: what the
+  engine allocates outside its limit, and the Go heap. Measured on
+  v0.2.0 (folds not yet in runs), the peak was the share plus about
+  1 GiB, or plus 0.21 GiB per million `metrics` rows an hour of the
+  cluster where that is more, and late incremental folds peaked above
+  full reads; the kubelet's stats read below the peaks. So the limit
+  needs `share + max(1 GiB, 0.21 GiB x million rows an hour)`: 4 GiB
+  (a 2.4 GiB share) holds up to about 7M rows an hour, and the 60%
+  share keeps 40% for the rest. A compactor of every cluster in a bucket
+  sizes by its largest cluster's hour, as its jobs run one at a time.
+  An OOM kill shows as a new `process_start_time_seconds`. For scale, a
+  single node's day of 35M `metrics` rows (16k series every 15 s, 1.5M
+  rows an hour, 3 MB of Parquet an hour) rolled up with about 100 MB of
+  scratch, one namespace's input and its runs, in about 80 s.
 - `prometheus.io/scrape` and `prometheus.io/port: "9090"` for `/metrics`,
   written with stdlib text exposition, every series labelled `cluster`,
   the cluster it is about (a tailer whose rows carry the scraping

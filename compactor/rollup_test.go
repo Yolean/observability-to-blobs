@@ -163,6 +163,13 @@ func TestPodsRecomputedPerTier(t *testing.T) {
 	if rows, lines, phase := pods(w.dailySource("pods", day)); rows != 1 || lines != 15 || phase != "succeeded" {
 		t.Fatalf("daily pods: %d rows, %d lines, %s; want 1, 15, succeeded", rows, lines, phase)
 	}
+	// lines and bytes are BIGINT in both tiers, as the view has them
+	for _, src := range []string{w.from(w.c.l.hourlyStem("pods", h10)), w.dailySource("pods", day)} {
+		var types string
+		if err := w.c.db.QueryRowContext(w.ctx, "SELECT string_agg(column_type, ',' ORDER BY column_name) FROM (DESCRIBE SELECT lines, bytes FROM "+src+")").Scan(&types); err != nil || types != "BIGINT,BIGINT" {
+			t.Fatalf("pods bytes and lines are %s, %v; want BIGINT", types, err)
+		}
+	}
 	if n := w.q("SELECT count(*) FROM " + w.dailySource("pods", day) + " WHERE pod_uid = 'u1' AND first_log = TIMESTAMP_NS '2026-10-01 10:00:00' AND last_log = TIMESTAMP_NS '2026-10-01 11:00:04' AND metric_names = ['requests', 'up']"); n != 1 {
 		t.Fatal("daily pods row lacks the day's first_log, last_log or metric names")
 	}
