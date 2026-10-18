@@ -10,6 +10,8 @@ import (
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/model/relabel"
+	yamlv3 "gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -221,7 +223,13 @@ func Untranslated(pm *monitoringv1.PodMonitor) (spec []string, endpoints [][]str
 	s.PodMetricsEndpoints = nil
 	spec = untranslated(s, translatedSpecFields)
 	for i := range pm.Spec.PodMetricsEndpoints {
-		endpoints = append(endpoints, untranslated(pm.Spec.PodMetricsEndpoints[i], translatedEndpointFields))
+		ep := &pm.Spec.PodMetricsEndpoints[i]
+		fields := untranslated(ep, translatedEndpointFields)
+		if validateRelabel(relabelConfigs(ep.MetricRelabelConfigs)) != nil {
+			fields = append(fields, "metricRelabelings")
+			sort.Strings(fields)
+		}
+		endpoints = append(endpoints, fields)
 	}
 	return spec, endpoints
 }
@@ -256,6 +264,32 @@ func relabelConfigs(in []monitoringv1.RelabelConfig) []relabelConfig {
 		out = append(out, r)
 	}
 	return out
+}
+
+// validateRelabel is the agent's check of a metric_relabel_configs list
+// (cri_scrape's parseRelabel), by the same Prometheus code: a list it
+// fails, the agent would not apply.
+func validateRelabel(rules []relabelConfig) error {
+	if len(rules) == 0 {
+		return nil
+	}
+	y, err := yaml.Marshal(rules)
+	if err != nil {
+		return err
+	}
+	var cfgs []*relabel.Config
+	if err := yamlv3.Unmarshal(y, &cfgs); err != nil {
+		return err
+	}
+	for i, c := range cfgs {
+		if c == nil {
+			return fmt.Errorf("rule %d is empty", i)
+		}
+		if err := c.Validate(model.UTF8Validation); err != nil {
+			return fmt.Errorf("rule %d: %w", i, err)
+		}
+	}
+	return nil
 }
 
 // targetLabels are what Prometheus gives a PodMonitor target besides the
@@ -355,6 +389,11 @@ func Translate(podName string, pod *corev1.Pod, selecting []*monitoringv1.PodMon
 				}
 			}
 			cfg := otelConfig{MetricsPath: ep.Path, MetricRelabelConfigs: relabelConfigs(ep.MetricRelabelConfigs)}
+			if err := validateRelabel(cfg.MetricRelabelConfigs); err != nil {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("pod %s, %s: metricRelabelings do not validate, not translated: every sample is shipped: %v",
+					podName, where, err))
+				cfg.MetricRelabelConfigs = nil
+			}
 			if read := targetLabelsRead(cfg.MetricRelabelConfigs); len(read) > 0 {
 				res.Warnings = append(res.Warnings, fmt.Sprintf("pod %s, %s: metricRelabelings read %s, which are the target's labels in Prometheus; "+
 					"the agent's rules see the sample's own labels only, so they read a sample label of that name if there is one, and a keep on them can drop every series",

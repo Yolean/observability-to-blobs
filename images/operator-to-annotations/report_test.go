@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -23,12 +24,17 @@ func TestReport(t *testing.T) {
 		}
 		return *p
 	}
+	// the annotations the webhook writes for pm now
+	now := Translate("app/p", testPod(t, nil, mainAndWorker), []*monitoringv1.PodMonitor{pm}).Annotations
+	// what an earlier generation of pm, without its second endpoint, wrote
+	earlier := map[string]string{Marker: "app/pm", "io.opentelemetry.discovery.metrics.9201/enabled": "true"}
 	done := pod("done", t0.Add(time.Hour), nil, nil)
 	done.Status.Phase = corev1.PodSucceeded
 	other := pod("elsewhere", t0.Add(time.Hour), nil, nil)
 	other.Namespace = "other"
 	r := NewReport(pm, []corev1.Pod{
-		pod("b-annotated", t0.Add(time.Hour), map[string]string{Marker: "app/pm"}, nil),
+		pod("b-annotated", t0.Add(time.Hour), now, nil),
+		pod("c-stale", t0.Add(time.Hour), earlier, nil),
 		pod("a-annotated", t0.Add(2*time.Hour), map[string]string{Marker: "app/other,app/pm"}, nil),
 		pod("old", t0.Add(-time.Hour), nil, nil),
 		pod("preexisting", t0.Add(time.Hour), map[string]string{"prometheus.io/scrape": "true"}, nil),
@@ -44,6 +50,9 @@ func TestReport(t *testing.T) {
 	}
 	if r.AnnotatedCount != 2 || r.Annotated[0].Pod != "app/a-annotated" || !r.Annotated[1].Created.Equal(t0.Add(time.Hour)) {
 		t.Fatalf("annotated %+v", r.Annotated)
+	}
+	if r.StaleCount != 1 || r.Stale[0].Pod != "app/c-stale" {
+		t.Fatalf("stale %+v", r.Stale)
 	}
 	reasons := map[string]string{}
 	for _, s := range r.Skipped {
@@ -65,8 +74,9 @@ func TestReport(t *testing.T) {
 func TestReportConditionAndSample(t *testing.T) {
 	pm := podMonitor(t, "app", "pm", `{selector: {}, podMetricsEndpoints: [{port: metrics}]}`)
 	var pods []corev1.Pod
+	ann := Translate("app/p", testPod(t, nil, mainAndWorker), []*monitoringv1.PodMonitor{pm}).Annotations
 	for i := 0; i < reportSample+5; i++ {
-		p := testPod(t, map[string]string{Marker: "app/pm"}, mainAndWorker)
+		p := testPod(t, ann, mainAndWorker)
 		p.Name = "p" + string(rune('a'+i))
 		pods = append(pods, *p)
 	}

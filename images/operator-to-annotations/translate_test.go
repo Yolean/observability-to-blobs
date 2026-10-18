@@ -265,6 +265,32 @@ metrics_path: /stats/prometheus
 	}
 }
 
+// A list the agent would not apply (cri_scrape's parseRelabel) is not
+// written: the endpoint is translated without it, with a warning, and the
+// report lists the field as untranslated.
+func TestTranslateLeavesOutAnInvalidList(t *testing.T) {
+	pm := podMonitor(t, "app", "pm", `
+selector: {}
+podMetricsEndpoints:
+- port: metrics
+  path: /stats/prometheus
+  metricRelabelings:
+  - sourceLabels: [__name__]
+    regex: "envoy_(.*"
+    action: drop
+`)
+	res := Translate("app/p", testPod(t, nil, mainAndWorker), []*monitoringv1.PodMonitor{pm})
+	if got := res.Annotations["io.opentelemetry.discovery.metrics.9201/config"]; got != "metrics_path: /stats/prometheus\n" {
+		t.Fatalf("config %q, want the path alone", got)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "metricRelabelings do not validate") || !strings.Contains(res.Warnings[0], "missing closing )") {
+		t.Fatalf("warnings %v", res.Warnings)
+	}
+	if spec, eps := Untranslated(pm); len(spec) != 0 || len(eps[0]) != 1 || eps[0][0] != "metricRelabelings" {
+		t.Fatalf("untranslated %v %v", spec, eps)
+	}
+}
+
 // A rule on a label that Prometheus gives the target, not the sample, is
 // translated with a warning: the agent's rules see the sample's labels.
 func TestTranslateWarnsOnTargetLabels(t *testing.T) {

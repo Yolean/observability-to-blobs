@@ -216,21 +216,28 @@ with the pod's labels in the podindex. A consumer that expects the
 operator's `job` label or label copies on each sample joins for them.
 
 **Rules the agent cannot apply.** `metricRelabelings` that do not validate
-(the CRD's schema lets some through, a `replace` with no `targetLabel`
-for one) are still written; the agent then applies none of the
-endpoint's rules and ships every series, and logs why. The report does
-not show it.
+(the CRD's schema lets some through, a regex that does not compile for
+one) are checked by the agent's own check, Prometheus's, and left out:
+the endpoint's port and path are written without them, the pod's
+admission returns a warning with the reason, and the report lists the
+endpoint's `metricRelabelings` as untranslated. The agent then ships
+every series of that port.
 
 ### Reporting
 
 The controller keeps a report per PodMonitor and logs it as a JSON line
 (`"msg":"report"`) whenever it changes, at level `WARN` while the
-PodMonitor is not translated in full or has skipped pods:
+PodMonitor is not translated in full or has skipped or stale pods:
 
 - `condition`: `Translated`, `PartiallyTranslated` (some fields are not;
   `untranslated` lists them) or `NotTranslated` (no endpoints);
 - `annotated`: the selected pods it annotated, with when (the pod's
   creation), as a count and the first 20 by name;
+- `stale`: the pods annotated for this PodMonitor alone whose scrape
+  annotations differ from what it translates to now, because an earlier
+  generation of it or an earlier version of the webhook wrote them. They
+  scrape as their annotations say until they are recreated. A pod that
+  several PodMonitors annotated is counted as `annotated`, unchecked;
 - `preannotated`: the selected pods with scrape annotations of their
   own, which it leaves alone, as a count and the first 20 by name;
 - `skipped`: the other selected pods it did not annotate, with the

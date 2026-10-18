@@ -59,7 +59,7 @@ func (r *reporter) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result
 	}
 	r.last[req.NamespacedName] = rep
 	level := slog.LevelInfo
-	if rep.Condition != Translated || rep.SkippedCount > 0 {
+	if rep.Condition != Translated || rep.SkippedCount > 0 || rep.StaleCount > 0 {
 		level = slog.LevelWarn
 	}
 	r.log.Log(ctx, level, "report", "report", rep)
