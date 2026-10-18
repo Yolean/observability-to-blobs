@@ -66,6 +66,9 @@ k8s_statefulset_name VARCHAR
 k8s_daemonset_name   VARCHAR
 k8s_job_name         VARCHAR
 k8s_cronjob_name     VARCHAR
+honor_labels BOOLEAN      true when the target sets honor_labels: as series,
+                          its samples' labels win over the columns above
+                          (README.md, "honor_labels")
 name       VARCHAR        metric name as exposed
 type       VARCHAR        counter | gauge | histogram | summary | untyped
 labels     MAP(VARCHAR, VARCHAR)

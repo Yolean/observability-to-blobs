@@ -551,6 +551,13 @@ in `raw_retired`, so that the hours old agents wrote before their upgrade
 fold with that field dropped; without it the new compactor would refuse
 them until their raw expired.
 
+The check covers a line's own fields; a new field inside an element of
+`samples` is dropped unseen. The compactor of v0.2.0 and earlier has no
+check at all: it folds an hour with a field it does not know and drops
+the field, and with `RAW_DELETE=after-final` deletes its raw. From v0.2.0
+the compactor is upgraded first, which folds the v0.2.0 agents' lines,
+and then the agents.
+
 ## Encryption
 
 Off by default. With it on, the hourly and daily tiers' Parquet objects

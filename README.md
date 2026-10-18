@@ -51,9 +51,12 @@ The raw contract, the columns `compactor/sql/raw.sql` pins, may change
 without compatibility before a 1.0 release: an upgrade that changes it
 moves the agents first, then the compactor and the readers, and what was
 written before it is not read in the new form. The compactor refuses to
-fold an hour with a field it does not know, so that no field is dropped
-unseen, and a contract that drops or renames a field lists the old name
-as retired in `raw.sql` (`compactor/README.md`, "Raw deletion").
+fold an hour with a line's field it does not know, so that no field is
+dropped unseen, and a contract that drops or renames a field lists the
+old name as retired in `raw.sql` (`compactor/README.md`, "Raw deletion").
+It checks a line's own fields, not those of each element of `samples`.
+The compactor of v0.2.0 and earlier has no such check and drops a field
+it does not know: from v0.2.0, upgrade the compactor first.
 
 The raw tier is for the compactor and the alerting tailer, which LIST an
 hour prefix and take new keys. It is not a query tier; the compacted
@@ -325,7 +328,7 @@ controller) writes these names and keys. The namespace is the overlay's,
 | compactor, tier encryption | the overlay's, `blobs-compactor-parquet-keys` in `itest/compactor` | one file per key id, named by the id, holding a base64 key of 32 characters | mounted at `PARQUET_KEYS_DIR` | with `PARQUET_KEY_ID` (`compactor/README.md`, "Encryption") |
 | compactor, spool mode (`compactor/deploy/spool`) | `blobs-compactor-put` | `PUT_ACCESS_KEY_ID`, `PUT_SECRET_ACCESS_KEY` | the key pair the shippers sign their PUTs with | spool mode |
 | operator-to-annotations | `operator-to-annotations-tls` | written by cert-manager | none to supply | with the webhook |
-| host agent (`HOST_MODE.md`) | no Secret: a root-only file in the AWS shared credentials format, `/etc/observability-host/s3-credentials` | `aws_access_key_id`, `aws_secret_access_key` | write on `raw1/{cluster}/` | host mode |
+| host agent (`HOST_MODE.md`) | no Secret: a root-only file in the AWS shared credentials format, `/etc/observability-host/s3-credentials` | `aws_access_key_id`, `aws_secret_access_key` | write on `host1/{cluster}/` (`KEY_ROOT`) | host mode |
 | y-obs | none: an AWS profile (`tools/y-obs/README.md`, "S3 access") | | list and read on the tiers it reads | |
 
 `CLUSTER_NAME` has no default anywhere: the agents refuse to start
