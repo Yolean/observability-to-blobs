@@ -82,8 +82,8 @@ func TestRollupEqualsFoldingTheWholeDay(t *testing.T) {
 }
 
 // TestRollupInSortedRuns is the same with a sort of one row at a time:
-// every write with more than one row sorts in runs, one runColumn value
-// each, and the runs' NULL comes last.
+// every write with more than one row sorts in runs, one group of runColumns
+// values each, and the NULL group comes last.
 func TestRollupInSortedRuns(t *testing.T) {
 	for _, keyed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "plain", true: "encrypted"}[keyed], func(t *testing.T) {
@@ -93,7 +93,7 @@ func TestRollupInSortedRuns(t *testing.T) {
 			}
 			w.c.sortRows = 1
 			rollupEqualsFoldingTheWholeDay(t, w)
-			if left, err := filepath.Glob(filepath.Join(w.c.scratch, "rollup-*")); err != nil || len(left) > 0 {
+			if left, err := filepath.Glob(filepath.Join(w.c.scratch, "sort-*")); err != nil || len(left) > 0 {
 				t.Fatalf("files left in scratch: %v %v", left, err)
 			}
 		})

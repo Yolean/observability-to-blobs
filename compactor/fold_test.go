@@ -121,6 +121,68 @@ func TestIncrementalFoldEqualsFullFold(t *testing.T) {
 	}
 }
 
+// A fold that sorts in runs (sortRows 1: a run per group of runColumns'
+// values) writes, incremental or full, the rows a fold that sorts each
+// write whole does, in the same order of the table's sort columns (rows
+// that tie on them may come in either order).
+func TestFoldInSortedRuns(t *testing.T) {
+	whole, inRuns := newWorld(t), newWorld(t)
+	inRuns.c.sortRows = 1
+	for _, w := range []*world{whole, inRuns} {
+		w.putA()
+		w.putC()
+		w.fold(h10, h10.Add(5*time.Minute))
+		w.putB()
+		w.putBRetry()
+		if r := w.fold(h10, during); (r.runs > 0) != (w.c.sortRows > 0) {
+			t.Fatalf("incremental fold: %d writes in runs with sortRows %d", r.runs, w.c.sortRows)
+		}
+	}
+	same := func(when string) {
+		t.Helper()
+		for _, tbl := range []string{"logs", "metrics", "podindex", "apiserver", "pods"} {
+			stem := whole.c.l.hourlyStem(tbl, h10)
+			sameRows(t, whole.c.db, when+" hourly "+tbl, whole.from(stem), inRuns.from(stem))
+			a, b := whole.ordered(tbl, stem), inRuns.ordered(tbl, stem)
+			if strings.Join(a, "\n") != strings.Join(b, "\n") {
+				t.Fatalf("%s %s, whole:\n%s\nin runs:\n%s", when, tbl, strings.Join(a, "\n"), strings.Join(b, "\n"))
+			}
+		}
+	}
+	same("incremental")
+	whole.fold(h10, afterG)
+	if r := inRuns.fold(h10, afterG); !r.full || r.runs == 0 {
+		t.Fatalf("full read: %+v, want it in runs", r)
+	}
+	same("full")
+	if left, err := filepath.Glob(filepath.Join(inRuns.c.scratch, "sort-*")); err != nil || len(left) > 0 {
+		t.Fatalf("files left in scratch: %v %v", left, err)
+	}
+}
+
+// ordered is the sort columns of an object's rows as text, in the
+// object's order.
+func (w *world) ordered(table, stem string) []string {
+	w.t.Helper()
+	rows, err := w.c.db.QueryContext(w.ctx, "SELECT row("+sortOrder[table]+")::VARCHAR FROM "+w.from(stem))
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			w.t.Fatal(err)
+		}
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		w.t.Fatal(err)
+	}
+	return out
+}
+
 func TestCrashBeforeSidecarRefoldsWithoutDuplicates(t *testing.T) {
 	w := newWorld(t)
 	w.putA()

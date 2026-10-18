@@ -184,6 +184,7 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 			r.rows[t] += n
 			r.runs += runs
 			written[t] = append(written[t], o)
+			c.between()
 		}
 	}
 	// podindex and apiserver are one object each for the day
@@ -202,6 +203,7 @@ func (c *compactor) rollup(ctx context.Context, day time.Time) (rollupResult, er
 		}
 		r.runs += runs
 		written[t] = []tierObject{o}
+		c.between()
 	}
 
 	// pods, recomputed for the changed namespaces from the objects just
@@ -258,12 +260,17 @@ func hourList(hours []time.Time) string {
 	return strings.Join(hh, ",")
 }
 
-// runColumn is the column of each table's sort order that the rollup
-// splits a large write by: the first after namespace, which a daily
-// partition holds one of.
-var runColumn = map[string]string{"logs": "pod", "metrics": "name", "podindex": "pod_uid", "apiserver": "api_group"}
+// runColumns are the leading columns of each table's sort order that a
+// large write splits by (writeSorted). A daily partition holds one
+// namespace, so there they split by pod or name alone.
+var runColumns = map[string][]string{
+	"logs":      {"namespace", "pod"},
+	"metrics":   {"namespace", "name"},
+	"podindex":  {"pod_uid"},
+	"apiserver": {"api_group", "resource"},
+}
 
-// sortRows is how many rows the rollup sorts at once for an engine memory
+// sortRows is how many rows a write sorts at once for an engine memory
 // limit: about a kilobyte per row, which a metrics row's DISTINCT and sort
 // take with room to spare (a row is ~190 bytes in the engine). No limit
 // sorts every write whole.
@@ -271,23 +278,25 @@ func sortRows(memoryLimit int64) int64 {
 	return memoryLimit / 1024
 }
 
-// writeSorted writes the DISTINCT rows of src, sorted, to key. It reads
-// src once, into a Parquet file in scratch, which everything after reads:
-// the bucket sees one read of each input per write, however it is sorted.
-// When src has more than sortRows rows it sorts them in runs: consecutive
-// ranges of runColumn's values, each DISTINCT and sorted on its own into
-// another file, then copied to key in order. The engine holds one run at a
-// time. Two rows in different runs differ in runColumn, so the runs'
-// DISTINCT is the whole DISTINCT, and their concatenation is the whole
-// sort. A value with more rows than sortRows is one run of its own. The
-// files in scratch are encrypted as the object is.
+// writeSorted writes the DISTINCT rows of src, sorted, to key; the folds
+// and the rollup write every table but pods through it. It reads src once,
+// into a Parquet file in scratch, which everything after reads: the bucket
+// sees one read of each input per write, however it is sorted. When src
+// has more than sortRows rows it sorts them in runs: consecutive groups of
+// runColumns' values, in the sort order's, up to sortRows rows a run,
+// each DISTINCT and sorted on its own into another file, then copied to
+// key in order. The engine holds one run at a time. Two rows in different
+// runs differ in runColumns, so the runs' DISTINCT is the whole DISTINCT,
+// and their concatenation is the whole sort. A group with more rows than
+// sortRows is one run of its own. The files in scratch are encrypted as
+// the object is.
 func (c *compactor) writeSorted(ctx context.Context, conn *sql.Conn, table, src, key string) (rows int64, runs int, err error) {
-	col := runColumn[table]
-	if c.sortRows <= 0 || col == "" {
+	cols := runColumns[table]
+	if c.sortRows <= 0 || len(cols) == 0 {
 		rows, err = c.write(ctx, conn, table, "SELECT DISTINCT * FROM ("+src+")", key)
 		return rows, 0, err
 	}
-	dir, err := os.MkdirTemp(c.scratch, "rollup-")
+	dir, err := os.MkdirTemp(c.scratch, "sort-")
 	if err != nil {
 		return 0, 0, err
 	}
@@ -313,49 +322,47 @@ func (c *compactor) writeSorted(ctx context.Context, conn *sql.Conn, table, src,
 		return rows, 0, err
 	}
 
-	// the ranges, in the sort order's: NULL sorts last, in a run of its own
-	type value struct {
-		v sql.NullString
-		n int64
+	// the groups, numbered in the sort order's: NULL sorts last
+	list := strings.Join(cols, ", ")
+	if err := c.exec(ctx, conn, "CREATE OR REPLACE TEMP TABLE sort_groups AS SELECT *, row_number() OVER (ORDER BY "+list+
+		") AS g FROM (SELECT "+list+", count(*) AS n FROM "+from+" GROUP BY ALL)"); err != nil {
+		return 0, 0, fmt.Errorf("runs of %s: %w", key, err)
 	}
-	var values []value
-	vq, err := conn.QueryContext(ctx, "SELECT "+col+", count(*) FROM "+from+" GROUP BY ALL ORDER BY 1")
+	gq, err := conn.QueryContext(ctx, "SELECT n FROM sort_groups ORDER BY g")
 	if err != nil {
 		return 0, 0, fmt.Errorf("runs of %s: %w", key, err)
 	}
-	for vq.Next() {
-		var v value
-		if err := vq.Scan(&v.v, &v.n); err != nil {
-			vq.Close()
+	var counts []int64
+	for gq.Next() {
+		var n int64
+		if err := gq.Scan(&n); err != nil {
+			gq.Close()
 			return 0, 0, err
 		}
-		values = append(values, v)
+		counts = append(counts, n)
 	}
-	if err := errors.Join(vq.Err(), vq.Close()); err != nil {
+	if err := errors.Join(gq.Err(), gq.Close()); err != nil {
 		return 0, 0, err
 	}
-	var preds []string
-	for i := 0; i < len(values); {
-		if !values[i].v.Valid {
-			preds = append(preds, col+" IS NULL")
-			i++
-			continue
-		}
-		j, n := i, values[i].n
-		for j+1 < len(values) && values[j+1].v.Valid && n+values[j+1].n <= c.sortRows {
-			j++
-			n += values[j].n
-		}
-		preds = append(preds, col+" BETWEEN "+sqlString(values[i].v.String)+" AND "+sqlString(values[j].v.String))
-		i = j + 1
+	var on []string
+	for _, col := range cols {
+		on = append(on, "s."+col+" IS NOT DISTINCT FROM r."+col)
 	}
-	files := make([]string, len(preds))
-	for i, p := range preds {
-		files[i] = filepath.Join(dir, fmt.Sprintf("run-%05d.parquet", i))
-		if err := c.exec(ctx, conn, fmt.Sprintf("COPY (SELECT * FROM (SELECT DISTINCT * FROM %s WHERE %s) ORDER BY %s) TO %s (%s)",
-			from, p, sortOrder[table], sqlString(files[i]), opts)); err != nil {
+	var files []string
+	for i := 0; i < len(counts); {
+		j, n := i, counts[i]
+		for j+1 < len(counts) && n+counts[j+1] <= c.sortRows {
+			j++
+			n += counts[j]
+		}
+		f := filepath.Join(dir, fmt.Sprintf("run-%05d.parquet", len(files)))
+		if err := c.exec(ctx, conn, fmt.Sprintf("COPY (SELECT * FROM (SELECT DISTINCT s.* FROM %s s SEMI JOIN "+
+			"(SELECT %s FROM sort_groups WHERE g BETWEEN %d AND %d) r ON %s) ORDER BY %s) TO %s (%s)",
+			from, list, i+1, j+1, strings.Join(on, " AND "), sortOrder[table], sqlString(f), opts)); err != nil {
 			return 0, 0, err
 		}
+		files = append(files, f)
+		i = j + 1
 	}
 	// the runs in order: one read of the files, in list order, row by row
 	if err := c.exec(ctx, conn, "SET preserve_insertion_order = true"); err != nil {
@@ -364,6 +371,13 @@ func (c *compactor) writeSorted(ctx context.Context, conn *sql.Conn, table, src,
 	defer c.exec(context.WithoutCancel(ctx), conn, "SET preserve_insertion_order = false")
 	rows, err = c.writeOrdered(ctx, conn, table, "SELECT * FROM "+fmt.Sprintf(read, listLiteral(files)), key)
 	return rows, len(files), err
+}
+
+// between runs interleave, if set, between a rollup's writes.
+func (c *compactor) between() {
+	if c.interleave != nil {
+		c.interleave()
+	}
 }
 
 // partitions returns a table's namespace partitions of a day by namespace,

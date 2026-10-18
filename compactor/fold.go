@@ -35,6 +35,9 @@ type compactor struct {
 	// copied, when set, runs after a COPY to a temporary key and before
 	// the object there is read back; tests damage it there
 	copied func(tmp string)
+	// interleave, when set, runs between a rollup's writes: the run loop's
+	// folds of the current hours when ROLLING_INTERVAL is due (loop.go)
+	interleave func()
 	// finalSeen is the latest previous hour seen final: a cache that spares
 	// the rolling pass a sidecar read, never state
 	finalSeen time.Time
@@ -52,7 +55,7 @@ type compactor struct {
 	refusal error
 
 	// scratch is the local directory for the engine's spill and the
-	// rollup's sorted runs; sortRows is how many rows the rollup sorts at
+	// sorted runs; sortRows is how many rows a fold or a rollup sorts at
 	// once (rollup.go, writeSorted), 0 for no limit
 	scratch  string
 	sortRows int64
@@ -279,6 +282,7 @@ type foldResult struct {
 	wrote   bool
 	deleted []string
 	rows    map[string]int64
+	runs    int        // writes sorted in runs (writeSorted)
 	raw     rawSummary // the hour's listing, less deleted
 }
 
@@ -357,7 +361,7 @@ func (c *compactor) fold(ctx context.Context, h time.Time, listed []Object, now 
 
 	if len(keys) > 0 {
 		r.keys = len(keys)
-		if r.rows, err = c.foldKeys(ctx, conn, h, keys, union); err != nil {
+		if r.rows, r.runs, err = c.foldKeys(ctx, conn, h, keys, union); err != nil {
 			return r, err
 		}
 		next := make(map[string]bool, len(folded)+len(keys))
@@ -416,25 +420,30 @@ func (c *compactor) hasHourly(ctx context.Context, h time.Time) (bool, error) {
 }
 
 // foldKeys reads keys once, unions their rows with the hour's existing
-// objects when union is set, and writes the hour's four objects.
-func (c *compactor) foldKeys(ctx context.Context, conn *sql.Conn, h time.Time, keys []string, union bool) (map[string]int64, error) {
+// objects when union is set, and writes the hour's five objects. runs is
+// how many of the writes sorted in runs.
+func (c *compactor) foldKeys(ctx context.Context, conn *sql.Conn, h time.Time, keys []string, union bool) (rows map[string]int64, runs int, err error) {
 	urls := make([]string, len(keys))
 	for i, k := range keys {
 		urls[i] = c.raw.URL(k)
 	}
 	if err := setRawFiles(ctx, conn, urls); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if err := loadSQL(ctx, conn); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	// the new objects, read once; the table views read this table now
 	if err := c.exec(ctx, conn, "CREATE TEMP TABLE raw AS SELECT * FROM raw"); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	// every line in a table the fold writes, before anything is written
+	// every line in a table the fold writes, and every field one the raw
+	// view reads or retires, before anything is written
 	if err := guardTables(ctx, conn, h, keys, urls); err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	if err := guardFields(ctx, conn, h, keys, urls); err != nil {
+		return nil, 0, err
 	}
 	// The hour's objects, each under the key it was first written with.
 	objs := map[string]tierObject{}
@@ -442,33 +451,37 @@ func (c *compactor) foldKeys(ctx context.Context, conn *sql.Conn, h time.Time, k
 	for _, t := range append(foldTables, "pods") {
 		o, ok, err := c.locate(ctx, c.l.hourlyStem(t, h))
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		objs[t], exists[t] = o, ok
 	}
-	// The tier's rows under the views' names, so pods counts deduplicated
-	// rows. Each statement reads the view of its name: the temp table
-	// exists only once it completes. The existing object is read into
-	// memory here, before anything overwrites it.
+	// Each table's DISTINCT rows, the new and, when union is set, the
+	// existing object's, written in sorted runs (writeSorted), which reads
+	// the existing object before it overwrites it.
+	rows = map[string]int64{}
 	for _, t := range foldTables {
-		q := fmt.Sprintf("CREATE TEMP TABLE %s AS SELECT DISTINCT * EXCLUDE (filename) FROM %s", t, t)
+		src := "SELECT * EXCLUDE (filename) FROM " + t
 		if union && exists[t] {
-			q = fmt.Sprintf("CREATE TEMP TABLE %s AS SELECT DISTINCT * FROM (SELECT * EXCLUDE (filename) FROM %s "+
-				"UNION ALL BY NAME %s)", t, t, c.readTier([]tierObject{objs[t]}, ""))
+			src += " UNION ALL BY NAME " + c.readTier([]tierObject{objs[t]}, "")
 		}
-		if err := c.exec(ctx, conn, q); err != nil {
-			return nil, err
-		}
-	}
-	rows := map[string]int64{}
-	for _, t := range append(foldTables, "pods") {
-		n, err := c.write(ctx, conn, t, "SELECT * FROM "+t, objs[t].key)
+		n, r, err := c.writeSorted(ctx, conn, t, src, objs[t].key)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		rows[t] = n
+		runs += r
 	}
-	return rows, nil
+	// pods from the objects just written, under the names pods.sql reads
+	// (a temp view takes precedence over the view of its name)
+	for _, t := range foldTables {
+		if err := c.exec(ctx, conn, "CREATE TEMP VIEW "+t+" AS "+c.readTier([]tierObject{objs[t]}, "")); err != nil {
+			return nil, 0, err
+		}
+	}
+	if rows["pods"], err = c.write(ctx, conn, "pods", "SELECT * FROM pods", objs["pods"].key); err != nil {
+		return nil, 0, err
+	}
+	return rows, runs, nil
 }
 
 // The hourly sidecar is a CSV with a header, one row per raw key folded

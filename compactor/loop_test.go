@@ -58,6 +58,51 @@ func TestRollingPassFinalizesThePreviousHourAndRollsUpItsDay(t *testing.T) {
 	}
 }
 
+// A rollup lets the current hour fold between its writes (interleave),
+// and that fold counts as a rolling pass; the rolling pass that makes the
+// day's last hour final rolls the day up after it has counted itself.
+func TestRollupInterleavesTheCurrentHour(t *testing.T) {
+	w := newWorld(t)
+	h23 := day.Add(23 * time.Hour)
+	next := day.Add(24 * time.Hour)
+	w.put(rawKey(h23, "n1", "5900-a"), logs(h23.Add(59*time.Minute), 3, "ns1", "p1", "u1")...)
+	w.put(rawKey(h23, "n2", "5900-b"), logs(h23.Add(59*time.Minute), 3, "ns2", "q1", "u2")...)
+	w.put(rawKey(next, "n1", "0000-b"), logs(next, 2, "ns1", "p1", "u1")...)
+	now := next.Add(11 * time.Minute)
+	late := rawKey(next, "n1", "1000-c")
+	calls := 0
+	w.c.interleave = func() {
+		calls++
+		if calls == 1 {
+			var b strings.Builder
+			w.c.m.write(&b)
+			if !strings.Contains(b.String(), `blobs_compactor_runs_total{cluster="itest",job="rolling",result="success"} 1`) {
+				t.Errorf("the rolling pass was not counted before its rollup:\n%s", b.String())
+			}
+			w.put(late, logs(next.Add(10*time.Minute), 2, "ns1", "p1", "u1")...)
+			w.c.currentPass(w.ctx, now, time.Minute)
+		}
+	}
+	if err := w.c.rollingPass(w.ctx, now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	// a write per namespace of logs and metrics, then podindex and apiserver
+	if calls != 4 {
+		t.Fatalf("interleave ran %d times, want 4", calls)
+	}
+	if _, ok := w.folded(next)[late]; !ok {
+		t.Fatal("the key that arrived during the rollup was not folded")
+	}
+	if !w.exists(w.c.l.dailySidecar(day)) {
+		t.Fatal("no rollup")
+	}
+	var b strings.Builder
+	w.c.m.write(&b)
+	if s := `blobs_compactor_runs_total{cluster="itest",job="rolling",result="success"} 2`; !strings.Contains(b.String(), s) {
+		t.Fatalf("metrics lack %q:\n%s", s, b.String())
+	}
+}
+
 // The past pass finds every other hour with new keys from its listings,
 // gives a skipped hour its full read, and rolls up past days.
 func TestPastPass(t *testing.T) {

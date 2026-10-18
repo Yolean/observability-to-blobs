@@ -73,3 +73,10 @@ CREATE OR REPLACE VIEW raw AS
       apijson:'VARCHAR',            -- the object as JSON text, managedFields and Secret data removed
       rows:'INTEGER'                -- snapshot rows: the object-snapshot rows written before this one
     });
+
+-- Fields an agent of an earlier contract wrote that this contract dropped,
+-- one per element. A fold refuses an hour with a line that has a field
+-- neither the view above nor this list names (compactor/README.md, "Raw
+-- deletion"); a retired field is read by no one, so its values are gone
+-- once the hour's raw is deleted.
+CREATE OR REPLACE VIEW raw_retired AS SELECT unnest([]::VARCHAR[]) AS field;

@@ -36,12 +36,7 @@ Every line is one event with a `table` field:
   agent's own metrics, with the samples as an array, the target's
   `pod_uid`, `scrape`, the scrape path (`pod` for an annotated pod, `node`
   for node_exporter and the agent's own metrics, `host` for a host
-  agent's), and the pod's controllers ("Workload names" below).
-
-The raw contract, the columns `compactor/sql/raw.sql` pins, may change
-without compatibility before a 1.0 release: an upgrade that changes it
-moves the agents first, then the compactor and the readers, and what was
-written before it is not read in the new form. A
+  agent's), and the pod's controllers ("Workload names" below). A
   target's `metric_relabel_configs` can drop samples and labels before
   they are written ("Metric relabeling" below).
 - **podindex**: pod and container lifecycle events from the CRI
@@ -51,6 +46,14 @@ written before it is not read in the new form. A
   start, QoS class and pod IP; container rows the image as written and
   its resolved digest, start time and the memory and CPU limits in force;
   exit rows the code, reason and runtime message.
+
+The raw contract, the columns `compactor/sql/raw.sql` pins, may change
+without compatibility before a 1.0 release: an upgrade that changes it
+moves the agents first, then the compactor and the readers, and what was
+written before it is not read in the new form. The compactor refuses to
+fold an hour with a field it does not know, so that no field is dropped
+unseen, and a contract that drops or renames a field lists the old name
+as retired in `raw.sql` (`compactor/README.md`, "Raw deletion").
 
 The raw tier is for the compactor and the alerting tailer, which LIST an
 hour prefix and take new keys. It is not a query tier; the compacted
