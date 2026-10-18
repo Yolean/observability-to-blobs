@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -301,5 +303,58 @@ func TestEndpointWithAPath(t *testing.T) {
 	t.Setenv("AWS_ENDPOINT_URL_S3", "https://objects.example.net/")
 	if st, err := awsStore(context.Background(), ""); err != nil || st.endpoint != "objects.example.net" {
 		t.Fatalf("a bare slash: %q %v", st.endpoint, err)
+	}
+}
+
+func TestS3ErrorText(t *testing.T) {
+	body := []byte(`<?xml version="1.0" encoding="UTF-8"?><Error><Code>AccessDenied</Code><Message>Access Denied.</Message><RequestId>x</RequestId></Error>`)
+	if got := s3ErrorText(body); got != "AccessDenied: Access Denied." {
+		t.Errorf("%q", got)
+	}
+	if got := s3ErrorText([]byte(" not xml ")); got != "not xml" {
+		t.Errorf("%q", got)
+	}
+}
+
+// status with nothing configured is no failure; with an endpoint it
+// cannot use, it is that error's exit code, and AWS_PROFILE over the
+// file's context shows in its row.
+func TestStatusExitCodes(t *testing.T) {
+	dir := awsEnv(t, "")
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	var o, e strings.Builder
+	if err := runStatus(context.Background(), nil, &o, &e, time.Now()); err != nil {
+		t.Fatalf("nothing configured: %v %s", err, e.String())
+	}
+	os.WriteFile(filepath.Join(dir, "config"), []byte("[profile env]\naws_access_key_id = k\naws_secret_access_key = s\nendpoint_url = https://objects.example.net/s3\n"), 0o600)
+	writeContexts(t, dir, "contexts:\n  prod:\n    bucket: node-data\n    profile: ctx\n")
+	t.Setenv("AWS_PROFILE", "env")
+	o.Reset()
+	e.Reset()
+	err := runStatus(context.Background(), nil, &o, &e, time.Now())
+	if exitOf(err) != exitUsage || !strings.Contains(e.String(), "has a path") || !strings.Contains(o.String(), "AWS_PROFILE env") {
+		t.Fatalf("%v\n%s\n%s", err, o.String(), e.String())
+	}
+}
+
+// A store that refuses the listing: status still shows its other
+// sections, says why in a note, and exits 3.
+func TestStatusStoreRefusal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`<?xml version="1.0"?><Error><Code>AccessDenied</Code><Message>Access Denied.</Message></Error>`))
+	}))
+	defer srv.Close()
+	awsEnv(t, "")
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("AWS_ACCESS_KEY_ID", "k")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "s")
+	t.Setenv("AWS_ENDPOINT_URL_S3", srv.URL)
+	t.Setenv("S3_BUCKET", "b")
+	var o, e strings.Builder
+	err := runStatus(context.Background(), nil, &o, &e, time.Now())
+	if exitOf(err) != exitAuth || !strings.Contains(o.String(), "## prometheus") || !strings.Contains(e.String(), "AccessDenied: Access Denied.") ||
+		!strings.Contains(e.String(), "in bucket b;") || strings.Contains(e.String(), "<Error>") {
+		t.Fatalf("%v\n%s\n%s", err, o.String(), e.String())
 	}
 }

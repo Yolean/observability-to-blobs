@@ -218,7 +218,7 @@ this design rests on:
 
 1. **The hourly tier is one object per table per hour**,
    `hourly/{cluster}/{table}/{date}/{HH}.parquet`, for `logs`, `metrics`,
-   `podindex` and `pods`. Current and past hours use the same layout, so
+   `podindex`, `apiserver` and `pods`. Current and past hours use the same layout, so
    there is no layout switch and no deletes. Sorting and row groups replace
    partitioning (logs: `namespace, pod, pod_uid, container, restart, time`;
    metrics: `namespace, name, pod, pod_uid, container, restart, time`; 20k-row row
@@ -252,10 +252,10 @@ this design rests on:
 The tiers' keys:
 
 ```
-hourly/{cluster}/{logs,metrics,podindex,pods}/{date}/{HH}.parquet
+hourly/{cluster}/{logs,metrics,podindex,apiserver,pods}/{date}/{HH}.parquet
 hourly/{cluster}/_folded/{date}/{HH}.csv              key,final: the raw keys folded in, written last
 daily/{cluster}/{logs,metrics}/{date}/namespace={namespace}/data_0.parquet
-daily/{cluster}/{podindex,pods}/{date}.parquet
+daily/{cluster}/{podindex,apiserver,pods}/{date}.parquet
 daily/{cluster}/_folded/{date}.csv.zst                key: the raw keys rolled into the day, written last
 {hourly,daily}/{cluster}/_tmp/{random}.tmp             a write in progress, or one a failed job left
 ```
@@ -267,6 +267,16 @@ The namespace in a daily key is path-escaped the way DuckDB's hive
 partitioning writes it, and the column is in the file too, so readers can
 use `hive_partitioning` to skip the other namespaces' objects or ignore
 the path. Journal rows are in `_node`.
+
+**An hour's object is not a time partition.** It holds the rows of the
+raw objects whose key names the hour, and an agent keys an object by the
+time of its first record, so rows from up to one upload interval past
+the hour land in the hour's object: on a test cluster 0.8% of an hour's
+samples were in the previous hour's object, an apiserver snapshot can be
+split over two hours, and a container exit that the agent replays after
+its own restart lands in the hour of the replay. A reader of the time
+range [t0, t1) reads the hourly objects from the hour before t0's to
+t1's, or the days that hold them, and filters on `time`.
 
 ### The SQL, and the engine behaviour it relies on
 
@@ -298,17 +308,20 @@ is off: the compactor rereads objects it has just replaced.
 2. **Views.** `setRawFiles(new keys)`, `loadSQL`.
 3. **Read once.** `CREATE TEMP TABLE raw AS SELECT * FROM raw`: the new
    objects are read once, and the table views now read this table.
-4. **The tier's rows.** For each of `logs`, `metrics`, `podindex`:
-   `CREATE TEMP TABLE <t> AS SELECT DISTINCT * FROM (SELECT * EXCLUDE
-   (filename) FROM <t> UNION ALL BY NAME SELECT * FROM
-   read_parquet('<the hour's existing <t> object>'))`. The existing object
-   is read into memory here, before anything overwrites it. `DISTINCT`
-   folds retried uploads and keys folded twice.
-5. **Write.** `COPY` `logs`, `metrics` and `podindex` with their sort
-   orders, then `pods` (`pods.sql` now reads the three temp tables, so it
-   counts deduplicated rows), each to its hourly key. All four are written
-   even when one is empty. The keys are the only SQL text Go renders,
-   because `COPY ... TO` takes a literal.
+   The guard (below, "Raw deletion") then reads them once more, as JSON
+   objects, for fields the view drops, so a fold makes two GETs of each
+   key it takes.
+4. **The tier's rows.** For each of `logs`, `metrics`, `podindex` and
+   `apiserver`: `SELECT * EXCLUDE (filename) FROM <t> UNION ALL BY NAME
+   SELECT * FROM read_parquet('<the hour's existing <t> object>')`,
+   `DISTINCT` and sorted, to the hourly key, as the rollup writes
+   (below, "What a fold or a rollup holds at once"). The existing object
+   is read before anything overwrites it. `DISTINCT` folds retried
+   uploads and keys folded twice.
+5. **pods.** `pods.sql` reads temp views over the objects just written,
+   so it counts deduplicated rows, to its hourly key. All five objects are
+   written even when one is empty. The keys are the only SQL text Go
+   renders, because `COPY ... TO` takes a literal.
 6. **Commit.** `COPY` the sidecar, the previous keys plus the new ones,
    last.
 
@@ -355,6 +368,9 @@ killed process leaves, the past pass deletes: every object under the
 job can own. An operator can also give those two prefixes a short
 lifecycle rule (a day, say), and the bucket a rule that aborts incomplete
 multipart uploads, which an interrupted `COPY` that httpfs aborts leaves.
+A lifecycle rule's prefix is literal, so a bucket of several clusters
+needs the two rules for each cluster: `hourly/{cluster}/_tmp/` and
+`daily/{cluster}/_tmp/`.
 CopyObject takes objects up to 5 GiB, which bounds one namespace's daily
 `logs` or `metrics` object.
 
@@ -379,24 +395,35 @@ written last. Hourly objects are not clean time partitions (an object
 keyed by its first record carries records past the hour), which is why
 the rollup unions rows and never replaces an hour by a `time` filter.
 
-**What a rollup holds at once.** Nothing of the whole day: the hourly
-objects are sorted by namespace, so one namespace's read skips the
+The union is by name, so a day whose hours were written under two raw
+contracts (a column renamed or added within the day) has every column
+of both: a column only the earlier hours have comes last, and each row
+has values only in its own hour's columns. Readers select columns by
+name, never by position.
+
+**What a fold or a rollup holds at once.** Nothing of the whole day: the
+hourly objects are sorted by namespace, so one namespace's read skips the
 others' row groups, and a namespace's write holds only its own rows.
-Each write reads its inputs once, into a Parquet file in scratch, which
-the rest of the write reads, so the bucket sees one read of each input
-per write. A write of more rows than `DUCKDB_MEMORY_LIMIT`'s fold share
-in KiB (2M rows with the logs API on a 4Gi limit) is sorted in runs:
-consecutive ranges of the sort order's column after `namespace` (`name`
-for `metrics`, `pod` for `logs`; the first column for `podindex` and
-`apiserver`), each `DISTINCT` and sorted on its own into another file in
-scratch, and the runs are then copied to the object in order. Two rows
-in different runs differ in that column, so the runs' `DISTINCT` and
-their order are the whole object's. A run is one value at least, so one
-metric name with more rows than that is a run of its own. The files in
-scratch are encrypted with the object's key. Without
-`DUCKDB_MEMORY_LIMIT` every write is sorted whole, from the bucket. The
-rollup's log line says how many writes were sorted in runs (`runs`), and
-a line `rollup start`, with the changed hours, comes before the work.
+Each write of a fold or a rollup, `pods` aside, reads its inputs once,
+into a Parquet file in scratch, which the rest of the write reads, so the
+bucket sees one read of each input per write. A write of more rows than
+`DUCKDB_MEMORY_LIMIT`'s fold share in KiB (2M rows with the logs API on
+a 4Gi limit) is sorted in runs: consecutive groups of the sort order's
+leading columns' values (`namespace, name` for `metrics`, `namespace,
+pod` for `logs`, `pod_uid` for `podindex`, `api_group, resource` for
+`apiserver`; within a daily partition the namespace is one), up to that
+many rows a run, each `DISTINCT` and sorted on its own into another
+file in scratch, and the runs are then copied to the object in order.
+Two rows in different runs differ in those columns, so the runs'
+`DISTINCT` and their order are the whole object's. A run is one group at
+least, so one metric name of one namespace with more rows than that is a
+run of its own. So an hour's size is bounded by scratch, not by memory:
+an incremental fold of a large hour holds one run of it, as its full
+read does. The files in scratch are encrypted with the object's key.
+Without `DUCKDB_MEMORY_LIMIT` every write is sorted whole, from the
+bucket. The fold's and the rollup's log lines say how many writes were
+sorted in runs (`runs`), and a line `rollup start`, with the changed
+hours, comes before a rollup's work.
 
 Further rules:
 
@@ -417,14 +444,24 @@ Further rules:
 
 - every `ROLLING_INTERVAL` (default 2m): fold the current hour, and the
   previous hour until its final fold has committed. When that final fold
-  is of a day's last hour, roll the day up: its first rollup, which finds
-  all of its hours changed.
+  is of a day's last hour, roll the day up after the pass: its first
+  rollup, which finds all of its hours changed. A day whose last hour has
+  no raw (a cluster that stopped writing) gets that rollup from the next
+  past pass, at most `PAST_INTERVAL` after its midnight plus `GRACE`.
 - every `PAST_INTERVAL` (default 1h), and on the first tick after a
   start: list `raw1/{cluster}/` hour by hour and fold every other hour that has
   keys its sidecar lacks or is past H+1h+`GRACE` and not final (so an
   hour whose final fold a downtime skipped still gets it); then check
   every past day that has hourly sidecars for a rollup, which does
-  nothing unless an hour has keys the daily sidecar lacks.
+  nothing unless an hour has keys the daily sidecar lacks. A rollup that
+  does nothing counts as a rollup success and logs nothing of its own;
+  the pass logs one line `rollups`, with the days it checked and those
+  it rolled up.
+- between a rollup's writes, wherever it runs: fold every cluster's
+  current hour when `ROLLING_INTERVAL` has passed since the last rolling
+  fold, which counts as a rolling pass. So a long rollup holds the
+  current hour back by one write of it at most, not by the whole rollup.
+  The interleaved folds' time counts against the rollup's `JOB_TIMEOUT`.
 - `GRACE` (default 10m) is how long after its end an hour waits for its
   last uploads before the full read.
 - The configuration refuses `GRACE` above 30m, `ROLLING_INTERVAL` above
@@ -491,15 +528,28 @@ reads. The secret then needs delete on
 `raw1/`; lifecycle rules still bound everything else. In spool mode
 (below) the raw tier is the spool, and this deletion is always on.
 
-A line that no table holds would be deleted with its object, so the fold
-refuses, before it writes anything, an hour with a line whose `table` is
-missing or not one it folds (an agent newer than the compactor, a table
-renamed, an input an overlay adds without one); the rollup refuses a
-`logs` or `metrics` row without a namespace, which no partition holds. A
-refusal writes nothing, deletes no raw, logs `msg=unaccounted` with the
-hour or day, the count and a key, and adds the count to
-`blobs_compactor_unaccounted_total`. It repeats at every pass until the
-compactor knows the table or the object is moved out of `raw1/`.
+A line that no table holds would be deleted with its object, and so would
+a field the raw view does not read. So the fold refuses, before it writes
+anything, an hour with a line whose `table` is missing or not one it
+folds (an agent newer than the compactor, a table renamed, an input an
+overlay adds without one), or with a field that neither the raw view nor
+the `raw_retired` list in `sql/raw.sql` names (an agent newer than the
+compactor, or one older than a rename); the rollup refuses a `logs` or
+`metrics` row without a namespace, which no partition holds. A refusal
+writes nothing, deletes no raw, logs `msg=unaccounted` with the hour or
+day, the count of lines or rows, a key and, for unknown fields, each
+field with its count of lines (`fields=job:12,zzz:3`), and adds the count
+to `blobs_compactor_unaccounted_total`. It repeats at every pass until
+the compactor knows the table or the field, or the object is moved out of
+`raw1/`.
+
+So an upgrade that changes the raw contract moves the agents first, then
+the compactor (README.md, "What the agent ships"): until the compactor is
+upgraded it refuses the hours with the new fields, and folds them once it
+knows them. A contract that drops or renames a field lists the old name
+in `raw_retired`, so that the hours old agents wrote before their upgrade
+fold with that field dropped; without it the new compactor would refuse
+them until their raw expired.
 
 ## Encryption
 
@@ -539,7 +589,7 @@ segment, so lifecycle rules keep matching literal prefixes:
 ```
 hourly/{cluster}/{table}/{date}/{HH}.k-{id}.parquet
 daily/{cluster}/{logs,metrics}/{date}/namespace={namespace}/data_0.k-{id}.parquet
-daily/{cluster}/{podindex,pods}/{date}.k-{id}.parquet
+daily/{cluster}/{podindex,apiserver,pods}/{date}.k-{id}.parquet
 ```
 
 Plain objects keep their names. A plain reader's globs are
@@ -892,8 +942,8 @@ one of `LOGS_CONCURRENCY` (default 4) slots. The API has a DuckDB
 database of its own, so its memory limit and spill directory
 (`DUCKDB_TEMP_DIRECTORY/logs`) are its own and a request cannot take a
 fold's memory: in `run` with `LOGS_LISTEN` set, `DUCKDB_MEMORY_LIMIT` is
-split 50% to the fold and 25% to the API (75% to the fold without it);
-`serve` gives the API 75%.
+split 40% to the fold and 20% to the API (60% to the fold without it);
+`serve` gives the API 60%.
 
 **Running it.** `run` serves the API when `LOGS_LISTEN` is set (`:8080`
 in `deploy/logs`), beside `/metrics` and the put endpoint, from the
@@ -943,25 +993,38 @@ Service from everyone else.
   API in `run`; `:8080` for `serve`), which `deploy/logs` sets,
   `LOGS_LOOKBACK` (48h), `LOGS_TIMEOUT` (30s) and `LOGS_CONCURRENCY` (4).
 - `DUCKDB_MEMORY_LIMIT` from `resourceFieldRef: limits.memory`, with
-  DuckDB given 75% of it (with the logs API on, 50% to the fold and 25%
+  DuckDB given 60% of it (with the logs API on, 40% to the fold and 20%
   to the API's engine). `/scratch` is an emptyDir for `temp_directory`
   (`DUCKDB_TEMP_DIRECTORY`), `/tmp` a small one. Starting values:
-  requests 250m/1Gi, limit 4Gi, scratch 10Gi. What they hold, measured
-  on a single node's day of 35M `metrics` rows (16k series every 15 s,
-  1.5M rows an hour, 3 MB of Parquet an hour) with the logs API on: the
-  rollup peaks at about 100 MB of scratch, one namespace's input and its
-  runs, and the process at 2.5-2.9 GB resident, the fold engine's 2 GiB
-  share at its limit, in about 80 s; a fold of one of its hours holds
-  that hour. The scratch a rollup needs grows with its largest
-  namespace's compressed rows, not with the day in the engine's format,
-  and the memory share sets the run size.
+  requests 250m/1Gi, limit 4Gi, scratch 10Gi. A fold of an hour holds
+  one run of it at a time, and its scratch the hour's compressed rows.
+  The scratch a rollup needs grows with its largest namespace's
+  compressed rows, not with the day in the engine's format, and the
+  memory share sets the run size.
+
+  **Sizing by rows an hour.** DuckDB uses its whole share, spilling to
+  scratch beyond it, and the process needs more than the share: what the
+  engine allocates outside its limit, and the Go heap. Measured on
+  v0.2.0 (folds not yet in runs), the peak was the share plus about
+  1 GiB, or plus 0.21 GiB per million `metrics` rows an hour of the
+  cluster where that is more, and late incremental folds peaked above
+  full reads; the kubelet's stats read below the peaks. So the limit
+  needs `share + max(1 GiB, 0.21 GiB x million rows an hour)`: 4 GiB
+  (a 2.4 GiB share) holds up to about 7M rows an hour, and the 60%
+  share keeps 40% for the rest. A compactor of every cluster in a bucket
+  sizes by its largest cluster's hour, as its jobs run one at a time.
+  An OOM kill shows as a new `process_start_time_seconds`. For scale, a
+  single node's day of 35M `metrics` rows (16k series every 15 s, 1.5M
+  rows an hour, 3 MB of Parquet an hour) rolled up with about 100 MB of
+  scratch, one namespace's input and its runs, in about 80 s.
 - `prometheus.io/scrape` and `prometheus.io/port: "9090"` for `/metrics`,
   written with stdlib text exposition, every series labelled `cluster`,
   the cluster it is about (a tailer whose rows carry the scraping
   cluster's `cluster` stores it as `exported_cluster`):
   `blobs_compactor_last_success_timestamp_seconds{job}` and
   `blobs_compactor_last_duration_seconds{job}` (jobs `rolling`, `past`,
-  `rollup`), `blobs_compactor_runs_total{job,result}` (every job's
+  `rollup`; a rollup's interleaved folds of the current hour count as
+  `rolling`), `blobs_compactor_runs_total{job,result}` (every job's
   `success` and `failure` from 0 at the start, so the first failure is an
   increase),
   `blobs_compactor_rows{tier,table}` (rows of the last object written),

@@ -1035,6 +1035,11 @@ assert "podindex: container-exit rows carry no container-row facts, container ro
 # Metrics: discovery by annotation, named ports, numeric ports, opt-out
 assert "otel port-scoped hint scrapes the app container" \
   "SELECT count(*) > 0 FROM metrics WHERE pod = 'metrics-multi' AND container = 'app' AND name = 'app_requests_total' AND labels['code'] = '200' AND value = 42"
+assert "a metric_relabel_configs that does not validate: every sample of app is shipped, and every scrape says so" \
+  "SELECT count(*) FILTER (WHERE name = 'scrape_metric_relabel_configs_invalid' AND value = 1) > 0
+      AND count(*) FILTER (WHERE name = 'app_requests_total') > 0
+      AND count(*) FILTER (WHERE name = 'scrape_metric_relabel_configs_invalid' AND container <> 'app') = 0
+   FROM metrics WHERE pod = 'metrics-multi'"
 assert "otel hint by port name with metrics_path config scrapes the sidecar" \
   "SELECT count(*) > 0 FROM metrics WHERE pod = 'metrics-multi' AND container = 'sidecar' AND name = 'sidecar_up' AND value = 1"
 assert "classic prometheus.io without a port scrapes every declared container port" \
@@ -1127,7 +1132,8 @@ metric_relabel_configs:
   - __name__
 - action: labeldrop
   regex: worker" &&
-    annotation_is "$PODMONITORED" io.opentelemetry.discovery.metrics.9202/config "metrics_path: /metrics"
+    annotation_is "$PODMONITORED" io.opentelemetry.discovery.metrics.9202/config "honor_labels: true
+metrics_path: /metrics"
 }
 ota_marker_only() {
   annotation_is "$PODMONITORED" io.opentelemetry.discovery.metrics/enabled "" &&
@@ -1145,7 +1151,7 @@ ota_report() {
     logged "$pm" '"preannotated":[{"pod":"default/podmonitored-preannotated"'
 }
 expect "the webhook enables each endpoint's port by number: the main container's 9201, the worker's 9202" ota_ports
-expect "each port's config carries its endpoint's interval, path and metricRelabelings" ota_config
+expect "each port's config carries its endpoint's interval, path, metricRelabelings and honorLabels" ota_config
 expect "no pod-level key, and the marker names the PodMonitor" ota_marker_only
 expect "a selected pod with its own scrape annotations is left as it is" ota_preannotated
 ota_preannotated_info() {
@@ -1169,11 +1175,14 @@ assert "main's metricRelabelings: the dropped series is not shipped" \
 assert "main's metricRelabelings: worker is dropped, and of the two series that leaves equal, the first is kept" \
   "SELECT count(*) > 0 AND bool_and(value = 1 AND labels = MAP {'code': '200'}) FROM metrics
    WHERE pod = '$PODMONITORED_POD' AND container = 'main' AND name = 'podmonitored_main_requests_total'"
-assert "main's scrapes count 4 samples scraped, 2 after relabeling; the worker's 1 and 1" \
-  "SELECT bool_and(CASE container WHEN 'main' THEN s = 4 AND p = 2 WHEN 'worker' THEN s = 1 AND p = 1 END) AND count(DISTINCT container) = 2
+assert "main's scrapes count 4 samples scraped, 2 after relabeling; the worker's 2 and 2" \
+  "SELECT bool_and(CASE container WHEN 'main' THEN s = 4 AND p = 2 WHEN 'worker' THEN s = 2 AND p = 2 END) AND count(DISTINCT container) = 2
    FROM (SELECT container, time, max(value) FILTER (WHERE name = 'scrape_samples_scraped') AS s,
                 max(value) FILTER (WHERE name = 'scrape_samples_post_metric_relabeling') AS p
          FROM metrics WHERE pod = '$PODMONITORED_POD' AND name LIKE 'scrape_samples_%' GROUP BY container, time)"
+assert "the worker's honorLabels: its rows have honor_labels, main's do not, and its own pod label is kept" \
+  "SELECT count(*) > 0 AND bool_and(honor_labels = (container = 'worker')) AND count(*) FILTER (WHERE name = 'podmonitored_worker_reported' AND labels['pod'] = 'elsewhere') > 0
+   FROM metrics WHERE pod = '$PODMONITORED_POD'"
 assert "main is scraped every 20 s (its endpoint's interval), the worker every 15 s (the default)" \
   "WITH g AS (SELECT container, epoch(time) - epoch(lag(time) OVER (PARTITION BY pod, container ORDER BY time)) AS gap
               FROM metrics WHERE pod LIKE 'podmonitored-%' AND name = 'up')
@@ -1428,6 +1437,11 @@ GRANT
   prom_pushed() { promq query "yobs_pushed_window_seconds{bound=\"$1\"}" | grep -o '"[0-9]*"\]' | tr -dc 0-9 || true; }
   prom_names() { curl -s "$PROM_URL/api/v1/label/__name__/values" | grep -q '"app_requests_total"'; }
   prom_value() { promq query 'app_requests_total{pod="metrics-multi",container="app",code="200"}' | grep -q '"42"'; }
+  # honor_labels: the sample's pod label, not the scraped pod's, and no exported_pod
+  prom_honored() {
+    promq query 'podmonitored_worker_reported{pod="elsewhere",container="worker"}' | grep -q '"value"' &&
+      ! promq query 'podmonitored_worker_reported' | grep -q exported_pod
+  }
   # five minutes ending before the loaded window: only remote read has them
   prom_older() {
     local from
@@ -1443,6 +1457,7 @@ GRANT
       grep -q 'names autocomplete; loading the samples' "$INIT.yobs.err"
     expect "y-obs prometheus: autocomplete knows app_requests_total" prom_names
     expect "y-obs prometheus: app_requests_total{code=\"200\"} of metrics-multi is 42" prom_value
+    expect "y-obs prometheus: a series of a target with honor_labels has the sample's pod label" prom_honored
     # Prometheus scrapes y-obs every 15 s: the bounds are there after one
     sleep 20
     expect "y-obs prometheus: minutes before the loaded window, through remote read" prom_older

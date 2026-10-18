@@ -386,3 +386,11 @@ func TestEncodeSortsMapKeys(t *testing.T) {
 		last = i
 	}
 }
+
+func TestCheckCluster(t *testing.T) {
+	for name, ok := range map[string]bool{"prod-eu": true, "itest": true, "": false, "Dev": false, "a/b": false} {
+		if err := checkCluster(name); (err == nil) != ok {
+			t.Errorf("%q: %v", name, err)
+		}
+	}
+}

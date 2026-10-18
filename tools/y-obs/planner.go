@@ -223,7 +223,9 @@ func (s *session) dailyObjects(ctx context.Context, table, day, ns string) ([]st
 // createWindowViews creates w_<table> for the planned tables: the hourly
 // and daily objects and the raw-derived view, united by name, cut to the
 // window by time (pods has no time column: its rows are incarnations
-// seen in the hours read).
+// seen in the hours read). The raw-derived view is always among them, over
+// an empty file when no raw is planned, so that every column of this raw
+// contract exists, also over objects a compactor of an earlier one wrote.
 func (s *session) createWindowViews(ctx context.Context) error {
 	if err := s.createViews(ctx); err != nil {
 		return err
@@ -237,15 +239,8 @@ func (s *session) createWindowViews(ctx context.Context) error {
 				parts = append(parts, "SELECT * FROM "+tier+t)
 			}
 		}
-		if len(s.plan["raw"]) > 0 {
-			parts = append(parts, "SELECT * FROM "+t)
-		}
+		parts = append(parts, "SELECT * FROM "+t)
 		q := strings.Join(parts, " UNION ALL BY NAME ")
-		if q == "" {
-			// no tier has the window: the raw-derived view over an empty
-			// file gives the columns and no rows
-			q = "SELECT * FROM " + t
-		}
 		if t != "pods" {
 			q = "SELECT * FROM (" + q + ") WHERE time >= TIMESTAMP_NS " + from + " AND time < TIMESTAMP_NS " + to
 		}

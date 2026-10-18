@@ -18,10 +18,11 @@ import (
 //     pass lists raw1/{cluster}/ hour by hour and folds every other hour
 //     with keys its sidecar lacks, or that is past H+1h+GRACE and not
 //     final yet;
-//   - a rollup of a past day runs after the rolling pass committed the
-//     final fold of that day's last hour, and after every past pass for
+//   - a rollup of a past day runs after the rolling pass that committed
+//     the final fold of that day's last hour, and in every past pass for
 //     every past day with hourly sidecars, where it does nothing unless an
-//     hour has keys the daily sidecar lacks;
+//     hour has keys the daily sidecar lacks; between its writes the
+//     current hour of every cluster folds when ROLLING_INTERVAL is due;
 //   - at start and on every past pass, checkKeys: while a parquet key that
 //     a tier object's name carries has no key file, both passes refuse to
 //     fold, and the rolling pass checks again on every tick.
@@ -37,7 +38,19 @@ import (
 // an address that cannot be bound ends the run at once, as does a
 // listener that fails later.
 func (c *compactor) run(ctx context.Context, cfg config) error {
-	f := newFleet(c, cfg.cluster)
+	// Between a rollup's writes every cluster's current hour folds when
+	// ROLLING_INTERVAL has passed since the last time it did: the rollup
+	// holds back no rolling fold by more than one of its writes.
+	var f *fleet
+	var lastRolling time.Time
+	c.interleave = func() {
+		if time.Since(lastRolling) < cfg.rolling {
+			return
+		}
+		lastRolling = time.Now()
+		f.each(ctx, func(c *compactor) { c.currentPass(ctx, lastRolling.UTC(), cfg.jobTimeout) })
+	}
+	f = newFleet(c, cfg.cluster)
 	srv := &http.Server{Addr: cfg.metricsAddr, Handler: f.set, ReadHeaderTimeout: 10 * time.Second}
 	ml, err := net.Listen("tcp", cfg.metricsAddr)
 	if err != nil {
@@ -100,6 +113,7 @@ func (c *compactor) run(ctx context.Context, cfg config) error {
 		now := time.Now().UTC()
 		past := lastPast.IsZero() || now.Sub(lastPast) >= cfg.past
 		f.discover(ctx, past, cfg.jobTimeout)
+		lastRolling = time.Now()
 		f.each(ctx, func(c *compactor) { c.rollingPass(ctx, now, cfg.jobTimeout) })
 		if ctx.Err() == nil && past {
 			f.each(ctx, func(c *compactor) { c.pastPass(ctx, now, cfg.jobTimeout) })
@@ -165,7 +179,7 @@ func (c *compactor) foldJob(ctx context.Context, h time.Time, listed []Object, n
 	if r.wrote || len(r.deleted) > 0 {
 		c.log.Info("fold", "hour", hour, "keys", r.keys, "full", r.full, "final", r.final, "deleted", len(r.deleted),
 			"logs", r.rows["logs"], "metrics", r.rows["metrics"], "podindex", r.rows["podindex"], "pods", r.rows["pods"], "apiserver", r.rows["apiserver"],
-			"seconds", time.Since(start).Seconds())
+			"runs", r.runs, "seconds", time.Since(start).Seconds())
 	}
 	return r, nil
 }
@@ -199,7 +213,11 @@ func (c *compactor) guardLog(err error) {
 		return
 	}
 	c.m.refused(e)
-	c.log.Error("unaccounted", "job", e.job, "period", e.period, "count", e.n, "sample_key", e.sample)
+	attrs := []any{"job", e.job, "period", e.period, "count", e.n, "sample_key", e.sample}
+	if e.fields != "" {
+		attrs = append(attrs, "fields", e.fields)
+	}
+	c.log.Error("unaccounted", attrs...)
 }
 
 // keysJob is checkKeys with a deadline; it logs and sets the refusal.
@@ -210,31 +228,54 @@ func (c *compactor) keysJob(ctx context.Context, timeout time.Duration) error {
 }
 
 // rollingPass folds the current hour and, until it is final, the previous.
-// While a parquet key is missing it checks the keys again instead.
+// While a parquet key is missing it checks the keys again instead. When
+// the previous hour's final fold ends a day, the day's first rollup runs
+// after the pass, which it does not count in.
 func (c *compactor) rollingPass(ctx context.Context, now time.Time, timeout time.Duration) error {
 	start := time.Now()
-	err := c.rolling(ctx, now, timeout)
+	day, err := c.rolling(ctx, now, timeout)
 	c.m.job("rolling", start, err)
-	return err
+	if day.IsZero() {
+		return err
+	}
+	if serr := stopped(ctx); serr != nil {
+		return errors.Join(err, serr)
+	}
+	_, rerr := c.rollupJob(jobContext(ctx), day, timeout)
+	return errors.Join(err, rerr)
 }
 
-func (c *compactor) rolling(ctx context.Context, now time.Time, timeout time.Duration) error {
+// currentPass is the rolling pass's fold of the current hour alone, which
+// counts as a rolling pass. A rollup runs it between its partitions
+// (interleave), so that a long rollup does not hold the current hour back.
+func (c *compactor) currentPass(ctx context.Context, now time.Time, timeout time.Duration) {
+	if c.refusal != nil || stopped(ctx) != nil {
+		return
+	}
+	start := time.Now()
+	_, err := c.foldJob(jobContext(ctx), now.UTC().Truncate(time.Hour), nil, now, timeout)
+	c.m.job("rolling", start, err)
+}
+
+// rolling is the rolling pass's folds; day is the day to roll up after
+// them, zero for none.
+func (c *compactor) rolling(ctx context.Context, now time.Time, timeout time.Duration) (day time.Time, err error) {
 	jobs := jobContext(ctx)
 	cur := now.UTC().Truncate(time.Hour)
 	prev := cur.Add(-time.Hour)
 	if err := stopped(ctx); err != nil {
-		return err
+		return day, err
 	}
 	if c.refusal != nil {
 		if err := c.keysJob(jobs, timeout); err != nil {
-			return err
+			return day, err
 		}
 	}
-	_, err := c.foldJob(jobs, cur, nil, now, timeout)
+	_, err = c.foldJob(jobs, cur, nil, now, timeout)
 	errs := []error{err}
 	if prev.After(c.finalSeen) {
 		if err := stopped(ctx); err != nil {
-			return errors.Join(append(errs, err)...)
+			return day, errors.Join(append(errs, err)...)
 		}
 		r, err := c.foldJob(jobs, prev, nil, now, timeout)
 		errs = append(errs, err)
@@ -243,15 +284,11 @@ func (c *compactor) rolling(ctx context.Context, now time.Time, timeout time.Dur
 			// the day's last hour just became final: the day's first
 			// rollup; after a stop the next past pass makes it
 			if r.wrote && r.full && dayOf(prev).Before(dayOf(cur)) {
-				if err := stopped(ctx); err != nil {
-					return errors.Join(append(errs, err)...)
-				}
-				_, err := c.rollupJob(jobs, dayOf(prev), timeout)
-				errs = append(errs, err)
+				day = dayOf(prev)
 			}
 		}
 	}
-	return errors.Join(errs...)
+	return day, errors.Join(errs...)
 }
 
 // pastPass deletes abandoned temporary objects, lists the cluster's raw
@@ -338,7 +375,9 @@ func (c *compactor) past(ctx context.Context, now time.Time, timeout time.Durati
 	}
 
 	// every past day with hourly sidecars: a no-op unless one of its hours
-	// has keys the daily sidecar lacks
+	// has keys the daily sidecar lacks. A no-op logs nothing of its own
+	// and counts as a rollup success; one line per pass says how many
+	// days were checked and how many rolled up.
 	var days []string
 	if err := list(func(ctx context.Context) (err error) {
 		days, err = c.tiers.Dirs(ctx, c.l.hourlySidecarPrefix())
@@ -347,6 +386,8 @@ func (c *compactor) past(ctx context.Context, now time.Time, timeout time.Durati
 		fail("list", err)
 		return errors.Join(errs...)
 	}
+	checked, rolled := 0, 0
+	defer func() { c.log.Info("rollups", "days", checked, "rolled_up", rolled) }()
 	for _, dp := range days {
 		d, err := time.Parse(dateLayout+"/", strings.TrimPrefix(dp, c.l.hourlySidecarPrefix()))
 		if err != nil || !d.Before(dayOf(now)) {
@@ -355,8 +396,12 @@ func (c *compactor) past(ctx context.Context, now time.Time, timeout time.Durati
 		if err := stopped(ctx); err != nil {
 			return errors.Join(append(errs, err)...)
 		}
-		_, err = c.rollupJob(jobs, d, timeout)
+		r, err := c.rollupJob(jobs, d, timeout)
 		errs = append(errs, err)
+		checked++
+		if len(r.hours) > 0 {
+			rolled++
+		}
 	}
 	return errors.Join(errs...)
 }

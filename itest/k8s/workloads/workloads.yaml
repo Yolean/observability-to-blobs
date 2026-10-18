@@ -60,6 +60,10 @@ metadata:
     app: metrics-multi
   annotations:
     io.opentelemetry.discovery.metrics.9101/enabled: "true"
+    # a list that does not validate: not applied, and every scrape says so
+    io.opentelemetry.discovery.metrics.9101/config: |
+      metric_relabel_configs:
+      - action: nosuch
     io.opentelemetry.discovery.metrics.side-m/enabled: "true"
     io.opentelemetry.discovery.metrics.side-m/config: |
       metrics_path: /side

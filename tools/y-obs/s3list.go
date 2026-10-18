@@ -66,7 +66,7 @@ func (s *session) listPrefixes(ctx context.Context, prefix string) ([]string, er
 		body, _ := io.ReadAll(io.LimitReader(res.Body, 16<<20))
 		res.Body.Close()
 		if res.StatusCode != http.StatusOK {
-			return nil, s.wrap(fmt.Errorf("listing %s: HTTP %d %s", prefix, res.StatusCode, strings.TrimSpace(string(body[:min(len(body), 300)]))))
+			return nil, s.wrap(fmt.Errorf("listing %s: HTTP %d %s", prefix, res.StatusCode, s3ErrorText(body)))
 		}
 		var page struct {
 			IsTruncated           bool
@@ -251,7 +251,7 @@ func (s *session) listObjects(ctx context.Context, prefix string, fn func(listed
 		body, _ := io.ReadAll(io.LimitReader(res.Body, 64<<20))
 		res.Body.Close()
 		if res.StatusCode != http.StatusOK {
-			return s.wrap(fmt.Errorf("listing %s: HTTP %d %s", prefix, res.StatusCode, strings.TrimSpace(string(body[:min(len(body), 300)]))))
+			return s.wrap(fmt.Errorf("listing %s: HTTP %d %s", prefix, res.StatusCode, s3ErrorText(body)))
 		}
 		var page struct {
 			IsTruncated           bool
@@ -273,4 +273,20 @@ func (s *session) listObjects(ctx context.Context, prefix string, fn func(listed
 		}
 		token = page.NextContinuationToken
 	}
+}
+
+// s3ErrorText is an S3 error body as its code and message, or the body's
+// start when it is not an S3 error document.
+func s3ErrorText(body []byte) string {
+	var e struct {
+		Code    string `xml:"Code"`
+		Message string `xml:"Message"`
+	}
+	if xml.Unmarshal(body, &e) == nil && e.Code != "" {
+		if e.Message == "" {
+			return e.Code
+		}
+		return e.Code + ": " + e.Message
+	}
+	return strings.TrimSpace(string(body[:min(len(body), 300)]))
 }

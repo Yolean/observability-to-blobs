@@ -37,8 +37,6 @@ patches:
           - name: compactor
             imagePullPolicy: Never
             env:
-            - name: CLUSTER_NAME
-              value: ""
             - name: S3_BUCKET
               value: node-agent-multi
             - name: S3_ENDPOINT

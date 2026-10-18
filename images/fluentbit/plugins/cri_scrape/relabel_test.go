@@ -138,6 +138,23 @@ func TestParseRelabelRejects(t *testing.T) {
 	}
 }
 
+// honor_labels is a field of the config like the others: a port's value
+// replaces the pod's, and an absent one inherits it.
+func TestExpandTargetsOtelHonorLabels(t *testing.T) {
+	d := declared(
+		container("app", `[{"name":"a","containerPort":9101,"protocol":"TCP"},{"name":"b","containerPort":9102,"protocol":"TCP"},{"name":"c","containerPort":9103,"protocol":"TCP"}]`),
+	)
+	got := expandTargets(map[string]string{
+		"io.opentelemetry.discovery.metrics/enabled":     "true",
+		"io.opentelemetry.discovery.metrics/config":      "honor_labels: true\n",
+		"io.opentelemetry.discovery.metrics.9102/config": "honor_labels: false\n",
+		"io.opentelemetry.discovery.metrics.9103/config": "metrics_path: /c\n",
+	}, d)
+	if len(got) != 3 || !got[0].honorLabels || got[1].honorLabels || !got[2].honorLabels || got[2].path != "/c" {
+		t.Fatalf("unexpected %+v", got)
+	}
+}
+
 func TestExpandTargetsOtelMetricRelabelConfigs(t *testing.T) {
 	d := declared(
 		container("app", `[{"name":"a","containerPort":9101,"protocol":"TCP"},{"name":"b","containerPort":9102,"protocol":"TCP"},{"name":"c","containerPort":9103,"protocol":"TCP"}]`),
@@ -193,6 +210,23 @@ func TestScrapeCountsBeforeAndAfterRelabeling(t *testing.T) {
 	}
 	if _, ok := values["b"]; ok {
 		t.Errorf("b was not dropped: %v", values)
+	}
+	if _, ok := values["scrape_metric_relabel_configs_invalid"]; ok {
+		t.Errorf("a valid list is reported invalid: %v", values)
+	}
+
+	// a list that is not applied says so in every scrape of the target
+	got = nil
+	tg = target{key: "test", scheme: "http", host: host, port: p, path: "/metrics", relabelErr: "rule 0: unknown action"}
+	if err := sc.scrapeOnce(context.Background(), tg, "pod", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	values = map[string]float64{}
+	for _, s := range got[0].Samples {
+		values[s.Name] = s.Value
+	}
+	if values["scrape_metric_relabel_configs_invalid"] != 1 || values["scrape_samples_post_metric_relabeling"] != 3 {
+		t.Errorf("an invalid list: %v, want every sample and scrape_metric_relabel_configs_invalid 1", values)
 	}
 }
 

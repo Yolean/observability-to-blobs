@@ -36,12 +36,7 @@ Every line is one event with a `table` field:
   agent's own metrics, with the samples as an array, the target's
   `pod_uid`, `scrape`, the scrape path (`pod` for an annotated pod, `node`
   for node_exporter and the agent's own metrics, `host` for a host
-  agent's), and the pod's controllers ("Workload names" below).
-
-The raw contract, the columns `compactor/sql/raw.sql` pins, may change
-without compatibility before a 1.0 release: an upgrade that changes it
-moves the agents first, then the compactor and the readers, and what was
-written before it is not read in the new form. A
+  agent's), and the pod's controllers ("Workload names" below). A
   target's `metric_relabel_configs` can drop samples and labels before
   they are written ("Metric relabeling" below).
 - **podindex**: pod and container lifecycle events from the CRI
@@ -51,6 +46,14 @@ written before it is not read in the new form. A
   start, QoS class and pod IP; container rows the image as written and
   its resolved digest, start time and the memory and CPU limits in force;
   exit rows the code, reason and runtime message.
+
+The raw contract, the columns `compactor/sql/raw.sql` pins, may change
+without compatibility before a 1.0 release: an upgrade that changes it
+moves the agents first, then the compactor and the readers, and what was
+written before it is not read in the new form. The compactor refuses to
+fold an hour with a field it does not know, so that no field is dropped
+unseen, and a contract that drops or renames a field lists the old name
+as retired in `raw.sql` (`compactor/README.md`, "Raw deletion").
 
 The raw tier is for the compactor and the alerting tailer, which LIST an
 hour prefix and take new keys. It is not a query tier; the compacted
@@ -185,7 +188,11 @@ io.opentelemetry.discovery.metrics.9901/config: |
   target's rules drop.
 - **A list that does not parse or validate is not applied**: the target is
   scraped, every sample is shipped, and the agent logs why when it adds
-  the target. A filter that is wrong costs volume, never an alert input.
+  the target. Every scrape of such a target also writes the sample
+  `scrape_metric_relabel_configs_invalid` with the value 1, which
+  Prometheus has no counterpart for (its configuration would not load):
+  `scrape_metric_relabel_configs_invalid == 1` finds the targets. A
+  filter that is wrong costs volume, never an alert input.
 - **A rule can rewrite as well as drop.** `replace`, `labelmap` and the
   other actions do what they do in Prometheus, so the rows hold what the
   rules made of the samples, not what the pod served.
@@ -199,6 +206,30 @@ annotate such a pod yourself: the webhook leaves a pod with any
 `io.opentelemetry.discovery.*` or `prometheus.io/*` annotation alone,
 every port included, so one port annotated by hand turns off the
 PodMonitor's other ports for that pod.
+
+### honor_labels
+
+Where rows become series (the tailer, `y-obs prometheus`), the row's
+columns are the target's labels: cluster, node, `scrape`, instance,
+namespace, pod, container and the workload names. A sample label of the
+same name is stored as `exported_<name>`, as Prometheus does with
+`honor_labels: false`. An exporter that reports on other objects, such
+as kube-state-metrics with its own `namespace` and `pod` labels, sets
+`honor_labels: true` in its config hint, and its samples' labels then
+win, as in Prometheus: the column of that name is left out of the
+series.
+
+```yaml
+io.opentelemetry.discovery.metrics.8080/enabled: "true"
+io.opentelemetry.discovery.metrics.8080/config: |
+  honor_labels: true
+```
+
+The rows keep both: the columns are the scraped pod's, the labels the
+samples' own, and `honor_labels` is a column of `metrics`, true for such
+a target's rows. A port-scoped config's `honor_labels` replaces the
+pod-level one. operator-to-annotations translates a PodMonitor
+endpoint's `honorLabels`. `prometheus.io/*` has no counterpart.
 
 ### Workload names
 
@@ -261,7 +292,7 @@ By design, and so permanently:
 
 Not built: a scrape timeout or TLS settings per target, in either form;
 and in the OpenTelemetry form a `scheme` (it is always `http`), auth, URL
-parameters, target relabeling (`relabel_configs`) and `honor_labels`.
+parameters and target relabeling (`relabel_configs`).
 
 ## Layout
 
@@ -278,6 +309,28 @@ parameters, target relabeling (`relabel_configs`) and `honor_labels`.
 | `operator-to-annotations/`, `images/operator-to-annotations/` | for clusters whose manifests carry prometheus-operator resources but that run no operator: `crds/`, the five common prometheus-operator CRDs at `v1` only, vendored as released, and `controller/`, a mutating webhook that translates PodMonitors into the port-scoped annotations ([its README](operator-to-annotations/README.md)) |
 | `examples/gke/` | sketch of a production overlay |
 | `test.sh` | the one command |
+
+## Secrets
+
+What each component needs, by the names the manifests use; whatever
+writes the Secrets (by hand, External Secrets, a sealed-secrets
+controller) writes these names and keys. The namespace is the overlay's,
+`observability` in the bases.
+
+| component | Secret | keys | access it needs | when |
+|---|---|---|---|---|
+| node agent (`agent/`) | `node-agent-s3` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | write on `raw1/{cluster}/` | always |
+| cluster agent (`k8sagent/`) | `node-agent-s3` | the same | write on `raw1/{cluster}/`, where it writes `_k8sagent/` | always |
+| compactor (`compactor/deploy/base`) | `blobs-compactor-s3` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | list and read on `raw1/`; list, read and write on `hourly/` and `daily/`; delete on their `_tmp/`, and on `raw1/` with `RAW_DELETE=after-final` | always; without `CLUSTER_NAME` for every cluster in the bucket |
+| compactor, tier encryption | the overlay's, `blobs-compactor-parquet-keys` in `itest/compactor` | one file per key id, named by the id, holding a base64 key of 32 characters | mounted at `PARQUET_KEYS_DIR` | with `PARQUET_KEY_ID` (`compactor/README.md`, "Encryption") |
+| compactor, spool mode (`compactor/deploy/spool`) | `blobs-compactor-put` | `PUT_ACCESS_KEY_ID`, `PUT_SECRET_ACCESS_KEY` | the key pair the shippers sign their PUTs with | spool mode |
+| operator-to-annotations | `operator-to-annotations-tls` | written by cert-manager | none to supply | with the webhook |
+| host agent (`HOST_MODE.md`) | no Secret: a root-only file in the AWS shared credentials format, `/etc/observability-host/s3-credentials` | `aws_access_key_id`, `aws_secret_access_key` | write on `raw1/{cluster}/` | host mode |
+| y-obs | none: an AWS profile (`tools/y-obs/README.md`, "S3 access") | | list and read on the tiers it reads | |
+
+`CLUSTER_NAME` has no default anywhere: the agents refuse to start
+without one, and a compactor without one compacts every cluster in its
+bucket.
 
 ## Running
 
@@ -563,7 +616,8 @@ The alerting tailer (`images/blobs-to-prometheus`, reading `raw1/`):
 - The series' labels are the row's cluster, node, `scrape`, instance,
   namespace, pod, container and workload names ("Workload names"), then
   the sample's own. A sample label named like one of those is stored as
-  `exported_<name>`, as a scrape with `honor_labels: false` does. There is
+  `exported_<name>`, as a scrape with `honor_labels: false` does, unless
+  the target sets `honor_labels` ("honor_labels" above). There is
   no `job` among them, so a target's own `job` stays `job`: the
   compactor's (rolling, past, rollup) is selected as
   `blobs_compactor_last_success_timestamp_seconds{job="rolling"}`. Its

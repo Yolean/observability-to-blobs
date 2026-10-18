@@ -30,13 +30,13 @@ func TestSelectorMatching(t *testing.T) {
 		ls   []label
 		want bool
 	}{
-		{seriesLabels("app_requests_total", nil, map[string]string{"code": "500"}), true},
-		{seriesLabels("app_requests_total", nil, map[string]string{"code": "200"}), false},
-		{seriesLabels("up", meta("anywhere"), nil), true},
-		{seriesLabels("live_operations_total", meta("live"), nil), true},
-		{seriesLabels("live_operations_total", meta("dev3"), nil), false},
-		{seriesLabels("liveish", meta("live"), nil), false}, // regex is anchored
-		{seriesLabels("node_cpu_seconds_total", nil, nil), false},
+		{seriesLabels("app_requests_total", nil, map[string]string{"code": "500"}, false), true},
+		{seriesLabels("app_requests_total", nil, map[string]string{"code": "200"}, false), false},
+		{seriesLabels("up", meta("anywhere"), nil, false), true},
+		{seriesLabels("live_operations_total", meta("live"), nil, false), true},
+		{seriesLabels("live_operations_total", meta("dev3"), nil, false), false},
+		{seriesLabels("liveish", meta("live"), nil, false), false}, // regex is anchored
+		{seriesLabels("node_cpu_seconds_total", nil, nil, false), false},
 	}
 	for i, c := range cases {
 		if got := s.matches(c.ls); got != c.want {
@@ -54,11 +54,11 @@ func TestSelectorSeesStoredLabels(t *testing.T) {
 		{"name":"msg","matchers":[{"label":"text","type":"=~","value":"a.b"}]}
 	]}`)
 	ls := seriesLabels("blobs_compactor_last_success_timestamp_seconds",
-		map[string]string{"scrape": "pod", "cluster": "c1"}, map[string]string{"job": "rolling", "cluster": "c2"})
+		map[string]string{"scrape": "pod", "cluster": "c1"}, map[string]string{"job": "rolling", "cluster": "c2"}, false)
 	if !s.matches(ls) {
 		t.Fatalf("job and exported_cluster: %v", ls)
 	}
-	if !s.matches(seriesLabels("msg", nil, map[string]string{"text": "a\nb"})) {
+	if !s.matches(seriesLabels("msg", nil, map[string]string{"text": "a\nb"}, false)) {
 		t.Fatal("(?s): a newline is not matched by .")
 	}
 }

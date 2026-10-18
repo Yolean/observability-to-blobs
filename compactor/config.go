@@ -40,7 +40,7 @@ type config struct {
 
 	// job settings: DuckDB's request rate is a function of its threads
 	threads, httpRetries int
-	memoryLimit          int64 // bytes DuckDB may use, 75% of DUCKDB_MEMORY_LIMIT
+	memoryLimit          int64 // bytes the fold's engine may use (engineShare)
 	tempDir              string
 
 	metricsAddr string
@@ -235,24 +235,32 @@ func parseConfig(env func(string) string) (config, error) {
 			return c, fmt.Errorf("PARQUET_KEY_ID %s: PARQUET_KEYS_DIR is required", c.parquetKeyID)
 		}
 	}
-	// the container's memory limit in bytes, from resourceFieldRef; the rest
-	// is the Go heap, the HTTP client and DuckDB's own overhead. With the
-	// logs API on, its engine is a second database with a limit of its own
-	// (logs.go): the fold's 75% is then split, 50% for the fold, 25% for
-	// the API.
+	// the container's memory limit in bytes, from resourceFieldRef. With
+	// the logs API on, its engine is a second database with a limit of its
+	// own (logs.go): the engines' share is then split, two thirds for the
+	// fold, one third for the API.
 	if v := env("DUCKDB_MEMORY_LIMIT"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || n <= 0 {
 			return c, fmt.Errorf("DUCKDB_MEMORY_LIMIT %q: want bytes", v)
 		}
 		c.containerMemory = n
-		c.memoryLimit = n / 4 * 3
+		c.memoryLimit = engineShare(n)
 		if c.logsListen != "" {
-			c.memoryLimit = n / 2
-			c.logsMemoryLimit = n / 4
+			c.memoryLimit = engineShare(n) / 3 * 2
+			c.logsMemoryLimit = engineShare(n) / 3
 		}
 	}
 	return c, nil
+}
+
+// engineShare is the part of a container's memory limit that DuckDB may
+// use, 60%. The rest is what the engine allocates beyond its limit and the
+// Go heap: measured at about 1 GiB, and 0.21 GiB per million metrics rows
+// an hour of the fold above 5 million, on v0.2.0 (compactor/README.md,
+// "Manifests").
+func engineShare(containerMemory int64) int64 {
+	return containerMemory / 5 * 3
 }
 
 // stores returns the raw source and the tier store the config names: one

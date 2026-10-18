@@ -299,7 +299,7 @@ func writeMetrics(w io.Writer, ms []*metrics) {
 		}
 		return m.now().Sub(oldest).Seconds()
 	})
-	family("blobs_compactor_unaccounted_total", "counter", "Raw lines without a table the compactor folds, and hourly logs or metrics rows without a namespace, counted at every fold or rollup that refused for them: it wrote nothing and deleted no raw. Alert on any increase.")
+	family("blobs_compactor_unaccounted_total", "counter", "Raw lines without a table the compactor folds or with a field it neither reads nor retires, and hourly logs or metrics rows without a namespace, counted at every fold or rollup that refused for them: it wrote nothing and deleted no raw. Alert on any increase.")
 	single("blobs_compactor_unaccounted_total", func(m *metrics) float64 { return m.unaccounted })
 	family("blobs_compactor_parquet_keys_missing", "gauge", "Parquet key ids that tier object names (or PARQUET_KEY_ID) carry and PARQUET_KEYS_DIR lacks; folds and rollups refuse while it is above 0.")
 	single("blobs_compactor_parquet_keys_missing", func(m *metrics) float64 { return m.keysMissed })

@@ -39,6 +39,9 @@ func TestGuardRefusesALineWithoutAFoldedTable(t *testing.T) {
 		{"unknown table", []line{withTable(objectLine("object-added", at, "c9", "9"), "objects"), withTable(logl, "traces")}},
 		// an input that an overlay's pipeline-extra.yaml adds, tagged blob, without a table
 		{"no table", []line{withTable(logl, nil)}},
+		// an agent with a field the compactor does not read: newer, or
+		// older than a rename that did not retire the old name
+		{"unknown field", []line{withFields(logl, "job", "pod"), withFields(logl, "job", "pod", "zzz", 1)}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			w := newWorld(t)
@@ -83,6 +86,56 @@ func TestGuardRefusesALineWithoutAFoldedTable(t *testing.T) {
 				t.Fatalf("after the object went: %+v %v", r, err)
 			}
 		})
+	}
+}
+
+func withFields(l line, kv ...any) line {
+	out := line{}
+	for k, v := range l {
+		out[k] = v
+	}
+	for i := 0; i < len(kv); i += 2 {
+		out[kv[i].(string)] = kv[i+1]
+	}
+	return out
+}
+
+// The refusal of an unknown field names each field with its count of
+// lines; a field raw_retired names is no refusal.
+func TestGuardNamesUnknownFieldsAndSparesRetiredOnes(t *testing.T) {
+	w := newWorld(t)
+	var logged bytes.Buffer
+	w.c.log = slog.New(slog.NewTextHandler(&logged, nil))
+	at := h10.Add(20 * time.Minute)
+	logl := logLine(at, "ns1", "p1", "u1", "app", 0, "x")
+	bad := w.put(rawKey(h10, "n1", "1000-bad"), logl, withFields(logl, "job", "pod"),
+		withFields(scrapeLine(at, "ns1", "p1", "u1", "app", 0, "up", 1), "job", "pod", "zzz", 1))
+	_, err := w.c.foldJob(w.ctx, h10, nil, during, time.Minute)
+	var e *unaccountedError
+	if !errors.As(err, &e) || e.n != 2 || e.fields != "job:2,zzz:1" || e.sample != bad {
+		t.Fatalf("fold: %v, want the refusal of 2 lines with job:2,zzz:1 in %s", err, bad)
+	}
+	if s := "sample_key=" + bad + " fields=job:2,zzz:1"; !strings.Contains(logged.String(), s) {
+		t.Errorf("log lacks %q:\n%s", s, logged.String())
+	}
+
+	conn, err := w.c.conn(w.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	urls := []string{w.c.raw.URL(bad)}
+	if err := setRawFiles(w.ctx, conn, urls); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadSQL(w.ctx, conn); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(w.ctx, "CREATE OR REPLACE VIEW raw_retired AS SELECT unnest(['job', 'zzz']) AS field"); err != nil {
+		t.Fatal(err)
+	}
+	if err := guardFields(w.ctx, conn, h10, []string{bad}, urls); err != nil {
+		t.Fatalf("retired fields refused: %v", err)
 	}
 }
 

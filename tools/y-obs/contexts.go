@@ -178,6 +178,15 @@ var stores struct {
 	byProfile map[string]storeConfig
 }
 
+// forgetStore drops a profile's cached credential, which the store has
+// refused: the next session resolves the chain again, so a new grant is
+// taken up, and a revoked one is refused by its source.
+func forgetStore(profile string) {
+	stores.Lock()
+	delete(stores.byProfile, profile)
+	stores.Unlock()
+}
+
 func cachedAWSStore(ctx context.Context, profile string) (storeConfig, error) {
 	stores.Lock()
 	defer stores.Unlock()
@@ -211,6 +220,11 @@ func awsStore(ctx context.Context, profile string) (storeConfig, error) {
 	if err != nil {
 		return storeConfig{}, fail(exitAuth, "the AWS configuration%s: %v", ofProfile(profile), err)
 	}
+	// the endpoint first: a configuration error costs no credential
+	st := storeConfig{region: cfg.Region, tls: true, profile: profile}
+	if st.region == "" {
+		st.region = "us-east-1"
+	}
 	source := "the AWS default chain"
 	switch p := os.Getenv("AWS_PROFILE"); {
 	case profile != "":
@@ -221,6 +235,20 @@ func awsStore(ctx context.Context, profile string) (storeConfig, error) {
 		// the SDK takes the environment's keys first when no profile is set
 		source = "the AWS_* environment variables"
 	}
+	endpoint := s3Endpoint(ctx, cfg)
+	if endpoint == "" {
+		st.endpoint = "s3." + st.region + ".amazonaws.com"
+	} else {
+		u, err := url.Parse(endpoint)
+		if err != nil || u.Host == "" {
+			return storeConfig{}, fail(exitUsage, "the S3 endpoint %q of %s is not a URL such as https://objects.example.net", endpoint, source)
+		}
+		if strings.Trim(u.Path, "/") != "" || u.RawQuery != "" {
+			// path-style requests put the bucket where a path would go
+			return storeConfig{}, fail(exitUsage, "the S3 endpoint %q of %s has a path; y-obs takes scheme, host and port only", endpoint, source)
+		}
+		st.endpoint, st.tls = u.Host, u.Scheme != "http"
+	}
 	creds, err := cfg.Credentials.Retrieve(ctx)
 	var pe *processcreds.ProviderError
 	if errors.As(err, &pe) {
@@ -230,24 +258,7 @@ func awsStore(ctx context.Context, profile string) (storeConfig, error) {
 	if err != nil {
 		return storeConfig{}, fail(exitAuth, "no AWS credentials from %s: %v", source, err)
 	}
-	st := storeConfig{region: cfg.Region, keyID: creds.AccessKeyID, secret: creds.SecretAccessKey, token: creds.SessionToken, tls: true, source: source}
-	if st.region == "" {
-		st.region = "us-east-1"
-	}
-	endpoint := s3Endpoint(ctx, cfg)
-	if endpoint == "" {
-		st.endpoint = "s3." + st.region + ".amazonaws.com"
-	} else {
-		u, err := url.Parse(endpoint)
-		if err != nil || u.Host == "" {
-			return storeConfig{}, fail(exitUsage, "the S3 endpoint %q%s is not a URL such as https://objects.example.net", endpoint, ofProfile(profile))
-		}
-		if strings.Trim(u.Path, "/") != "" || u.RawQuery != "" {
-			// path-style requests put the bucket where a path would go
-			return storeConfig{}, fail(exitUsage, "the S3 endpoint %q%s has a path; y-obs takes scheme, host and port only", endpoint, ofProfile(profile))
-		}
-		st.endpoint, st.tls = u.Host, u.Scheme != "http"
-	}
+	st.keyID, st.secret, st.token, st.source = creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken, source
 	if creds.CanExpire {
 		st.expires = creds.Expires
 		st.margin = min(renewBefore, time.Until(creds.Expires)/2)

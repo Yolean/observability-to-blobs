@@ -4,6 +4,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
@@ -56,6 +57,12 @@ type Report struct {
 	// first reportSample by name
 	AnnotatedCount int      `json:"annotatedCount"`
 	Annotated      []PodRef `json:"annotated,omitempty"`
+	// Stale is the pods annotated for this PodMonitor alone whose scrape
+	// annotations differ from what it translates to now: an earlier
+	// generation of it, or an earlier version of the webhook, wrote them.
+	// They scrape as those say until they are recreated.
+	StaleCount int      `json:"staleCount"`
+	Stale      []PodRef `json:"stale,omitempty"`
 	// Preannotated is the selected pods with scrape annotations of their
 	// own, which the webhook leaves alone: where the migration to
 	// annotations in the workload's source is done
@@ -106,6 +113,11 @@ func NewReport(pm *monitoringv1.PodMonitor, pods []corev1.Pod) Report {
 		}
 		ref := PodRef{Pod: pod.Namespace + "/" + pod.Name, Created: pod.CreationTimestamp.UTC()}
 		marked := MarkedBy(pod.Annotations)
+		if slices.Equal(marked, []string{r.PodMonitor}) && stale(pm, pod) {
+			r.StaleCount++
+			r.Stale = append(r.Stale, ref)
+			continue
+		}
 		if slices.Contains(marked, r.PodMonitor) {
 			r.AnnotatedCount++
 			r.Annotated = append(r.Annotated, ref)
@@ -120,10 +132,14 @@ func NewReport(pm *monitoringv1.PodMonitor, pods []corev1.Pod) Report {
 		r.Skipped = append(r.Skipped, SkippedPod{PodRef: ref, Reason: skipReason(pm, pod)})
 	}
 	sort.Slice(r.Annotated, func(i, j int) bool { return r.Annotated[i].Pod < r.Annotated[j].Pod })
+	sort.Slice(r.Stale, func(i, j int) bool { return r.Stale[i].Pod < r.Stale[j].Pod })
 	sort.Slice(r.Preannotated, func(i, j int) bool { return r.Preannotated[i].Pod < r.Preannotated[j].Pod })
 	sort.Slice(r.Skipped, func(i, j int) bool { return r.Skipped[i].Pod < r.Skipped[j].Pod })
 	if len(r.Annotated) > reportSample {
 		r.Annotated = r.Annotated[:reportSample]
+	}
+	if len(r.Stale) > reportSample {
+		r.Stale = r.Stale[:reportSample]
 	}
 	if len(r.Preannotated) > reportSample {
 		r.Preannotated = r.Preannotated[:reportSample]
@@ -132,6 +148,24 @@ func NewReport(pm *monitoringv1.PodMonitor, pods []corev1.Pod) Report {
 		r.Skipped = r.Skipped[:reportSample]
 	}
 	return r
+}
+
+// stale is whether a pod annotated for pm alone has other scrape
+// annotations than pm translates to now. A pod that several PodMonitors
+// annotated is not checked: which ports each took depends on all of them.
+func stale(pm *monitoringv1.PodMonitor, pod *corev1.Pod) bool {
+	want := Translate(pod.Namespace+"/"+pod.Name, &corev1.Pod{Spec: pod.Spec}, []*monitoringv1.PodMonitor{pm}).Annotations
+	for k, v := range pod.Annotations {
+		if strings.HasPrefix(k, otelPrefix) && want[k] != v {
+			return true
+		}
+	}
+	for k, v := range want {
+		if k != Marker && pod.Annotations[k] != v {
+			return true
+		}
+	}
+	return false
 }
 
 // skipReason is why a pod that pm selects carries no annotations of pm.

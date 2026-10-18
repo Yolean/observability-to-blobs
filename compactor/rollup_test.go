@@ -82,8 +82,8 @@ func TestRollupEqualsFoldingTheWholeDay(t *testing.T) {
 }
 
 // TestRollupInSortedRuns is the same with a sort of one row at a time:
-// every write with more than one row sorts in runs, one runColumn value
-// each, and the runs' NULL comes last.
+// every write with more than one row sorts in runs, one group of runColumns
+// values each, and the NULL group comes last.
 func TestRollupInSortedRuns(t *testing.T) {
 	for _, keyed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "plain", true: "encrypted"}[keyed], func(t *testing.T) {
@@ -93,7 +93,7 @@ func TestRollupInSortedRuns(t *testing.T) {
 			}
 			w.c.sortRows = 1
 			rollupEqualsFoldingTheWholeDay(t, w)
-			if left, err := filepath.Glob(filepath.Join(w.c.scratch, "rollup-*")); err != nil || len(left) > 0 {
+			if left, err := filepath.Glob(filepath.Join(w.c.scratch, "sort-*")); err != nil || len(left) > 0 {
 				t.Fatalf("files left in scratch: %v %v", left, err)
 			}
 		})
@@ -162,6 +162,13 @@ func TestPodsRecomputedPerTier(t *testing.T) {
 	// the day's row is an aggregate over the day's rows, not a concatenation
 	if rows, lines, phase := pods(w.dailySource("pods", day)); rows != 1 || lines != 15 || phase != "succeeded" {
 		t.Fatalf("daily pods: %d rows, %d lines, %s; want 1, 15, succeeded", rows, lines, phase)
+	}
+	// lines and bytes are BIGINT in both tiers, as the view has them
+	for _, src := range []string{w.from(w.c.l.hourlyStem("pods", h10)), w.dailySource("pods", day)} {
+		var types string
+		if err := w.c.db.QueryRowContext(w.ctx, "SELECT string_agg(column_type, ',' ORDER BY column_name) FROM (DESCRIBE SELECT lines, bytes FROM "+src+")").Scan(&types); err != nil || types != "BIGINT,BIGINT" {
+			t.Fatalf("pods bytes and lines are %s, %v; want BIGINT", types, err)
+		}
 	}
 	if n := w.q("SELECT count(*) FROM " + w.dailySource("pods", day) + " WHERE pod_uid = 'u1' AND first_log = TIMESTAMP_NS '2026-10-01 10:00:00' AND last_log = TIMESTAMP_NS '2026-10-01 11:00:04' AND metric_names = ['requests', 'up']"); n != 1 {
 		t.Fatal("daily pods row lacks the day's first_log, last_log or metric names")

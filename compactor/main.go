@@ -140,7 +140,7 @@ func serve(ctx context.Context, log *slog.Logger) error {
 		cfg.logsListen = ":8080"
 	}
 	if cfg.containerMemory > 0 {
-		cfg.logsMemoryLimit = cfg.containerMemory / 4 * 3
+		cfg.logsMemoryLimit = engineShare(cfg.containerMemory)
 	}
 	if err := version(ctx, log); err != nil {
 		return err

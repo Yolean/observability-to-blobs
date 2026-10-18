@@ -40,8 +40,6 @@ spec:
           capabilities:
             drop: [ALL]
         env:
-        - name: CLUSTER_NAME
-          value: dev
         - name: UPLOAD_TIMEOUT
           value: 30s
         - name: SNAPSHOT_INTERVAL

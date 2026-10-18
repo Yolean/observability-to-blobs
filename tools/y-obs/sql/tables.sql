@@ -20,7 +20,7 @@ CREATE OR REPLACE VIEW logs AS
 CREATE OR REPLACE VIEW metrics AS
   SELECT time, cluster, node, scrape, instance, coalesce(namespace, '_node') AS namespace,
          pod, pod_uid, container, restart, k8s_deployment_name, k8s_replicaset_name, k8s_statefulset_name,
-         k8s_daemonset_name, k8s_job_name, k8s_cronjob_name,
+         k8s_daemonset_name, k8s_job_name, k8s_cronjob_name, coalesce(honor_labels, false) AS honor_labels,
          s.name AS name, s.type AS type, s.labels AS labels, s.value AS value,
          filename
   FROM (SELECT *, unnest(samples) AS s FROM raw WHERE "table" = 'metrics');

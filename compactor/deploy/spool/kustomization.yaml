@@ -10,7 +10,8 @@ kind: Component
 # accordingly, and keep replicas 1 with strategy Recreate (one writer, and
 # the ReadWriteOnce volume).
 #
-# An overlay adds this component to ../base or ../release and provides the
+# An overlay adds this component to ../base or ../release, sets
+# CLUSTER_NAME (spool mode serves one cluster's agents), and provides the
 # Secret blobs-compactor-put (PUT_ACCESS_KEY_ID, PUT_SECRET_ACCESS_KEY: the
 # key pair the agents sign with). The agents' out_s3 then points at the
 # Service: endpoint http://blobs-compactor-put.<namespace>.svc:9000, the

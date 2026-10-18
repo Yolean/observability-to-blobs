@@ -45,6 +45,8 @@ CREATE OR REPLACE VIEW raw AS
       k8s_daemonset_name:'VARCHAR',
       k8s_job_name:'VARCHAR',
       k8s_cronjob_name:'VARCHAR',
+      honor_labels:'BOOLEAN',       -- true when the target sets honor_labels: its samples' own
+                                    -- labels win over these columns (README.md, "honor_labels")
       samples:'STRUCT(name VARCHAR, type VARCHAR, labels MAP(VARCHAR, VARCHAR), value DOUBLE)[]',
       -- podindex: pod-observed | pod-checkpoint | pod-deleted | container | container-exit
       kind:'VARCHAR',
@@ -73,3 +75,10 @@ CREATE OR REPLACE VIEW raw AS
       apijson:'VARCHAR',            -- the object as JSON text, managedFields and Secret data removed
       rows:'INTEGER'                -- snapshot rows: the object-snapshot rows written before this one
     });
+
+-- Fields an agent of an earlier contract wrote that this contract dropped,
+-- one per element. A fold refuses an hour with a line that has a field
+-- neither the view above nor this list names (compactor/README.md, "Raw
+-- deletion"); a retired field is read by no one, so its values are gone
+-- once the hour's raw is deleted.
+CREATE OR REPLACE VIEW raw_retired AS SELECT unnest([]::VARCHAR[]) AS field;

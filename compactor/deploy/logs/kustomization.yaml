@@ -8,8 +8,8 @@ kind: Component
 # blobs-compactor-logs exposes it. The API has no authentication of its
 # own: put an authenticating proxy in front of it, and restrict who can
 # reach the Service. An overlay adds this component to ../base or
-# ../release, with or without ../spool; itest/compactor and
-# itest/compactor-put show both.
+# ../release, with or without ../spool, and sets CLUSTER_NAME: the API
+# serves one cluster; itest/compactor and itest/compactor-put show both.
 resources:
 - service.yaml
 

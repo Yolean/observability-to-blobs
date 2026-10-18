@@ -61,7 +61,10 @@ type target struct {
 	// relabelErr is why the target's metric_relabel_configs are not
 	// applied; its samples are then shipped as scraped
 	relabelErr string
-	workload   workload // the pod's controllers; none for static targets
+	// honorLabels: a sample's own label wins over the row's column of the
+	// same name where the rows become series (README.md, "honor_labels")
+	honorLabels bool
+	workload    workload // the pod's controllers; none for static targets
 }
 
 func (t target) url() string {
@@ -95,6 +98,7 @@ type otelConfig struct {
 	Endpoint           string `yaml:"endpoint"`
 	MetricsPath        string `yaml:"metrics_path"`
 	CollectionInterval string `yaml:"collection_interval"`
+	HonorLabels        *bool  `yaml:"honor_labels"`
 	// decoded per target, so that a malformed list does not take the
 	// other fields with it
 	MetricRelabelConfigs yaml.Node `yaml:"metric_relabel_configs"`
@@ -426,6 +430,9 @@ func (c otelConfig) over(base otelConfig) otelConfig {
 	if c.MetricRelabelConfigs.Kind == 0 {
 		c.MetricRelabelConfigs = base.MetricRelabelConfigs
 	}
+	if c.HonorLabels == nil {
+		c.HonorLabels = base.HonorLabels
+	}
 	return c
 }
 
@@ -441,6 +448,7 @@ func otelTarget(dp declaredPort, h otelHint) target {
 			t.interval = d
 		}
 	}
+	t.honorLabels = h.config.HonorLabels != nil && *h.config.HonorLabels
 	cfgs, err := parseRelabel(h.config.MetricRelabelConfigs)
 	if err != nil {
 		t.relabelErr = err.Error()

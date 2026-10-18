@@ -2,15 +2,18 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/duckdb/duckdb-go/v2"
 	"github.com/golang/snappy"
 )
 
@@ -105,9 +108,23 @@ func TestReadRequestDecode(t *testing.T) {
 	}
 }
 
+func TestSeriesLabelsHonored(t *testing.T) {
+	ls := seriesLabels("kube_pod_info", map[string]string{"scrape": "pod", "pod": "ksm-1", "namespace": "kube-system"},
+		map[string]string{"pod": "web-1", "namespace": "qa"}, true)
+	want := []label{{"__name__", "kube_pod_info"}, {"namespace", "qa"}, {"pod", "web-1"}, {"scrape", "pod"}}
+	if len(ls) != len(want) {
+		t.Fatalf("%v", ls)
+	}
+	for i := range want {
+		if ls[i] != want[i] {
+			t.Errorf("%d: %v, want %v", i, ls[i], want[i])
+		}
+	}
+}
+
 func TestSeriesLabels(t *testing.T) {
 	ls := seriesLabels("http_requests_total", map[string]string{"scrape": "pod", "pod": "web-1", "namespace": "", "cluster": "c"},
-		map[string]string{"code": "200", "pod": "inner", "empty": ""})
+		map[string]string{"code": "200", "pod": "inner", "empty": ""}, false)
 	want := []label{{"__name__", "http_requests_total"}, {"cluster", "c"}, {"code", "200"}, {"exported_pod", "inner"}, {"pod", "web-1"}, {"scrape", "pod"}}
 	if len(ls) != len(want) {
 		t.Fatalf("%v", ls)
@@ -119,20 +136,80 @@ func TestSeriesLabels(t *testing.T) {
 	}
 }
 
+// Each matcher selects, over rows of every kind (a meta label set or
+// empty, a sample label of the same name, honor_labels or not), exactly
+// the rows whose seriesLabels it matches.
 func TestMatcherSQL(t *testing.T) {
-	for _, c := range []struct {
-		m    matcher
-		want string
-	}{
-		{matcher{0, "__name__", "up"}, "coalesce(name, '') = 'up'"},
-		{matcher{0, "namespace", "qa"}, "coalesce(nullif(namespace, '_node'), '') = 'qa'"},
-		{matcher{1, "pod", ""}, "coalesce(pod, '') <> ''"},
-		{matcher{2, "code", "5.."}, "regexp_full_match(coalesce(labels['code'], ''), '5..')"},
-		{matcher{3, "exported_pod", "x|y"}, "NOT regexp_full_match(coalesce(labels['pod'], ''), 'x|y')"},
+	c, err := duckdb.NewConnector("", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := sql.OpenDB(c)
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE w_metrics AS SELECT * FROM (VALUES
+	  ('up', 'qa', 'web-1', MAP {'code': '200'}, false),
+	  ('up', 'qa', 'web-1', MAP {'pod': 'inner'}, false),
+	  ('up', 'qa', 'web-1', MAP {'pod': 'inner'}, true),
+	  ('up', '_node', '', MAP {'pod': 'inner', 'namespace': 'other'}, false),
+	  ('up', 'qa', 'web-2', MAP {'namespace': 'other'}, true),
+	  ('x', 'qa', 'web-2', MAP {'code': '500'}, NULL)
+	) AS t(name, namespace, pod, labels, honor_labels)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range metaLabels {
+		if m != "namespace" && m != "pod" {
+			if _, err := db.Exec("ALTER TABLE w_metrics ADD COLUMN " + m + " VARCHAR"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	type row struct {
+		name, namespace, pod string
+		labels               map[string]string
+		honor                bool
+	}
+	rows := []row{
+		{"up", "qa", "web-1", map[string]string{"code": "200"}, false},
+		{"up", "qa", "web-1", map[string]string{"pod": "inner"}, false},
+		{"up", "qa", "web-1", map[string]string{"pod": "inner"}, true},
+		{"up", "", "", map[string]string{"pod": "inner", "namespace": "other"}, false},
+		{"up", "qa", "web-2", map[string]string{"namespace": "other"}, true},
+		{"x", "qa", "web-2", map[string]string{"code": "500"}, false},
+	}
+	for _, m := range []matcher{
+		{0, "__name__", "up"}, {0, "namespace", "qa"}, {0, "namespace", "other"}, {1, "pod", ""},
+		{0, "pod", "inner"}, {0, "exported_pod", "inner"}, {3, "exported_namespace", "o.*"},
+		{2, "code", "5.."}, {0, "code", ""},
 	} {
-		got, err := matcherSQL(c.m)
-		if err != nil || got != c.want {
-			t.Errorf("%s: %s %v, want %s", c.m, got, err, c.want)
+		cond, err := matcherSQL(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []bool
+		r, err := db.Query("SELECT " + cond + " FROM (SELECT row_number() OVER () AS i, * FROM w_metrics) ORDER BY i")
+		if err != nil {
+			t.Fatalf("%s: %v", m, err)
+		}
+		for r.Next() {
+			var b bool
+			if err := r.Scan(&b); err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, b)
+		}
+		r.Close()
+		for i, rw := range rows {
+			v := ""
+			for _, l := range seriesLabels(rw.name, map[string]string{"namespace": rw.namespace, "pod": rw.pod}, rw.labels, rw.honor) {
+				if l.name == m.name {
+					v = l.value
+				}
+			}
+			re := regexp.MustCompile("^(?:" + m.value + ")$")
+			want := [...]bool{v == m.value, v != m.value, re.MatchString(v), !re.MatchString(v)}[m.typ]
+			if got[i] != want {
+				t.Errorf("%s on row %d %+v: %v, want %v (%s)", m, i, rw, got[i], want, cond)
+			}
 		}
 	}
 	if _, err := matcherSQL(matcher{2, "pod", "("}); err == nil {
