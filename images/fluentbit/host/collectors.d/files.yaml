@@ -12,7 +12,7 @@ pipeline:
       # the path is the row's unit
       path_key: unit
       read_from_head: true
-      db: /var/lib/observability-host/tail.db
+      db: ${HOST_STATE_DIR}/tail.db
       db.sync: full
       db.locking: true
       refresh_interval: 5

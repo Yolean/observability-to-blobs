@@ -205,6 +205,19 @@ forwards its journal would have:
 --collector.journal
 ```
 
+Two more settings of the launcher:
+
+- **`HOST_COLLECTOR_DIRS`** names more directories of collectors, separated by colons. Each has a
+  `collectors.d/` and may have `parts.d/` and a `collectors.defaults`, whose collectors add to the
+  defaults. This lets a separate package add collectors without changing the tarball's files.
+  A collector name may be in only one directory. `--collector.disable-defaults` turns off every
+  directory's defaults; a machine that wants another directory's collectors but not the host's
+  own turns those off with `--no-collector.<name>`.
+- **The state directory** is the launcher's `STATE_DIRECTORY`, which the unit sets to
+  `/var/lib/observability-host`. The launcher passes it to fluent-bit as `HOST_STATE_DIR`,
+  which every path in `host.yaml` and the collectors uses. It also passes it to the heartbeat as
+  `HEARTBEAT_STATE_DIR`, unless that is set already.
+
 A change of collectors takes a restart of the unit, as a change of the environment file does.
 `observability-host-launch --list` shows what would run, and `--print` the configuration it would
 write.

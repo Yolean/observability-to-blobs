@@ -5,7 +5,7 @@
 # No fluent-bit, no root.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/launch-test.XXXXXX")
+tmp=$(cd "$(mktemp -d "${TMPDIR:-/tmp}/launch-test.XXXXXX")" && pwd)
 trap 'rm -rf "$tmp"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -15,7 +15,9 @@ export HOST_ETC=$here
 export HOST_ARGS_FILE=$tmp/args
 export STATE_DIRECTORY=$tmp/state
 export HOST_FLUENT_BIT=$tmp/fluent-bit
-printf '#!/bin/sh\necho "$@" >"%s/fluent-bit.args"\n' "$tmp" >"$HOST_FLUENT_BIT"
+# the stub's own $@ and variables, expanded when it runs
+# shellcheck disable=SC2016
+printf '#!/bin/sh\necho "$@" >"%s/fluent-bit.args"\necho "$HOST_STATE_DIR $HEARTBEAT_STATE_DIR" >"%s/fluent-bit.env"\n' "$tmp" "$tmp" >"$HOST_FLUENT_BIT"
 chmod +x "$HOST_FLUENT_BIT"
 
 # enabled <flag ...>: the collectors the launcher would run, space-separated
@@ -85,6 +87,50 @@ grep -q "collectors: files heartbeat node self" "$tmp/stderr" || fail "stderr: $
 ok "the collectors are logged"
 [ ! -e "$STATE_DIRECTORY/fluent-bit.yaml.tmp" ] || fail "the temporary file was left"
 ok "no temporary file is left"
+[ "$(cat "$tmp/fluent-bit.env")" = "$STATE_DIRECTORY $STATE_DIRECTORY" ] || fail "fluent-bit's env: $(cat "$tmp/fluent-bit.env")"
+ok "fluent-bit gets the state directory as HOST_STATE_DIR and HEARTBEAT_STATE_DIR"
+HEARTBEAT_STATE_DIR=$tmp/hb "$here/launch.sh" 2>/dev/null
+[ "$(cat "$tmp/fluent-bit.env")" = "$STATE_DIRECTORY $tmp/hb" ] || fail "fluent-bit's env: $(cat "$tmp/fluent-bit.env")"
+ok "a HEARTBEAT_STATE_DIR that is set is kept"
+for f in "$here/host.yaml" "$here"/collectors.d/*.yaml; do
+  if grep -v '^ *#' "$f" | grep -q '/var/lib/observability-host'; then fail "$f names the state directory instead of HOST_STATE_DIR"; fi
+done
+ok "no collector and not host.yaml names the state directory: they use HOST_STATE_DIR"
+
+echo "more directories of collectors"
+extra=$tmp/extra
+mkdir -p "$extra/collectors.d" "$extra/parts.d"
+printf '# needs: extra-part serve-metrics
+pipeline:
+  inputs:
+    - name: dummy
+      alias: extra
+' >"$extra/collectors.d/extra.yaml"
+printf 'pipeline:
+  outputs: []
+' >"$extra/parts.d/extra-part.yaml"
+printf 'pipeline:
+  inputs:
+    - name: dummy
+      alias: optional
+' >"$extra/collectors.d/optional.yaml"
+printf 'extra
+' >"$extra/collectors.defaults"
+export HOST_COLLECTOR_DIRS=$extra
+expect "a directory's defaults add to HOST_ETC's; its other collectors are off" "extra files heartbeat journal node self"
+expect "its collectors take the flags" "files heartbeat optional" --collector.disable-defaults --collector.files --collector.optional
+cfg=$("$here/launch.sh" --print --collector.disable-defaults --collector.extra)
+grep -qx "  - $extra/collectors.d/extra.yaml" <<<"$cfg" || fail "the extra collector's file: $cfg"
+grep -qx "  - $extra/parts.d/extra-part.yaml" <<<"$cfg" || fail "the extra part: $cfg"
+grep -qx "  - $here/parts.d/serve-metrics.yaml" <<<"$cfg" || fail "a part from HOST_ETC: $cfg"
+ok "the configuration includes its collector, its part, and HOST_ETC's part it needs"
+printf 'pipeline:
+  inputs: []
+' >"$extra/collectors.d/files.yaml"
+refuses "a collector name in two directories is refused" "collectors in more than one directory: files" --collector.files
+rm "$extra/collectors.d/files.yaml"
+HOST_COLLECTOR_DIRS=$tmp/nothing refuses "a directory without collectors.d/ is refused" "has no collectors.d/"
+unset HOST_COLLECTOR_DIRS
 
 echo "list"
 list=$("$here/launch.sh" --list --no-collector.journal)
