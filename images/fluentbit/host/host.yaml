@@ -28,6 +28,9 @@
 #   CLUSTER_NAME NODE_NAME                      required
 #   S3_BUCKET S3_ENDPOINT                       required
 #   S3_REGION (us-east-1) S3_TLS (on)
+#   HOST_TLS_CA_FILE (/etc/ssl/certs/ca-certificates.crt, Debian's and Ubuntu's;
+#                    /etc/ssl/cert.pem on macOS)
+#   HOST_LOG_LEVEL (info)
 #   KEY_ROOT (host1)                            first segment of the object key
 #   UPLOAD_TIMEOUT (30s)
 #   HOST_EXTRA_FILES ()                         comma-separated paths or globs to tail besides
@@ -47,7 +50,7 @@
 service:
   flush: 1
   grace: 10
-  log_level: info
+  log_level: ${HOST_LOG_LEVEL:-info}
   # the process serves nothing but the metrics output below
   http_server: off
   storage.path: ${HOST_STATE_DIR}/storage
@@ -65,7 +68,7 @@ pipeline:
       endpoint: ${S3_ENDPOINT}
       region: ${S3_REGION:-us-east-1}
       tls: ${S3_TLS:-on}
-      tls.ca_file: /etc/ssl/certs/ca-certificates.crt
+      tls.ca_file: ${HOST_TLS_CA_FILE:-/etc/ssl/certs/ca-certificates.crt}
       # PutObject only: no multipart upload, no listing, no reading
       use_put_object: on
       # buckets with Object Lock require it

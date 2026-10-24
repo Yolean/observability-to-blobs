@@ -162,6 +162,8 @@ All are optional but the first four; the defaults are in `etc/host.yaml` and `et
 | `HOST_NODE_COLLECTORS` | see Metrics | `textfile` alone on a Kubernetes node |
 | `HOST_METRICS_LISTEN`, `HOST_METRICS_PORT` | `127.0.0.1`, `2023` | the address and the port the metrics are served on |
 | `HOST_BUFFER_LIMIT` | `4G` | each of the output's two on-disk buffers |
+| `HOST_TLS_CA_FILE` | `/etc/ssl/certs/ca-certificates.crt` | the CA bundle the S3 output trusts; `/etc/ssl/cert.pem` on macOS |
+| `HOST_LOG_LEVEL` | `info` | fluent-bit's log level |
 
 ### Collectors
 
