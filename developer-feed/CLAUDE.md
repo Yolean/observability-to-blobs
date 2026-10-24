@@ -5,6 +5,9 @@
   there is no pull request to report it in.
   - `cloudflare/` and `git/`: `gofmt -l .`, `go vet ./...` and `go test ./...` in each.
   - `bin/`: `shellcheck bin/*` and `shellcheck itest/run.sh`.
+  - `explore/`: `shellcheck -x -P SCRIPTDIR explore/explore.sh`; run it against a local
+    versitygw with `OBSERVABILITY_HOST_*` temporary and `DEV_FEED_EXPLORE_CREDENTIAL_COMMAND`
+    printing a test credential, never against the real bucket.
   - `macos/` and `lib/`: `shellcheck -x -P SCRIPTDIR` on every script. `build.sh` (no
     arguments) builds into `target/macos/`. Run `install.sh` and `dev-feed-agent` only with the
     `OBSERVABILITY_HOST_PREFIX`, `_CONFIG` and `_STATE` directories temporary and
