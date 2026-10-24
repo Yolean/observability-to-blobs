@@ -22,7 +22,7 @@ developer-feed/cloudflare/setup-bucket.sh --account <account id> --bucket <bucke
 developer-feed/macos/install.sh
 ```
 
-Create this machine's parent token in the Cloudflare dashboard. Keep its Secret Access Key in your password manager, never on the machine:
+Create this machine's parent token in the Cloudflare dashboard. Its secret is only needed for the `mint` lines below, then forget it; the token itself must stay, as deleting it stops the machine's credential:
 
 1. R2 object storage, Overview, Account Details: Manage next to API Tokens.
 2. Create Account API token.
@@ -31,7 +31,7 @@ Create this machine's parent token in the Cloudflare dashboard. Keep its Secret 
 5. Specify bucket(s): Apply to specific buckets only, and select the bucket.
 6. TTL: Forever.
 7. Client IP Address Filtering: none.
-8. Create Account API token, then copy the Access Key ID for the `mint` line below, and the Secret Access Key.
+8. Create Account API token, then copy the Access Key ID and the Secret Access Key for the `mint` lines below.
 
 ```sh
 B=~/.local/opt/observability-host/bin
@@ -41,8 +41,8 @@ developer-feed/macos/install.sh
 tail -f ~/.local/state/observability-host/v1/log/agent.log
 ```
 
-Renew: the two `mint` lines without `--parent-key-id`, then
-`launchctl kickstart -k gui/$(id -u)/com.yolean.observability-host`.
+Renew: a new parent token (steps above), the two `mint` lines with its Access Key ID,
+`launchctl kickstart -k gui/$(id -u)/com.yolean.observability-host`, then delete the old parent token.
 
 Update: `build.sh`, then `install.sh`.
 
