@@ -121,13 +121,37 @@ func gitIn(repo, stdin string, args ...string) ([]byte, error) {
 	return out, nil
 }
 
+// protected are the folders macOS asks the user about before a process
+// may read them (TCC), relative to the home directory. A git run there by
+// the agent shows a dialog naming fluent-bit, the process it is charged to,
+// and asks again for every new build of it.
+var protected = []string{"Documents", "Desktop", "Downloads", "Library/Mobile Documents",
+	"Pictures", "Movies", "Music"}
+
+// isProtected tells by the path alone, without touching it.
+func isProtected(home, path string) bool {
+	for _, p := range protected {
+		dir := filepath.Join(home, p)
+		if path == dir || strings.HasPrefix(path, dir+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
 // discover is every repository the feed follows: the projects of Claude
 // Code's prompt history and DEV_FEED_GIT_ROOTS, each as its top level,
-// once, sorted. A path that is not in a repository is skipped.
+// once, sorted. A path that is not in a repository is skipped, and so is a
+// history project in a folder macOS protects (protected); one named in
+// DEV_FEED_GIT_ROOTS is read even there, as naming it is the user's choice.
 func discover(home, roots string) []string {
 	var candidates []string
 	if home != "" {
-		candidates = append(candidates, historyProjects(filepath.Join(home, ".claude", "history.jsonl"))...)
+		for _, p := range historyProjects(filepath.Join(home, ".claude", "history.jsonl")) {
+			if !isProtected(home, p) {
+				candidates = append(candidates, p)
+			}
+		}
 	}
 	for _, g := range strings.Split(roots, ":") {
 		if g == "" {

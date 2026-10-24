@@ -146,11 +146,20 @@ func TestDiscover(t *testing.T) {
 	sh(t, b, "init", "-q")
 	home := filepath.Join(base, "home")
 	os.MkdirAll(filepath.Join(home, ".claude"), 0o755)
+	docs := filepath.Join(home, "Documents", "repo")
+	if err := os.MkdirAll(docs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sh(t, docs, "init", "-q")
 	hist := `{"display":"x","project":"` + filepath.Join(a, "sub") + `"}` + "\n" +
-		`{"display":"y","project":"` + filepath.Join(base, "not-a-repo") + `"}` + "\n" + "not json\n"
+		`{"display":"y","project":"` + filepath.Join(base, "not-a-repo") + `"}` + "\n" +
+		`{"display":"z","project":"` + docs + `"}` + "\n" + "not json\n"
 	os.WriteFile(filepath.Join(home, ".claude", "history.jsonl"), []byte(hist), 0o644)
 	got := discover(home, filepath.Join(base, "b*")+":"+a)
 	if strings.Join(got, ",") != a+","+b {
-		t.Errorf("discover: %v, want %s and %s once each", got, a, b)
+		t.Errorf("discover: %v, want %s and %s once each, and not the history's %s", got, a, b, docs)
+	}
+	if got := discover(home, docs); len(got) != 2 || got[0] != a || got[1] != docs {
+		t.Errorf("discover with %s in the roots: %v", docs, got)
 	}
 }

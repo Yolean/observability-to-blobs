@@ -24,19 +24,28 @@ new=$state.new
 [ -f "$state" ] || : >"$state"
 : >"$new"
 
+# every match of every pattern, expanded here; a pattern without a match
+# stays itself, which is not a file
+files=$new.files
+: >"$files"
 for pattern in "$@"; do
-  # the pattern is expanded here, each match a path; one without a match
-  # stays the pattern itself, which is not a file
   for f in $pattern; do
-    [ -f "$f" ] || continue
-    sha=$(shasum -a 256 "$f" | cut -c1-64)
-    printf '%s\t%s\n' "$sha" "$f" >>"$new"
-    if ! grep -qxF "$(printf '%s\t%s' "$sha" "$f")" "$state"; then
-      jq -cn --arg table "$table" --arg kind "$kind" --arg path "$f" --arg sha "$sha" --rawfile content "$f" \
-        '{table: $table, kind: $kind, path: $path, content: $content, sha256: $sha, deleted: false}'
-    fi
+    [ -f "$f" ] && printf '%s\n' "$f" >>"$files"
   done
 done
+# one shasum for all of them: a process per file is slow in a background
+# job, which macOS throttles (minutes for a few hundred files)
+if [ -s "$files" ]; then
+  tab=$(printf '\t')
+  tr '\n' '\0' <"$files" | xargs -0 shasum -a 256 | sed "s/^\([0-9a-f]\{64\}\)  /\1$tab/" >"$new"
+fi
+rm -f "$files"
+while IFS="$(printf '\t')" read -r sha f; do
+  if ! grep -qxF "$(printf '%s\t%s' "$sha" "$f")" "$state"; then
+    jq -cn --arg table "$table" --arg kind "$kind" --arg path "$f" --arg sha "$sha" --rawfile content "$f" \
+      '{table: $table, kind: $kind, path: $path, content: $content, sha256: $sha, deleted: false}'
+  fi
+done <"$new"
 
 # the paths of the previous run that matched nothing this time
 cut -f2 "$state" | while IFS= read -r f; do
