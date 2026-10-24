@@ -15,7 +15,16 @@ developer-feed/cloudflare/setup-bucket.sh --account <account id> --bucket <bucke
 developer-feed/macos/install.sh
 ```
 
-Dashboard, R2, Manage API tokens: a parent token for this machine, Object Read & Write, this bucket only, no expiry, no IP filter.
+Create this machine's parent token in the Cloudflare dashboard. Keep its Secret Access Key in your password manager, never on the machine:
+
+1. R2 object storage, Overview, Account Details: Manage next to API Tokens.
+2. Create Account API token.
+3. Token name: the machine, e.g. `dev-feed-smack3`.
+4. Permissions: Object Read & Write.
+5. Specify bucket(s): Apply to specific buckets only, and select the bucket.
+6. TTL: Forever.
+7. Client IP Address Filtering: none.
+8. Create Account API token, then copy the Access Key ID for the `mint` line below, and the Secret Access Key.
 
 ```sh
 B=~/.local/opt/observability-host/bin
