@@ -103,8 +103,15 @@ type state struct {
 }
 
 func git(repo string, args ...string) ([]byte, error) {
+	return gitIn(repo, "", args...)
+}
+
+// gitIn runs git with stdin: revisions go there rather than on the command
+// line, which a repository with thousands of refs would overflow.
+func gitIn(repo, stdin string, args ...string) ([]byte, error) {
 	cmd := exec.Command("git", append([]string{"-C", repo, "-c", "core.fsmonitor=false"}, args...)...)
 	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	cmd.Stdin = strings.NewReader(stdin)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -196,10 +203,17 @@ func collect(repo, stateDir string, w io.Writer, now time.Time) error {
 		}
 	}
 
+	// one git for the tips; the reflogs are read as the files they are,
+	// as a git per ref took minutes in a repository with thousands of them
 	refsOut, err := git(repo, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/remotes")
 	if err != nil {
 		return err
 	}
+	commonOut, err := git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return err
+	}
+	common := strings.TrimSpace(string(commonOut))
 	var tips []string
 	for _, l := range strings.Split(strings.TrimSpace(string(refsOut)), "\n") {
 		ref, sha, ok := strings.Cut(l, " ")
@@ -208,7 +222,7 @@ func collect(repo, stateDir string, w io.Writer, now time.Time) error {
 		}
 		cur.Tips[ref] = sha
 		tips = append(tips, sha)
-		entries, err := reflog(repo, ref)
+		entries, err := reflog(common, ref)
 		if err != nil {
 			return err
 		}
@@ -284,31 +298,34 @@ type reflogEntry struct {
 	msg  string
 }
 
-// reflog is a ref's reflog, newest first; a ref without one has none.
-func reflog(repo, ref string) ([]reflogEntry, error) {
-	out, err := git(repo, "log", "-g", "--date=unix", "--format=%H%x1f%gd%x1f%gs%x1e", ref, "--")
-	if err != nil {
-		// a ref with no reflog (core.logAllRefUpdates off, or a packed
-		// ref that never moved here) is not an error of the repository
+// reflog is a ref's reflog, newest first, read from its file in the
+// repository's common git directory: one line per entry, oldest first,
+// "<old> <new> <name> <<email>> <unix time> <zone>\t<message>". A ref
+// without one (core.logAllRefUpdates off, or a ref that never moved here)
+// has none.
+func reflog(common, ref string) ([]reflogEntry, error) {
+	b, err := os.ReadFile(filepath.Join(common, "logs", filepath.FromSlash(ref)))
+	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
+	if err != nil {
+		return nil, err
+	}
 	var es []reflogEntry
-	for _, rec := range strings.Split(string(out), "\x1e") {
-		rec = strings.TrimLeft(rec, "\n")
-		f := strings.Split(rec, "\x1f")
-		if len(f) != 3 {
+	for _, l := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+		head, msg, _ := strings.Cut(l, "\t")
+		f := strings.Fields(head)
+		if len(f) < 5 {
 			continue
 		}
-		// %gd with --date=unix is <ref>@{<unix time>}
-		i := strings.LastIndex(f[1], "@{")
-		if i < 0 || !strings.HasSuffix(f[1], "}") {
-			continue
-		}
-		t, err := strconv.ParseInt(f[1][i+2:len(f[1])-1], 10, 64)
+		t, err := strconv.ParseInt(f[len(f)-2], 10, 64)
 		if err != nil {
 			continue
 		}
-		es = append(es, reflogEntry{sha: f[0], unix: t, msg: f[2]})
+		es = append(es, reflogEntry{sha: f[1], unix: t, msg: msg})
+	}
+	for i, j := 0, len(es)-1; i < j; i, j = i+1, j-1 {
+		es[i], es[j] = es[j], es[i]
 	}
 	return es, nil
 }
@@ -316,16 +333,31 @@ func reflog(repo, ref string) ([]reflogEntry, error) {
 // newCommits is every commit the current tips reach that the previous
 // run's tips did not, oldest first.
 func newCommits(repo string, tips []string, prevTips map[string]string) ([]row, error) {
-	args := []string{"log", "--topo-order", "--reverse", "--format=%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%B%x1e"}
-	args = append(args, tips...)
+	// a previous tip that was garbage collected can't be excluded: ask for
+	// all of them in one cat-file
+	var check strings.Builder
+	prev := make([]string, 0, len(prevTips))
 	for _, sha := range prevTips {
-		// a previous tip that was garbage collected can't be excluded
-		if _, err := git(repo, "cat-file", "-e", sha+"^{commit}"); err == nil {
-			args = append(args, "^"+sha)
+		prev = append(prev, sha)
+		check.WriteString(sha + "^{commit}\n")
+	}
+	var revs strings.Builder
+	for _, t := range tips {
+		revs.WriteString(t + "\n")
+	}
+	if len(prev) > 0 {
+		out, err := gitIn(repo, check.String(), "cat-file", "--batch-check=%(objectname)")
+		if err != nil {
+			return nil, err
+		}
+		for i, l := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+			if i < len(prev) && !strings.HasSuffix(l, " missing") {
+				revs.WriteString("^" + prev[i] + "\n")
+			}
 		}
 	}
-	args = append(args, "--")
-	out, err := git(repo, args...)
+	out, err := gitIn(repo, revs.String(), "log", "--stdin", "--topo-order", "--reverse",
+		"--format=%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%B%x1e")
 	if err != nil {
 		return nil, err
 	}
