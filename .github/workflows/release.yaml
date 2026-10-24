@@ -84,6 +84,7 @@ jobs:
         mkdir root && tar -xzf ./*.tar.gz -C root
         root/bin/fluent-bit --version
         test -f root/etc/host.yaml && test -x root/bin/observability-host-heartbeat
+        HOST_ARGS_FILE=/nonexistent root/bin/observability-host-launch --list
         rm -r root
     - uses: actions/upload-artifact@v7
       with:

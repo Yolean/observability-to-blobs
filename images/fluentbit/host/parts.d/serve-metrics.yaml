@@ -1,0 +1,9 @@
+# The metrics port, a part the launcher includes when an enabled collector
+# names it on a "# needs:" line (node, self): no collector that needs it,
+# no port.
+pipeline:
+  outputs:
+    - name: prometheus_exporter
+      match: exp.*
+      host: ${HOST_METRICS_LISTEN:-127.0.0.1}
+      port: ${HOST_METRICS_PORT:-2023}

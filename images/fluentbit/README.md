@@ -18,7 +18,7 @@ upstream.
 
 The same Fluent Bit also runs as a systemd service on a host outside the
 cluster (`../../HOST_MODE.md`). `host/` holds what that service is made of
-(`host.yaml`, the heartbeat script, the unit) and `host/build.sh` builds the
+(`host.yaml`, the collectors and the launcher, the heartbeat script, the unit) and `host/build.sh` builds the
 release tarball: the Dockerfile's `build` stage again, on `ubuntu:24.04` and
 with `FLB_CMAKE_EXTRA` adding the `exec` input and leaving out Kafka and the
 Go plugin loader, then `host-package` and `host-tarball`. `host/test-heartbeat.sh`

@@ -1,0 +1,9 @@
+# The self collector (HOST_MODE.md, Collectors): the agent's own metrics,
+# served on the metrics port, not shipped.
+# needs: serve-metrics
+pipeline:
+  inputs:
+    - name: fluentbit_metrics
+      alias: self_metrics
+      tag: exp.agent
+      scrape_interval: 15

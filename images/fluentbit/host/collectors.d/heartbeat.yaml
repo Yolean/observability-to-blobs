@@ -1,0 +1,30 @@
+# The heartbeat collector (HOST_MODE.md, Collectors), always on: a metrics
+# row every 60 s, whose silence is how a receiver tells a stopped agent from
+# a quiet one. The launcher refuses --no-collector.heartbeat.
+parsers:
+  # the heartbeat row: "time" (nanoseconds) is the event time, and stays in
+  # the row as the node agent's scrapes have it
+  - name: heartbeat_json
+    format: json
+    time_key: time
+    time_format: '%Y-%m-%dT%H:%M:%S.%L%z'
+    time_keep: on
+
+pipeline:
+  inputs:
+    # A raw1 metrics row every 60 s: a counter that continues across
+    # restarts of the service and starts again at a new boot id. The script
+    # also writes the restart flag for the textfile collector below.
+    - name: exec
+      alias: heartbeat
+      tag: blob
+      command: ${HEARTBEAT_COMMAND:-/opt/observability-host/bin/observability-host-heartbeat}
+      parser: heartbeat_json
+      interval_sec: 60
+      storage.type: filesystem
+      processors:
+        logs:
+          - name: modify
+            add:
+              - cluster ${CLUSTER_NAME}
+              - node ${NODE_NAME}

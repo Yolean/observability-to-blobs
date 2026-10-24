@@ -180,8 +180,9 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
   phase "checks: host mode"
   need jq "https://jqlang.github.io/jq/"
   need python3 "python3"
-  shellcheck images/fluentbit/host/*.sh itest/host/*.sh
+  shellcheck images/fluentbit/host/*.sh itest/host/*.sh itest/host-docker/*.sh
   images/fluentbit/host/test-heartbeat.sh
+  images/fluentbit/host/test-launch.sh
   python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' itest/host/s3-recorder.py
   kubectl kustomize itest/host >/dev/null
 
