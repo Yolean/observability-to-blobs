@@ -1,0 +1,38 @@
+#!/bin/sh
+# What launchd runs (com.yolean.dev-feed, developer-feed/macos/README.md):
+# the host agent's launcher with the feed's settings, from the installed
+# prefix. The settings are in $prefix/env, no secrets in it; the bucket
+# credential comes from the login Keychain through credential_process
+# (dev-feed-credentials).
+set -eu
+prefix=${DEV_FEED_PREFIX:-$HOME/.dev-feed}
+
+set -a
+# shellcheck disable=SC1091 # the installed env file
+. "$prefix/env"
+set +a
+for v in CLUSTER_NAME S3_BUCKET S3_ENDPOINT; do
+  eval "[ -n \"\${$v:-}\" ]" || { echo "dev-feed-agent: $v is not set in $prefix/env" >&2; exit 2; }
+done
+
+export NODE_NAME="${NODE_NAME:-$(scutil --get LocalHostName 2>/dev/null || hostname -s)}"
+export KEY_ROOT="${KEY_ROOT:-dev1}"
+export S3_REGION="${S3_REGION:-auto}"
+export HOST_TLS_CA_FILE="${HOST_TLS_CA_FILE:-/etc/ssl/cert.pem}"
+export HOST_LOG_LEVEL="${HOST_LOG_LEVEL:-warn}"
+# fluent-bit's node_exporter collectors that exist on darwin
+export HOST_NODE_COLLECTORS="${HOST_NODE_COLLECTORS:-cpu,loadavg,meminfo,diskstats,filesystem,uname,stat,netdev}"
+
+export STATE_DIRECTORY="$prefix/state"
+export HOST_ETC="$prefix/opt/etc"
+export HOST_ARGS_FILE="$prefix/args"
+export HOST_COLLECTOR_DIRS="$prefix/developer-feed/collectors"
+export HEARTBEAT_COMMAND="$prefix/opt/bin/observability-host-heartbeat"
+export PATH="$prefix/developer-feed/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# the credential: credential_process in this config file, and no shared
+# credentials file to fall back on
+export AWS_CONFIG_FILE="$prefix/aws-config"
+export AWS_SHARED_CREDENTIALS_FILE="$prefix/no-shared-credentials"
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE
+
+exec "$prefix/opt/bin/observability-host-launch" "$@"

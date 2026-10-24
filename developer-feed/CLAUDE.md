@@ -5,6 +5,9 @@
   there is no pull request to report it in.
   - `cloudflare/` and `git/`: `gofmt -l .`, `go vet ./...` and `go test ./...` in each.
   - `bin/`: `shellcheck bin/*` and `shellcheck itest/run.sh`.
+  - `macos/`: `shellcheck macos/*.sh macos/dev-feed-*`; `install.sh` and `dev-feed-agent`
+    with `DEV_FEED_PREFIX` a temporary directory, `--no-launchd` and `--fluent-bit` a stub,
+    so that nothing touches `~/Library/LaunchAgents` or a running agent.
   - `collectors/`: `itest/run.sh` with a host tarball (`images/fluentbit/host/build.sh
     target/host`), which runs them in docker against versitygw.
 - Develop and test end to end against versitygw in docker, as `itest/host/` does: a
