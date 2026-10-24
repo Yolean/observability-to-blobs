@@ -76,6 +76,9 @@ else
   [ -x "$r2" ] || { echo "explore: no $r2 (developer-feed/macos/install.sh)" >&2; exit 2; }
   parent=$(cfg_get DEV_FEED_READ_PARENT_KEY_ID)
   if [ -z "$parent" ]; then
+    # the R2 token form has no "current IP" button: this machine's public
+    # addresses, as Cloudflare sees them
+    ips=$(for v in 4 6; do curl -"$v" -fsS -m 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p'; done | sort -u | tr '\n' ' ')
     cat <<HOWTO
 Reading the feed needs a read-only parent token, which this machine keeps
 nothing of but its Access Key ID. Create one at
@@ -85,8 +88,9 @@ nothing of but its Access Key ID. Create one at
 3. Permissions: Object Read only.
 4. Specify bucket(s): Apply to specific buckets only, and select $bucket.
 5. TTL: as long as you want to explore with it; delete it when done.
-6. Client IP Address Filtering: Allow, the public IPs you explore from. A read
-   credential reads everything; a refused read away from them is harmless.
+6. Client IP Address Filtering: Allow, the public IPs you explore from; this
+   machine's now: ${ips:-unknown (no answer from cloudflare.com/cdn-cgi/trace)}
+   A read credential reads everything; a refused read away from them is harmless.
 7. Create Account API token, then copy the Access Key ID and the Secret Access Key.
 HOWTO
     printf 'Access Key ID of the read token: ' >&2
