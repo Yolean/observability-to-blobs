@@ -58,6 +58,7 @@ All of them are on by default from that directory. The host's own defaults are t
 | `claude` | `~/.claude/projects/*/*.jsonl` (sessions), `.../*/subagents/*.jsonl`, `~/.claude/history.jsonl` (prompts) | `claude`: `kind`, `project` and `session_id` from the path, the line verbatim in `json` |
 | `git` | every repository in the prompt history's `project`s and in `DEV_FEED_GIT_ROOTS`, every 300 s (`DEV_FEED_GIT_INTERVAL`) | `git`: `remote`, `ref-update` (a reflog entry: a push from here, a fetch of anyone's push, a commit), `commit` (whole message, parents, author, committer) |
 | `cmux` | cmux's agent journal, every 60 s (`DEV_FEED_CMUX_INTERVAL`) | `cmux`: a journal row, with the agent's session and the cmux workspace and pane; metadata only |
+| `hammerspoon` | `~/Reposoft/productivity-logs/hammerspoon-activity-log.jsonl`, the activity log of the productivity-workspaces Hammerspoon configuration | `hammerspoon`: the line verbatim in `json`: focus, title changes, Spaces, idle, lock and sleep |
 | `claude-memory` | `~/.claude/projects/*/memory/*.md`, every 60 s (`DEV_FEED_MEMORY_INTERVAL`) | `claude` with `kind` `memory`: a file's whole `content` when new or changed, `deleted` when gone; the project from the path |
 
 **Every collector but `claude-memory` is live only.** What it finds at the agent's first start

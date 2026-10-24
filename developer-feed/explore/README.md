@@ -69,6 +69,7 @@ feed's line contract changes a view, not the stored data.
 | `git` | `remotes`, `ref_updates`, `commits` (with `claude`, whether Claude co-authored it) |
 | `cmux` | `journal` |
 | `host` | `heartbeats` |
+| `hammerspoon` | `events`, `focus` (focus and title changes with how long each lasted) |
 
 ## The DuckDB UI
 

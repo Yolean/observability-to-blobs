@@ -23,6 +23,9 @@
 # run (a memory's content is state), then edited, deleted and added, each
 # change shipped once.
 #
+# hammerspoon: a line in the activity log before the start, which must not
+# ship, and one after, which must.
+#
 # cmux: a journal with cmux's schema, with rows before the start, which must
 # not ship, and after dev-feed-cmux's first run, which must, once each.
 #
@@ -117,7 +120,8 @@ docker run -d --name "$AGENT" --network "$NET" \
   -e "S1=$S1" -e "S2=$S2" -e "PROJ=$PROJ" -e "RUN=$RUN" \
   "$AGENT_IMAGE" sh -c '
     set -e
-    mkdir -p /opt/observability-host "$HOME/.claude/projects/$PROJ/memory"
+    mkdir -p /opt/observability-host "$HOME/.claude/projects/$PROJ/memory" "$HOME/Reposoft/productivity-logs"
+    echo "{\"ts\":\"2026-10-24T18:00:00.000Z\",\"event\":\"window_focused\",\"app\":\"before-start-$RUN\"}" >"$HOME/Reposoft/productivity-logs/hammerspoon-activity-log.jsonl"
     printf -- "---\nname: kept\n---\nmemory-before-start-$RUN\n" >"$HOME/.claude/projects/$PROJ/memory/kept.md"
     echo "memory-to-delete-$RUN" >"$HOME/.claude/projects/$PROJ/memory/gone.md"
     tar xzf /tmp/host.tar.gz -C /opt/observability-host
@@ -141,8 +145,8 @@ docker run -d --name "$AGENT" --network "$NET" \
     # launchd and systemd do
     while :; do /opt/observability-host/bin/observability-host-launch || true; sleep 1; done' >/dev/null
 in_agent() { docker exec "$AGENT" bash -c "$1"; }
-for _ in $(seq 30); do docker logs "$AGENT" 2>&1 | grep -q 'collectors: claude claude-memory cmux git heartbeat$' && break; sleep 1; done
-check "the feed's directory's defaults, claude, claude-memory, cmux and git, run beside the heartbeat" sh -c "docker logs $AGENT 2>&1 | grep -q 'collectors: claude claude-memory cmux git heartbeat\$'"
+for _ in $(seq 30); do docker logs "$AGENT" 2>&1 | grep -q 'collectors: claude claude-memory cmux git hammerspoon heartbeat$' && break; sleep 1; done
+check "the feed's directory's defaults, claude, claude-memory, cmux, git and hammerspoon, run beside the heartbeat" sh -c "docker logs $AGENT 2>&1 | grep -q 'collectors: claude claude-memory cmux git hammerspoon heartbeat\$'"
 sleep 6
 for _ in $(seq 20); do in_agent 'ls /var/lib/observability-host/git/*.json' >/dev/null 2>&1 && break; sleep 1; done
 check "dev-feed-git's first run recorded the repository" in_agent 'ls /var/lib/observability-host/git/*.json'
@@ -158,6 +162,8 @@ in_agent 'd=$HOME/.claude/projects/$PROJ/memory
   echo "memory-edited-$RUN" >>"$d/kept.md"
   rm "$d/gone.md"
   echo "memory-new-$RUN" >"$d/new.md"'
+
+in_agent 'echo "{\"ts\":\"2026-10-24T18:01:00.123Z\",\"event\":\"window_focused\",\"app\":\"Code\",\"bundle_id\":\"com.microsoft.VSCode\",\"title\":\"after-start-$RUN\"}" >>"$HOME/Reposoft/productivity-logs/hammerspoon-activity-log.jsonl"'
 
 phase "after the first start: a commit pushed and fetched"
 in_agent 'git -C /root/repo commit -q --allow-empty -F - <<MSG
@@ -184,8 +190,8 @@ sleep 12
 phase "restart: fluent-bit killed, lines written while it is down, then it starts again"
 in_agent 'pkill -x fluent-bit'
 in_agent 'echo "{\"type\":\"user\",\"sessionId\":\"$S1\",\"m\":\"during-restart-$RUN\"}" >>"$HOME/.claude/projects/$PROJ/$S1.jsonl"'
-for _ in $(seq 20); do [ "$(docker logs "$AGENT" 2>&1 | grep -c 'collectors: claude claude-memory cmux git heartbeat$')" -ge 2 ] && break; sleep 1; done
-check "the launcher started fluent-bit again" sh -c "[ \$(docker logs $AGENT 2>&1 | grep -c 'collectors: claude claude-memory cmux git heartbeat\$') -ge 2 ]"
+for _ in $(seq 20); do [ "$(docker logs "$AGENT" 2>&1 | grep -c 'collectors: claude claude-memory cmux git hammerspoon heartbeat$')" -ge 2 ] && break; sleep 1; done
+check "the launcher started fluent-bit again" sh -c "[ \$(docker logs $AGENT 2>&1 | grep -c 'collectors: claude claude-memory cmux git hammerspoon heartbeat\$') -ge 2 ]"
 in_agent 'echo "{\"type\":\"user\",\"sessionId\":\"$S1\",\"m\":\"after-restart-$RUN\"}" >>"$HOME/.claude/projects/$PROJ/$S1.jsonl"'
 sleep 15
 
@@ -245,6 +251,9 @@ assert "memory: a file deleted, as a deleted row without content" \
   "SELECT count(*) = 1 AND bool_and(content IS NULL) $M AND path LIKE '%/gone.md' AND deleted"
 assert "memory: a file that appeared after the start" \
   "SELECT count(*) = 1 $M AND path LIKE '%/new.md' AND content = 'memory-new-$RUN' || chr(10)"
+H="FROM feed WHERE \"table\" = 'hammerspoon'"
+assert "hammerspoon: the line logged after the start, verbatim, and not the one before" \
+  "SELECT count(*) = 1 AND bool_and(json_extract_string(json, '\$.bundle_id') = 'com.microsoft.VSCode' AND path LIKE '%/hammerspoon-activity-log.jsonl') $H AND json LIKE '%after-start-$RUN%' AND (SELECT count(*) $H AND json LIKE '%before-start-$RUN%') = 0"
 X="FROM feed WHERE \"table\" = 'cmux'"
 assert "cmux: the journal's rows from after the first run, once each, in order, with their workspace and pane" \
   "SELECT count(*) = 2 AND list(event_id ORDER BY sequence) = ['after-1-$RUN', 'after-2-$RUN'] AND list(surface_id ORDER BY sequence) = ['sf-1', 'sf-2'] AND bool_and(session_id = '$S1' AND workspace_id = 'ws-1') $X"

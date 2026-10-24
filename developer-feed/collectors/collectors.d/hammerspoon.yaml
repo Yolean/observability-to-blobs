@@ -1,0 +1,37 @@
+# The hammerspoon collector (developer-feed/README.md, Collectors): the
+# activity log that the Hammerspoon configuration of productivity-workspaces
+# writes, ~/Reposoft/productivity-logs/hammerspoon-activity-log.jsonl: focused
+# apps and windows with their titles, Spaces, idle time, lock and sleep. A
+# row per line, the line verbatim in json. Live only, as the claude
+# collector: what the log held at the agent's first start is not shipped.
+pipeline:
+  inputs:
+    - name: tail
+      alias: hammerspoon
+      tag: blob
+      path: ${HOME}/Reposoft/productivity-logs/hammerspoon-activity-log.jsonl
+      path_key: path
+      db: ${HOST_STATE_DIR}/hammerspoon.db
+      db.sync: full
+      db.locking: true
+      refresh_interval: 5
+      buffer_chunk_size: 64k
+      buffer_max_size: 1M
+      skip_long_lines: on
+      storage.type: filesystem
+      processors:
+        logs:
+          - name: modify
+            add:
+              - table hammerspoon
+              - cluster ${CLUSTER_NAME}
+              - node ${NODE_NAME}
+            rename:
+              - log json
+          - name: record_modifier
+            allowlist_key:
+              - table
+              - cluster
+              - node
+              - path
+              - json

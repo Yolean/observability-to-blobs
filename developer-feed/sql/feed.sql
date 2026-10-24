@@ -11,7 +11,7 @@ CREATE OR REPLACE VIEW feed AS
   SELECT * FROM read_json(getvariable('raw_files'), format='newline_delimited', compression='zstd', filename=true,
     columns={
       -- every line
-      "table":'VARCHAR',            -- logs | metrics (the host agent's) | claude | git | cmux
+      "table":'VARCHAR',            -- logs | metrics (the host agent's) | claude | git | cmux | hammerspoon
       time:'TIMESTAMP_NS',          -- the source's own stamp, ns, where it has one
       ts:'TIMESTAMP_NS',            -- when the agent read the line, us, on every line
       cluster:'VARCHAR',            -- the feed
