@@ -67,7 +67,7 @@ export PATH
 # start on the macOS it was built on. c-ares falls back to pipe().
 cmake \
   -DHAVE_PIPE2=0 \
-  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DCMAKE_C_FLAGS="-fstack-protector-strong -D_FORTIFY_SOURCE=2" \
   -DCMAKE_PREFIX_PATH="$(brew --prefix openssl@3);$(brew --prefix libyaml)" \
   -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
@@ -90,8 +90,9 @@ cmake \
   -DFLB_LOG_NO_CONTROL_CHARS=On \
   .. 2>&1 | tee "$out/cmake.log"
 make -j"$(sysctl -n hw.ncpu)" 2>&1 | tee "$out/make.log"
+# with its debug info, not stripped: fluent-bit prints a crash's backtrace
+# only from that (a SIGSEGV on a stop under launchd is not yet understood)
 install -m 0755 bin/fluent-bit "$out/bin/fluent-bit"
-strip -x "$out/bin/fluent-bit"
 
 {
   echo "commit=$commit"

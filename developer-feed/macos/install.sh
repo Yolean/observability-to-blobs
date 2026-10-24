@@ -151,6 +151,14 @@ cat >"$plist" <<PLIST
 PLIST
 chmod 0644 "$plist"
 say "$plist (written)"
-if launchctl bootout "gui/$(id -u)/$label" 2>/dev/null; then say "$label stopped"; fi
+if launchctl bootout "gui/$(id -u)/$label" 2>/dev/null; then
+  # bootout returns before the job is gone, and a bootstrap before then
+  # fails with "Input/output error"
+  for _ in $(seq 60); do
+    launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 || break
+    sleep 0.5
+  done
+  say "$label stopped"
+fi
 launchctl bootstrap "gui/$(id -u)" "$plist"
 say "$label started; log $state/log/agent.log"
