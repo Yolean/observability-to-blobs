@@ -188,6 +188,8 @@ then, for example:
   FROM feed.claude.prompts ORDER BY occurred_at DESC;
 ingest now, from a notebook, rather than in $every min:
   COPY (SELECT 1) TO '$refresh' (FORMAT csv);
+an agent that analyzes the feed ($here/ANALYZE.md), in another terminal:
+  DEV_FEED_QUACK_TOKEN=$token DEV_FEED_QUACK_PORT=$port claude --allowedTools "Bash($here/query.sh:*)" "Read $here/ANALYZE.md, then: what did I work on in the last 4 hours?"
 
 HELLO
   ingest "$(( $(date -u +%s) - since_s ))"

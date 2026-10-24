@@ -101,3 +101,12 @@ Run against a local versitygw with seeded objects of every row kind:
 - the listener on `[::1]` only, and the LAN address refused.
 
 Not run against R2.
+
+## An agent
+
+[`ANALYZE.md`](ANALYZE.md) instructs an agent that analyzes the feed: how to reach it, what each
+schema means, how they join, and what the data cannot show. `explore.sh` prints the line that
+starts Claude Code with the token in its environment, allowed to run
+[`query.sh`](query.sh) without asking. `query.sh` attaches with the token from the environment,
+so the token stays out of the agent's transcript, which the feed ships. It also refuses
+anything but reads, though quack itself does not hold an attach to read-only.
