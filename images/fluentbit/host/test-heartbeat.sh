@@ -88,4 +88,14 @@ run
 grep -qx 'node_reboot_required 0' "$prom" || fail "the flag removed: 0 again"
 ok "the flag removed: 0 again"
 
+echo "boot id without a file"
+if [ ! -e /proc/sys/kernel/random/boot_id ] && sysctl -n kern.bootsessionuuid >/dev/null 2>&1; then
+  want=$(sysctl -n kern.bootsessionuuid | tr '[:upper:]' '[:lower:]')
+  row=$(env -u HEARTBEAT_BOOT_ID_FILE "$hb")
+  check "with no boot id file (macOS), the boot id is kern.bootsessionuuid in lower case" \
+    ".samples[0].labels.boot_id == \"$want\""
+else
+  echo "  (no kern.bootsessionuuid here, skipped)"
+fi
+
 echo "PASS: heartbeat"

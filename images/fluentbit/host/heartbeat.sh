@@ -18,7 +18,9 @@
 #
 # Environment (all optional; the overrides are for tests):
 #   HEARTBEAT_STATE_DIR   /var/lib/observability-host
-#   HEARTBEAT_BOOT_ID_FILE /proc/sys/kernel/random/boot_id
+#   HEARTBEAT_BOOT_ID_FILE /proc/sys/kernel/random/boot_id; where there is no
+#                         such file and none is named (macOS), the boot id
+#                         is sysctl's kern.bootsessionuuid, in lower case
 #   HEARTBEAT_REBOOT_FLAG /var/run/reboot-required (the package list is
 #                         HEARTBEAT_REBOOT_PKGS, default <flag>.pkgs)
 #   NODE_NAME, HOST_METRICS_PORT   the row's instance, node:port
@@ -48,7 +50,12 @@ quote() {
   printf '%s' "$1" | tr -d '\000-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
-boot_id=$(tr -d '[:space:]' <"$boot_id_file")
+if [ -z "${HEARTBEAT_BOOT_ID_FILE:-}" ] && [ ! -e "$boot_id_file" ] && sysctl -n kern.bootsessionuuid >/dev/null 2>&1; then
+  boot_id_file="sysctl kern.bootsessionuuid"
+  boot_id=$(sysctl -n kern.bootsessionuuid | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+else
+  boot_id=$(tr -d '[:space:]' <"$boot_id_file")
+fi
 [ -n "$boot_id" ] || { echo "heartbeat: empty boot id in $boot_id_file" >&2; exit 1; }
 boot_id=$(quote "$boot_id")
 
