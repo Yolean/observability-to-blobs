@@ -14,4 +14,4 @@ pipeline:
       # and textfile (the restart flag the heartbeat script writes)
       metrics: ${HOST_NODE_COLLECTORS:-cpu,meminfo,diskstats,filesystem,uname,stat,time,timex,loadavg,vmstat,netdev,netstat,sockstat,filefd,processes,systemd,textfile}
       # every *.prom file in the state directory
-      collector.textfile.path: /var/lib/observability-host
+      collector.textfile.path: ${HOST_STATE_DIR}

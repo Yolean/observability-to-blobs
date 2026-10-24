@@ -19,6 +19,8 @@
 # Credentials are made up here and stay in this process and the containers.
 # An assertion that fails does not stop the run; the exit status says how
 # many did.
+# the scripts run in the containers are single-quoted on purpose
+# shellcheck disable=SC2016
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -93,6 +95,35 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 DOCKERFILE
 printf '[default]\naws_access_key_id = hostagent\naws_secret_access_key = %s\n' "$AGENT_SECRET" >"$TMP/s3-credentials"
 
+# a directory of collectors outside the tarball (HOST_COLLECTOR_DIRS): one
+# that tails NDJSON files, on by default through its own collectors.defaults
+mkdir -p "$TMP/extra/collectors.d"
+cat >"$TMP/extra/collectors.d/ndjson.yaml" <<'YAML'
+pipeline:
+  inputs:
+    - name: tail
+      alias: ndjson
+      tag: blob
+      path: /var/log/itest-ndjson/*.jsonl
+      path_key: unit
+      read_from_head: true
+      db: ${HOST_STATE_DIR}/ndjson.db
+      storage.type: filesystem
+      processors:
+        logs:
+          - name: modify
+            add:
+              - table logs
+              - cluster ${CLUSTER_NAME}
+              - node ${NODE_NAME}
+              - stream file
+            rename:
+              - log message
+          - name: record_modifier
+            allowlist_key: [table, cluster, node, stream, unit, message]
+YAML
+echo ndjson >"$TMP/extra/collectors.defaults"
+
 # agent <scenario> <args file content> [docker run arg ...]: one agent
 # container, the tarball at the install prefix, NODE_NAME the scenario, so
 # that each scenario's objects are under their own node in the key;
@@ -111,9 +142,10 @@ agent() {
     -e HEARTBEAT_COMMAND=/opt/observability-host/bin/observability-host-heartbeat \
     "$AGENT_IMAGE" sh -c '
       set -e
-      mkdir -p /opt/observability-host /var/lib/observability-host /var/log/itest
+      mkdir -p /opt/observability-host /var/lib/observability-host /var/log/itest /var/log/itest-ndjson
       tar xzf /tmp/host.tar.gz -C /opt/observability-host
       echo "itest-before-start" >/var/log/itest/a.log
+      echo "{\"event\":\"itest-ndjson-before\"}" >/var/log/itest-ndjson/feed.jsonl
       if [ -n "${ITEST_UNATTENDED:-}" ]; then
         mkdir -p /var/log/unattended-upgrades
         echo "itest-unattended" >/var/log/unattended-upgrades/unattended-upgrades.log
@@ -134,6 +166,9 @@ agent self-only '# the agent'"'"'s own metrics and nothing else
 --collector.disable-defaults --collector.self'
 agent defaults '# no flags: the defaults'
 agent refused '--no-collector.heartbeat'
+agent elsewhere '# the host'"'"'s own defaults off; the extra directory'"'"'s stay on
+--no-collector.journal --no-collector.files --no-collector.node --no-collector.self' \
+  -v "$TMP/extra:/opt/extra-collectors:ro" -e HOST_COLLECTOR_DIRS=/opt/extra-collectors -e STATE_DIRECTORY=/srv/agent-state
 # the installer requires files and journal (HOST_MODE.md, Collectors), and
 # the args file turns files off
 printf '# the security log\nfiles journal\n' >"$TMP/required"
@@ -145,14 +180,18 @@ sleep 8
 for s in files-only self-only defaults; do
   docker exec "$P-$s" sh -c "echo itest-after-start-$RUN >>/var/log/itest/a.log" || true
 done
+docker exec "$P-elsewhere" sh -c "echo '{\"event\":\"itest-ndjson-after-$RUN\"}' >>/var/log/itest-ndjson/feed.jsonl" || true
 
 phase "launch: what each set of flags runs"
-for s in files-only self-only defaults no-extra; do
+for s in files-only self-only defaults elsewhere no-extra; do
   check "$s: the agent is running" sh -c "[ \"\$(docker inspect -f '{{.State.Running}}' $P-$s)\" = true ]"
 done
 check "files-only: the launcher logged heartbeat and files" sh -c "docker logs $P-files-only 2>&1 | grep -q 'collectors: files heartbeat\$'"
 check "self-only: the launcher logged heartbeat and self" sh -c "docker logs $P-self-only 2>&1 | grep -q 'collectors: heartbeat self\$'"
 check "defaults: the launcher logged the five defaults" sh -c "docker logs $P-defaults 2>&1 | grep -q 'collectors: files heartbeat journal node self\$'"
+check "elsewhere: the extra directory's default collector runs beside the forced heartbeat" sh -c "docker logs $P-elsewhere 2>&1 | grep -q 'collectors: heartbeat ndjson\$'"
+check "elsewhere: the configuration, positions and storage are in the moved state directory" \
+  in_agent elsewhere 'test -f /srv/agent-state/fluent-bit.yaml && test -f /srv/agent-state/ndjson.db && test -d /srv/agent-state/storage && test -z "$(ls -A /var/lib/observability-host)"'
 for _ in $(seq 20); do [ "$(docker inspect -f '{{.State.Running}}' "$P-refused")" = false ] && break; sleep 1; done
 check "refused: --no-collector.heartbeat stops the launcher before fluent-bit, with exit 2" \
   sh -c "[ \"\$(docker inspect -f '{{.State.ExitCode}}' $P-refused)\" = 2 ] && docker logs $P-refused 2>&1 | grep -q 'cannot be turned off'"
@@ -163,6 +202,9 @@ check "no-extra: the launcher logged heartbeat and files" sh -c "docker logs $P-
 
 phase "waiting 70 s: the first heartbeat comes 60 s after the start, the first scrape 15 s"
 sleep 70
+
+check "elsewhere: the heartbeat keeps its counter in the moved state directory" \
+  in_agent elsewhere 'test -f /srv/agent-state/heartbeat-counter && test -z "$(ls -A /var/lib/observability-host)"'
 
 phase "metrics port: open only for node and self"
 if listening files-only; then failed "files-only: nothing listens on 2023"; else pass "files-only: nothing listens on 2023"; fi
@@ -203,6 +245,10 @@ assert "defaults: heartbeat rows and the fixture's file rows" \
   "SELECT count(*) FILTER (WHERE \"table\" = 'metrics') >= 1 AND count(*) FILTER (WHERE unit = '/var/log/itest/a.log') >= 2 FROM raw WHERE node = 'defaults'"
 assert "no scenario but the defaults has journal rows" \
   "SELECT count(*) = 0 FROM raw WHERE stream = 'journal' AND node <> 'defaults'"
+assert "elsewhere: the NDJSON lines from before and after the start, from the extra directory's collector" \
+  "SELECT count(DISTINCT message) = 2 FROM raw WHERE node = 'elsewhere' AND stream = 'file' AND unit = '/var/log/itest-ndjson/feed.jsonl' AND message IN ('{\"event\":\"itest-ndjson-before\"}', '{\"event\":\"itest-ndjson-after-$RUN\"}')"
+assert "elsewhere: heartbeat rows, with its state in the moved directory" \
+  "SELECT count(*) >= 1 FROM raw WHERE node = 'elsewhere' AND \"table\" = 'metrics'"
 assert "the refused scenarios wrote nothing" \
   "SELECT count(*) = 0 FROM raw WHERE node IN ('refused', 'required-off')"
 assert "no-extra: with HOST_EXTRA_FILES unset, the package log's lines as file rows" \
@@ -217,15 +263,15 @@ check "defaults: fluent-bit warned of nothing but store_dir_limit_size and the c
   sh -c "! docker logs $P-defaults 2>&1 | grep -E '\\[ *(warn|error)\\]' | grep -v -e store_dir_limit_size -e 'node_exporter.*systemd'"
 assert "files-only: a file in /var/log/unattended-upgrades/, read through the bracket in files' path" \
   "SELECT count(*) = 1 FROM raw WHERE node = 'files-only' AND unit = '/var/log/unattended-upgrades/unattended-upgrades.log' AND message = 'itest-unattended'"
-for s in files-only:files,heartbeat self-only:heartbeat,self defaults:files,heartbeat,journal,node,self no-extra:files,heartbeat; do
+for s in files-only:files,heartbeat self-only:heartbeat,self defaults:files,heartbeat,journal,node,self no-extra:files,heartbeat elsewhere:heartbeat,ndjson; do
   assert "${s%%:*}: the heartbeat says the collectors running, ${s#*:}" \
     "SELECT count(*) >= 1 AND bool_and(samples[1].labels['collectors'] = '${s#*:}') FROM raw WHERE node = '${s%%:*}' AND \"table\" = 'metrics' AND samples[1].name = 'observability_host_heartbeat'"
 done
 assert "every key is under $KEY_ROOT/$CLUSTER/{date}/{HH}/{node}/" \
-  "SELECT bool_and(regexp_matches(filename, '/$KEY_ROOT/$CLUSTER/[0-9]{4}-[0-9]{2}-[0-9]{2}/[0-9]{2}/(files-only|self-only|defaults|no-extra)/[0-9]{4}-[A-Za-z0-9]{8}\\.jsonl\\.zst\$')) FROM raw"
+  "SELECT bool_and(regexp_matches(filename, '/$KEY_ROOT/$CLUSTER/[0-9]{4}-[0-9]{2}-[0-9]{2}/[0-9]{2}/(files-only|self-only|defaults|elsewhere|no-extra)/[0-9]{4}-[A-Za-z0-9]{8}\\.jsonl\\.zst\$')) FROM raw"
 
 if [ "$FAILED" -gt 0 ]; then
-  for s in files-only self-only defaults refused required-off no-extra; do echo "--- $s"; docker logs --tail 15 "$P-$s" 2>&1 || true; done
+  for s in files-only self-only defaults refused required-off no-extra elsewhere; do echo "--- $s"; docker logs --tail 15 "$P-$s" 2>&1 || true; done
 fi
 echo
 echo "host-docker: $FAILED failed"

@@ -20,8 +20,9 @@
 # file, the enabled collectors and the parts they need, and runs fluent-bit
 # with it (HOST_MODE.md, Collectors).
 #
-# Everything the process writes is under /var/lib/observability-host, the
-# unit's StateDirectory; it never touches the node agent's /var/lib/node-agent.
+# Everything the process writes is under HOST_STATE_DIR, which the launcher
+# sets to its state directory: /var/lib/observability-host, the unit's
+# StateDirectory. It never touches the node agent's /var/lib/node-agent.
 #
 # Environment (defaults here, so the environment file names only what differs):
 #   CLUSTER_NAME NODE_NAME                      required
@@ -41,6 +42,7 @@
 #   HOST_METRICS_LISTEN (127.0.0.1) HOST_METRICS_PORT (2023)
 #   HOST_BUFFER_LIMIT (4G)                      each of the two on-disk buffers below
 #   HEARTBEAT_COMMAND                           the heartbeat script (the unit sets it)
+#   HOST_STATE_DIR                              the state directory (the launcher sets it)
 # plus AWS_SHARED_CREDENTIALS_FILE (the unit points it at the credential it loads).
 service:
   flush: 1
@@ -48,7 +50,7 @@ service:
   log_level: info
   # the process serves nothing but the metrics output below
   http_server: off
-  storage.path: /var/lib/observability-host/storage
+  storage.path: ${HOST_STATE_DIR}/storage
   # a record the input has read survives the crash or the power loss of the
   # host, not only a restart of the service
   storage.sync: full
@@ -75,7 +77,7 @@ pipeline:
       json_date_format: iso8601
       upload_timeout: ${UPLOAD_TIMEOUT:-30s}
       total_file_size: 64M
-      store_dir: /var/lib/observability-host/s3
+      store_dir: ${HOST_STATE_DIR}/s3
       # the node agent's buffering (agent/fluent-bit.yaml): an agent that
       # cannot reach the bucket keeps buffering on disk, retries without a
       # budget (out_s3 caps no_limits to 5 attempts, images/fluentbit/UPSTREAM.md,

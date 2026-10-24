@@ -85,3 +85,15 @@ matches the same directory as a pattern, so glob reads `/var/log` and a
 missing directory is `GLOB_NOMATCH` (checked with glibc on Ubuntu 24.04, and by
 `itest/host-docker`). A directory that exists and cannot be read is still an
 error every refresh.
+
+## YAML config: a list of more than 10 items in a processor's settings is refused
+
+A processor setting given as a YAML sequence, such as `record_modifier`'s
+`allowlist_key` with 11 keys, fails the whole configuration with "unable
+to add key to list map" and "yaml error", attributed to the including file
+rather than the one with the list. `flb_cf_yaml.c` (v5.1.2, around line
+2928) makes the variant array of a sequence with `cfl_array_create(10)` and
+never calls `cfl_array_resizable()`, as the code at line 730 does for its
+own array; the 11th `cfl_array_append` fails. Found with
+developer-feed's collectors; worked around there by not listing more than
+10. The fix is one line: make the array resizable.

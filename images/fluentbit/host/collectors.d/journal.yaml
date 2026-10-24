@@ -8,7 +8,7 @@ pipeline:
     - name: systemd
       alias: journal
       tag: blob
-      db: /var/lib/observability-host/journal.db
+      db: ${HOST_STATE_DIR}/journal.db
       db.sync: full
       # the first start; later starts continue from the cursor in db
       read_from_tail: on
