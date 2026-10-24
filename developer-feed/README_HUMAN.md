@@ -2,9 +2,16 @@
 
 From a checkout of the `developer-feed` branch.
 
-## Once per Cloudflare account
+## Per Cloudflare account
 
-Dashboard: an Account API token with Workers R2 Storage Edit (short expiry, IP filter). This is the setup token.
+Create a setup token in the Cloudflare dashboard, for `setup-bucket.sh`. It expires; create a new one when a machine needs it:
+
+1. Manage Account, Account API Tokens: Create Token, Custom token.
+2. Token name: `dev-feed-setup`.
+3. Policy: Entire Account, Workers R2 Storage: Edit.
+4. Token expiration: 7 days.
+5. Client IP address filtering: Allow, this machine's public IP.
+6. Review token, Create token, then copy the token. `setup-bucket.sh` asks for it.
 
 ## Per machine
 
