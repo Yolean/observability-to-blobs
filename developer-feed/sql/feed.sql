@@ -13,9 +13,12 @@ CREATE OR REPLACE VIEW feed AS
       -- every line
       "table":'VARCHAR',            -- logs | metrics (the host agent's) | claude | git | cmux | hammerspoon
       time:'TIMESTAMP_NS',          -- the source's own stamp, ns, where it has one
-      ts:'TIMESTAMP_NS',            -- when the agent read the line, us, on every line
+      ts:'TIMESTAMP_NS',            -- when the agent read the line, us, on every line; a
+                                    -- backfilled line's is the source's own time
       cluster:'VARCHAR',            -- the feed
       node:'VARCHAR',               -- the machine
+      backfill:'VARCHAR',           -- the dev-feed-backfill run that shipped the line
+                                    -- (developer-feed/backfill/); none on the agent's
       -- the host agent's rows, as in raw.sql
       stream:'VARCHAR',
       unit:'VARCHAR',

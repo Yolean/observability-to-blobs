@@ -163,3 +163,94 @@ func TestDiscover(t *testing.T) {
 		t.Errorf("discover with %s in the roots: %v", docs, got)
 	}
 }
+
+// commit backfill's next states, as dev-feed-backfill does after an upload
+func commitNext(t *testing.T, dir string) {
+	t.Helper()
+	next, _ := filepath.Glob(filepath.Join(dir, "*.json.next"))
+	for _, n := range next {
+		if err := os.Rename(n, strings.TrimSuffix(n, ".next")); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func runBackfill(t *testing.T, repo, dir, live string) []row {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := backfill(repo, dir, live, &buf); err != nil {
+		t.Fatal(err)
+	}
+	commitNext(t, dir)
+	var rows []row
+	for _, l := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if l == "" {
+			continue
+		}
+		var r row
+		if err := json.Unmarshal([]byte(l), &r); err != nil {
+			t.Fatalf("%q: %v", l, err)
+		}
+		rows = append(rows, r)
+	}
+	return rows
+}
+
+func messages(rows []row, kind string) []string {
+	var m []string
+	for _, r := range rows {
+		if r.Kind == kind {
+			m = append(m, r.Message)
+		}
+	}
+	return m
+}
+
+// Before the collector has run: the history and the remotes, then from
+// where the previous backfill stopped. After its first run: up to now once,
+// then nothing.
+func TestBackfill(t *testing.T) {
+	base := t.TempDir()
+	origin := filepath.Join(base, "origin.git")
+	sh(t, base, "init", "-q", "--bare", "-b", "main", origin)
+	repo := filepath.Join(base, "dev")
+	sh(t, base, "clone", "-q", origin, repo)
+	repo, _ = filepath.EvalSymlinks(repo)
+	sh(t, repo, "commit", "-q", "--allow-empty", "-m", "one")
+	sh(t, repo, "commit", "-q", "--allow-empty", "-m", "two")
+	sh(t, repo, "push", "-q", "origin", "main")
+	dir, live := filepath.Join(base, "backfill"), filepath.Join(base, "live")
+
+	first := runBackfill(t, repo, dir, live)
+	if k := kinds(first); k["remote"] != 1 || k["commit"] != 2 || k["ref-update"] != 3 {
+		t.Fatalf("first backfill: %v, want the remote, both commits, and their two entries and the push", k)
+	}
+	if got := messages(first, "commit"); strings.Join(got, ",") != "one,two" {
+		t.Errorf("commits %v, want one,two, oldest first", got)
+	}
+	if again := runBackfill(t, repo, dir, live); len(again) != 0 {
+		t.Fatalf("nothing happened, yet: %+v", again)
+	}
+
+	sh(t, repo, "commit", "-q", "--allow-empty", "-m", "three")
+	more := runBackfill(t, repo, dir, live)
+	if k := kinds(more); k["commit"] != 1 || k["ref-update"] != 1 || len(more) != 2 {
+		t.Fatalf("after a commit: %+v, want it and its reflog entry", more)
+	}
+
+	// the collector's first run, then a push it ships itself
+	run(t, repo, live)
+	sh(t, repo, "commit", "-q", "--allow-empty", "-m", "four")
+	sh(t, repo, "push", "-q", "origin", "main")
+	if live := run(t, repo, live); len(messages(live, "commit")) != 1 {
+		t.Fatalf("the collector: %+v, want commit four", live)
+	}
+	handoff := runBackfill(t, repo, dir, live)
+	if k := kinds(handoff); k["remote"] != 0 || k["commit"] != 1 || k["ref-update"] != 2 {
+		t.Fatalf("the hand-off: %v, want no remote (the collector shipped it), commit four, its commit and its push", k)
+	}
+	sh(t, repo, "commit", "-q", "--allow-empty", "-m", "five")
+	if after := runBackfill(t, repo, dir, live); len(after) != 0 {
+		t.Fatalf("after the hand-off: %+v, want nothing", after)
+	}
+}

@@ -13,8 +13,13 @@
 //
 // Live only: the first run of a repository ships its remotes and records
 // where its reflogs and tips stand, and nothing older; the history before
-// that is the backfill binary's. A crash between printing and saving the
-// state ships some lines twice, never loses one.
+// that is the backfill's (backfill, below). A crash between printing and
+// saving the state ships some lines twice, never loses one.
+//
+//	dev-feed-git                     the collector
+//	dev-feed-git backfill <dir>      the history, for dev-feed-backfill
+//	                                 (developer-feed/backfill/), with its
+//	                                 own state in <dir>
 //
 // It reads, never writes: only for-each-ref, log, rev-list and remote, with
 // core.fsmonitor off and GIT_OPTIONAL_LOCKS=0, never status or fetch, so a
@@ -54,6 +59,25 @@ func main() {
 	}
 	repos := discover(os.Getenv("HOME"), os.Getenv("DEV_FEED_GIT_ROOTS"))
 	out := bufio.NewWriter(os.Stdout)
+	if len(os.Args) == 3 && os.Args[1] == "backfill" {
+		failed := false
+		for _, r := range repos {
+			if err := backfill(r, os.Args[2], filepath.Join(stateDir, "git"), out); err != nil {
+				fmt.Fprintf(os.Stderr, "dev-feed-git: %s: %v\n", r, err)
+				failed = true
+			}
+		}
+		if err := out.Flush(); err != nil || failed {
+			// a repository left out would be handed off without its history
+			fmt.Fprintln(os.Stderr, "dev-feed-git: backfill failed", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 {
+		fmt.Fprintln(os.Stderr, "usage: dev-feed-git [backfill <state dir>]")
+		os.Exit(2)
+	}
 	for _, r := range repos {
 		if err := collect(r, filepath.Join(stateDir, "git"), out, time.Now()); err != nil {
 			fmt.Fprintf(os.Stderr, "dev-feed-git: %s: %v\n", r, err)
@@ -100,6 +124,13 @@ type state struct {
 	Remotes map[string][2]string `json:"remotes"` // name: fetch, push
 	Reflogs map[string]seen      `json:"reflogs"` // ref: how far its reflog was read
 	Tips    map[string]string    `json:"tips"`    // ref: sha
+	// backfill's: the collector has the repository from here on
+	HandedOff bool `json:"handed_off,omitempty"`
+}
+
+func stateName(repo string) string {
+	sum := sha256.Sum256([]byte(repo))
+	return hex.EncodeToString(sum[:8]) + ".json"
 }
 
 func git(repo string, args ...string) ([]byte, error) {
@@ -202,8 +233,7 @@ func historyProjects(path string) []string {
 }
 
 func collect(repo, stateDir string, w io.Writer, now time.Time) error {
-	sum := sha256.Sum256([]byte(repo))
-	stateFile := filepath.Join(stateDir, hex.EncodeToString(sum[:8])+".json")
+	stateFile := filepath.Join(stateDir, stateName(repo))
 	prev, first, err := loadState(stateFile)
 	if err != nil {
 		return err
@@ -293,6 +323,124 @@ func collect(repo, stateDir string, w io.Writer, now time.Time) error {
 	return saveState(stateFile, cur)
 }
 
+// backfill prints a repository's history that the collector did not ship,
+// and saves its next state in dir as <name>.json.next, which the caller
+// moves over <name>.json once the lines are uploaded:
+//   - the remotes, if the collector has not run there yet (its first run
+//     ships them);
+//   - every reflog entry the backfill has not shipped before; the oldest
+//     have expired (gc.reflogExpire, 90 days by default);
+//   - the commits those entries brought: reached by their new values, not by
+//     the old value of each ref's oldest entry, nor by the tips of the
+//     previous backfill.
+//
+// Once the collector has a state for the repository, this run's entries
+// reach up to and past where it began, and the repository is handed off:
+// later backfills leave it alone. Before that, each backfill takes the
+// repository on from where the previous one stopped. The entries and
+// commits both shipped, from the collector's first run to now, are the
+// same lines twice, which readers drop (developer-feed/explore/sql/
+// 001-ingest.sql).
+func backfill(repo, dir, liveDir string, w io.Writer) error {
+	name := stateName(repo)
+	prev, first, err := loadState(filepath.Join(dir, name))
+	if err != nil {
+		return err
+	}
+	if prev.HandedOff {
+		return nil
+	}
+	_, unlive, err := loadState(filepath.Join(liveDir, name))
+	if err != nil {
+		return err
+	}
+	cur := state{Remotes: map[string][2]string{}, Reflogs: map[string]seen{}, Tips: map[string]string{}, HandedOff: !unlive}
+	var rows []row
+
+	remotes, err := listRemotes(repo)
+	if err != nil {
+		return err
+	}
+	names := make([]string, 0, len(remotes))
+	for n := range remotes {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		cur.Remotes[n] = remotes[n]
+		if p, ok := prev.Remotes[n]; unlive && (!ok || p != remotes[n]) {
+			rows = append(rows, row{Kind: "remote", Remote: n, FetchURL: remotes[n][0], PushURL: remotes[n][1]})
+		}
+	}
+
+	refsOut, err := git(repo, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/remotes")
+	if err != nil {
+		return err
+	}
+	commonOut, err := git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return err
+	}
+	common := strings.TrimSpace(string(commonOut))
+	var include, exclude []string
+	for _, sha := range prev.Tips {
+		exclude = append(exclude, sha)
+	}
+	for _, l := range strings.Split(strings.TrimSpace(string(refsOut)), "\n") {
+		ref, sha, ok := strings.Cut(l, " ")
+		if !ok || strings.HasSuffix(ref, "/HEAD") {
+			continue
+		}
+		cur.Tips[ref] = sha
+		entries, err := reflog(common, ref)
+		if err != nil {
+			return err
+		}
+		p := prev.Reflogs[ref]
+		fresh := entries
+		switch {
+		case first:
+		case len(entries) >= p.Count:
+			fresh = entries[:len(entries)-p.Count] // newest first
+		default:
+			fresh = entries[:0:0]
+			for _, e := range entries {
+				if e.unix > p.Newest {
+					fresh = append(fresh, e)
+				}
+			}
+		}
+		for i := len(fresh) - 1; i >= 0; i-- {
+			e := fresh[i]
+			rows = append(rows, row{Kind: "ref-update", Ref: ref, Sha: e.sha, ReflogTime: time.Unix(e.unix, 0).UTC().Format(time.RFC3339), Message: e.msg})
+			include = append(include, e.sha)
+		}
+		if n := len(fresh); n > 0 && strings.Trim(fresh[n-1].old, "0") != "" {
+			exclude = append(exclude, fresh[n-1].old)
+		}
+		c := seen{Count: len(entries)}
+		if len(entries) > 0 {
+			c.Newest = entries[0].unix
+		}
+		cur.Reflogs[ref] = c
+	}
+	commits, err := commitsBetween(repo, include, exclude)
+	if err != nil {
+		return err
+	}
+	rows = append(rows, commits...)
+
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	for _, r := range rows {
+		r.Table, r.Repo = "git", repo
+		if err := enc.Encode(r); err != nil {
+			return err
+		}
+	}
+	return saveState(filepath.Join(dir, name+".next"), cur)
+}
+
 func listRemotes(repo string) (map[string][2]string, error) {
 	out, err := git(repo, "remote", "-v")
 	if err != nil {
@@ -317,6 +465,7 @@ func listRemotes(repo string) (map[string][2]string, error) {
 }
 
 type reflogEntry struct {
+	old  string // the ref's previous value: zeros when the entry created it
 	sha  string
 	unix int64
 	msg  string
@@ -346,7 +495,7 @@ func reflog(common, ref string) ([]reflogEntry, error) {
 		if err != nil {
 			continue
 		}
-		es = append(es, reflogEntry{sha: f[1], unix: t, msg: msg})
+		es = append(es, reflogEntry{old: f[0], sha: f[1], unix: t, msg: msg})
 	}
 	for i, j := 0, len(es)-1; i < j; i, j = i+1, j-1 {
 		es[i], es[j] = es[j], es[i]
@@ -357,28 +506,54 @@ func reflog(common, ref string) ([]reflogEntry, error) {
 // newCommits is every commit the current tips reach that the previous
 // run's tips did not, oldest first.
 func newCommits(repo string, tips []string, prevTips map[string]string) ([]row, error) {
-	// a previous tip that was garbage collected can't be excluded: ask for
-	// all of them in one cat-file
-	var check strings.Builder
 	prev := make([]string, 0, len(prevTips))
 	for _, sha := range prevTips {
 		prev = append(prev, sha)
+	}
+	return commitsBetween(repo, tips, prev)
+}
+
+// existing is the shas that name a commit in the repository, in one
+// cat-file: a reflog's old entries and a previous run's tips may have been
+// garbage collected since.
+func existing(repo string, shas []string) ([]string, error) {
+	if len(shas) == 0 {
+		return nil, nil
+	}
+	var check strings.Builder
+	for _, sha := range shas {
 		check.WriteString(sha + "^{commit}\n")
 	}
-	var revs strings.Builder
-	for _, t := range tips {
-		revs.WriteString(t + "\n")
+	out, err := gitIn(repo, check.String(), "cat-file", "--batch-check=%(objectname)")
+	if err != nil {
+		return nil, err
 	}
-	if len(prev) > 0 {
-		out, err := gitIn(repo, check.String(), "cat-file", "--batch-check=%(objectname)")
-		if err != nil {
-			return nil, err
+	var ok []string
+	for i, l := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if i < len(shas) && !strings.HasSuffix(l, " missing") {
+			ok = append(ok, shas[i])
 		}
-		for i, l := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
-			if i < len(prev) && !strings.HasSuffix(l, " missing") {
-				revs.WriteString("^" + prev[i] + "\n")
-			}
-		}
+	}
+	return ok, nil
+}
+
+// commitsBetween is every commit that one of include reaches and none of
+// exclude does, oldest first; shas that are no commit here are left out.
+func commitsBetween(repo string, include, exclude []string) ([]row, error) {
+	inc, err := existing(repo, include)
+	if err != nil || len(inc) == 0 {
+		return nil, err
+	}
+	exc, err := existing(repo, exclude)
+	if err != nil {
+		return nil, err
+	}
+	var revs strings.Builder
+	for _, sha := range inc {
+		revs.WriteString(sha + "\n")
+	}
+	for _, sha := range exc {
+		revs.WriteString("^" + sha + "\n")
 	}
 	out, err := gitIn(repo, revs.String(), "log", "--stdin", "--topo-order", "--reverse",
 		"--format=%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%B%x1e")

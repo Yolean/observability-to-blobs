@@ -43,7 +43,12 @@ the UI's notebooks see `feed`.
   `dev1/<cluster>/<date>/<hour>/`. The first ingest covers the hours since `<since>`; each
   later one covers the last three hours, as an object lands in its first line's hour and may
   arrive late. Objects older than that which arrive late, after a machine was offline, are
-  picked up by the next start of the script.
+  picked up by the next start of the script, and so are a backfill's
+  (`../backfill/`), whose hours are the history's: start the script again with a `<since>`
+  that reaches back over them.
+- **Each line once:** `ingest.rows`, which every schema reads, drops a line that was shipped
+  twice, by the agent and by the backfill where their ranges meet. `ingest.all_rows` has them
+  all.
 - **Machines:** `--clusters` names them; the default is this machine's `CLUSTER_NAME`.
 - **Storage:** each object's lines go into `ingest.lines` as JSON, and the object into
   `ingest.files`, in one transaction, so an object is never read twice nor half.

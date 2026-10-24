@@ -29,4 +29,9 @@ export AWS_CONFIG_FILE="$OBSERVABILITY_HOST_CONFIG/aws-config"
 export AWS_SHARED_CREDENTIALS_FILE="$OBSERVABILITY_HOST_CONFIG/no-shared-credentials"
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE
 
+# each start, for the backfill to tell which files the agent found at a
+# start, and so began at their end (developer-feed/backfill/README.md)
+mkdir -p "$STATE_DIRECTORY"
+date -u +%s >>"$STATE_DIRECTORY/agent-starts"
+
 exec "$prefix/bin/observability-host-launch" "$@"

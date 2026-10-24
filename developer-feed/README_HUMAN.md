@@ -50,6 +50,18 @@ Lost machine: delete its parent token in the dashboard.
 
 Stop: `developer-feed/macos/uninstall.sh` (`--purge` removes everything).
 
+## Backfill
+
+Per machine, once forwarding works: what the tools kept from before the agent's first start.
+
+```sh
+developer-feed/macos/build.sh && developer-feed/macos/install.sh
+~/.local/opt/observability-host/bin/dev-feed-backfill          # what it would ship
+~/.local/opt/observability-host/bin/dev-feed-backfill --ship
+```
+
+Again after adding a category: it ships only what is new.
+
 ## Explore
 
 ```sh
@@ -57,3 +69,4 @@ developer-feed/explore/explore.sh 7d
 ```
 
 It explains the read token the first time, and prints the `y-duckdb ... -ui` line that opens the UI on it.
+After a backfill, start it again with a `<since>` that reaches back over what was backfilled, e.g. `120d`.

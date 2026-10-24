@@ -34,6 +34,12 @@
 # session and a subagent transcript that appear after it, a line longer than
 # tail's default buffer, and lines written while the agent is restarted,
 # which must ship once.
+#
+# backfill: dev-feed-backfill then ships what was written before the start,
+# the claude categories in one run and the rest in another, as the agent's
+# PutObject-only user: each line written once arrives once once readers
+# drop the lines shipped by both (explore/sql/001-ingest.sql), with the
+# fields the agent gives it, and nothing is shipped twice by the backfill.
 # the scripts run in the containers are single-quoted on purpose
 # shellcheck disable=SC2016
 set -euo pipefail
@@ -100,9 +106,12 @@ FROM ubuntu:24.04
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
     libyaml-0-2 libsystemd0 ca-certificates git sqlite3 jq >/dev/null && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
-# dev-feed-git for the container: no cgo, so a cross-compile from here
+# dev-feed-git and dev-feed-backfill for the container: no cgo, so a
+# cross-compile from here
 mkdir -p "$TMP/bin"
-(cd developer-feed/git && CGO_ENABLED=0 GOOS=linux GOARCH="$(docker version -f '{{.Server.Arch}}')" go build -o "$TMP/bin/dev-feed-git" .)
+ARCH=$(docker version -f '{{.Server.Arch}}')
+(cd developer-feed/git && CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -o "$TMP/bin/dev-feed-git" .)
+(cd developer-feed/backfill && CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -o "$TMP/bin/dev-feed-backfill" .)
 printf '[default]\naws_access_key_id = feedagent\naws_secret_access_key = %s\n' "$AGENT_SECRET" >"$TMP/s3-credentials"
 # the feed's machine runs the feed's collectors, on by default from their
 # own directory, and the heartbeat: the host's own defaults are turned off
@@ -142,8 +151,10 @@ docker run -d --name "$AGENT" --network "$NET" \
       INSERT INTO agent_journal VALUES (NULL, \"before-$RUN\", 1, \"agent.session.started\", 1792800000000, 1792800000000,
         \"claude\", \"k\", \"$S1\", \"ws-1\", \"sf-1\", NULL, 0, 0, \"SessionStart\", NULL, NULL);" >/dev/null
     # the launcher in a loop, so that killing fluent-bit is a restart, as
-    # launchd and systemd do
-    while :; do /opt/observability-host/bin/observability-host-launch || true; sleep 1; done' >/dev/null
+    # launchd and systemd do; each start recorded as dev-feed-agent does
+    mkdir -p /var/lib/observability-host
+    while :; do date -u +%s >>/var/lib/observability-host/agent-starts
+      /opt/observability-host/bin/observability-host-launch || true; sleep 1; done' >/dev/null
 in_agent() { docker exec "$AGENT" bash -c "$1"; }
 for _ in $(seq 30); do docker logs "$AGENT" 2>&1 | grep -q 'collectors: claude claude-memory cmux git hammerspoon heartbeat$' && break; sleep 1; done
 check "the feed's directory's defaults, claude, claude-memory, cmux, git and hammerspoon, run beside the heartbeat" sh -c "docker logs $AGENT 2>&1 | grep -q 'collectors: claude claude-memory cmux git hammerspoon heartbeat\$'"
@@ -176,6 +187,9 @@ MSG
 git -C /root/repo push -q origin main'
 
 phase "after the first start: lines appended, a new session, a subagent, a long line"
+# past the backfill's window after a start, so that the agent reads the new
+# session whole and the backfill leaves it to the agent
+for _ in $(seq 30); do [ $(( $(date -u +%s) - $(in_agent 'head -n 1 /var/lib/observability-host/agent-starts') )) -gt 16 ] && break; sleep 1; done
 in_agent '
   d=$HOME/.claude/projects/$PROJ
   echo "{\"type\":\"assistant\",\"sessionId\":\"$S1\",\"m\":\"after-start-$RUN\"}" >>"$d/$S1.jsonl"
@@ -263,6 +277,60 @@ assert "cmux: the times and the subagent flag as the journal has them" \
 assert "cmux: no detail column: metadata only" \
   "SELECT count(*) = 0 FROM read_json_objects('s3://$BUCKET/$KEY_ROOT/$CLUSTER/*/*/*/*.jsonl.zst', format='newline_delimited', compression='zstd') WHERE json->>'table' = 'cmux' AND (json->>'detail' IS NOT NULL OR json::VARCHAR LIKE '%must not ship%')"
 q "SELECT \"table\", list(DISTINCT kind) AS kinds, count(*) AS rows FROM feed WHERE \"table\" IN ('claude', 'git', 'cmux') GROUP BY ALL ORDER BY 1" | sed 's/^/  (/; s/$/)/'
+
+phase "backfill: what was written before the start, the claude categories first, then the rest"
+backfill() {
+  docker exec -e AWS_ACCESS_KEY_ID=feedagent -e "AWS_SECRET_ACCESS_KEY=$AGENT_SECRET" -e HOST_STATE_DIR=/var/lib/observability-host \
+    "$AGENT" /opt/developer-feed/built/dev-feed-backfill "$@"
+}
+run_id() { sed -n 's/^dev-feed-backfill: run \([0-9TZ]*\),.*/\1/p' "$1"; }
+CLAUDE_CATEGORIES=claude-transcript,claude-subagent,claude-history
+backfill --category "$CLAUDE_CATEGORIES" >"$TMP/backfill-plan.txt"
+sleep 1
+backfill --ship --category "$CLAUDE_CATEGORIES" >"$TMP/backfill-1.txt"
+sleep 1
+backfill --ship >"$TMP/backfill-2.txt"
+sleep 1
+backfill --ship >"$TMP/backfill-3.txt"
+B0=$(run_id "$TMP/backfill-plan.txt") B1=$(run_id "$TMP/backfill-1.txt") B2=$(run_id "$TMP/backfill-2.txt")
+sed 's/^/  | /' "$TMP/backfill-1.txt" "$TMP/backfill-2.txt"
+check "a third run has nothing to ship: every category is handed off to its collector" grep -qx 'nothing to ship' "$TMP/backfill-3.txt"
+assert "without --ship, nothing is shipped" "SELECT count(*) = 0 FROM feed WHERE backfill = '$B0'"
+BF="FROM feed WHERE backfill IS NOT NULL"
+assert "backfill: the lines written before the start, once each, by the run of their category" \
+  "SELECT list(\"table\" || '/' || coalesce(kind, '') || '@' || backfill ORDER BY \"table\", kind) = ['claude/history@$B1', 'claude/transcript@$B1', 'hammerspoon/@$B2'] $BF AND json LIKE '%before-start-$RUN%'"
+assert "backfill: the second run shipped no claude line: those were backfilled" \
+  "SELECT count(*) = 0 FROM feed WHERE backfill = '$B2' AND \"table\" = 'claude'"
+assert "backfill: the session and the subagent that appeared after the start are left to the agent, which read them whole" \
+  "SELECT count(*) = 0 $BF AND (json LIKE '%new-session-%' OR json LIKE '%subagent-$RUN%')"
+assert "backfill: no line twice" \
+  "SELECT count(*) = count(DISTINCT (kind, path, json)) $BF AND json IS NOT NULL"
+assert "backfill: a line both shipped has the fields the agent gives it" \
+  "SELECT count(*) >= 4 AND bool_and(b.\"table\" = a.\"table\" AND b.kind IS NOT DISTINCT FROM a.kind AND b.cluster = a.cluster AND b.node = a.node AND b.project IS NOT DISTINCT FROM a.project AND b.session_id IS NOT DISTINCT FROM a.session_id) FROM feed b JOIN feed a ON a.json = b.json AND a.path = b.path AND a.backfill IS NULL AND b.backfill IS NOT NULL"
+assert "backfill: a claude line in the objects has the contract's fields and backfill, and no other" \
+  "SELECT count(*) > 0 AND bool_and(list_has_all(['table','kind','cluster','node','path','project','session_id','json','ts','backfill'], json_keys(json))) FROM read_json_objects('s3://$BUCKET/$KEY_ROOT/$CLUSTER/*/*/*/*.jsonl.zst', format='newline_delimited', compression='zstd') WHERE json->>'table' = 'claude' AND json->>'backfill' IS NOT NULL"
+assert "backfill: the objects are under the hour of their lines' time, the source's" \
+  "SELECT count(*) > 0 AND bool_and(filename LIKE '%/$KEY_ROOT/$CLUSTER/' || strftime(ts::TIMESTAMP, '%Y-%m-%d/%H') || '/$NODE/%') $BF"
+assert "backfill: a transcript line at the time in it" \
+  "SELECT count(*) = 1 $BF AND json LIKE '%\"after-start-$RUN\"%' AND kind = 'transcript'"
+assert "backfill cmux: the row before the start, and the collector's rows again, as the collector ships them" \
+  "SELECT list(event_id ORDER BY sequence) = ['before-$RUN', 'after-1-$RUN', 'after-2-$RUN'] AND (SELECT count(*) = 2 AND bool_and(b.kind = a.kind AND b.sequence = a.sequence AND b.occurred_at = a.occurred_at AND b.committed_at = a.committed_at AND b.session_id = a.session_id AND b.workspace_id = a.workspace_id AND b.surface_id = a.surface_id AND b.is_subagent = a.is_subagent AND b.pending_work = a.pending_work AND b.native_event = a.native_event AND b.declared_phase IS NOT DISTINCT FROM a.declared_phase) FROM feed b JOIN feed a USING (event_id) WHERE b.backfill IS NOT NULL AND a.backfill IS NULL AND a.\"table\" = 'cmux') $BF AND \"table\" = 'cmux'"
+assert "backfill git: the commit pushed before the start, with its push, and none the agent's first run made a remote of again" \
+  "SELECT (SELECT count(*) = 1 $BF AND \"table\" = 'git' AND kind = 'commit' AND message = 'before-start-$RUN') AND (SELECT count(*) = 1 $BF AND \"table\" = 'git' AND kind = 'ref-update' AND ref = 'refs/remotes/origin/main' AND message = 'update by push' AND sha = (SELECT sha FROM feed WHERE kind = 'commit' AND message = 'before-start-$RUN' LIMIT 1)) AND (SELECT count(*) = 0 $BF AND \"table\" = 'git' AND kind = 'remote')"
+assert "backfill git: a commit both shipped, with the agent's message, parents and author" \
+  "SELECT count(*) = 1 AND bool_and(b.message = a.message AND b.parents = a.parents AND b.author_email = a.author_email AND b.author_time = a.author_time AND b.committer_time = a.committer_time) FROM feed b JOIN feed a ON a.sha = b.sha AND a.kind = 'commit' AND b.kind = 'commit' AND a.backfill IS NULL AND b.backfill IS NOT NULL"
+assert "backfill memory: none: the collector's first run shipped every memory" "SELECT count(*) = 0 $BF AND kind = 'memory'"
+
+# explore's view of every line once (explore/sql/001-ingest.sql)
+got=$(duckdb -noheader -csv -c ".read $TMP/init.sql" -c ".read $PWD/developer-feed/explore/sql/001-ingest.sql" -c ".output /dev/null" \
+  -c "INSERT INTO ingest.lines SELECT filename, json FROM read_json_objects('s3://$BUCKET/$KEY_ROOT/$CLUSTER/*/*/*/*.jsonl.zst', format='newline_delimited', compression='zstd', filename=true)" \
+  -c ".output" -c "SELECT
+    (SELECT count(*) FROM ingest.all_rows WHERE \"table\" IN ('claude', 'hammerspoon', 'cmux')) > (SELECT count(*) FROM ingest.rows WHERE \"table\" IN ('claude', 'hammerspoon', 'cmux'))
+    AND (SELECT count(*) = count(DISTINCT (kind, line->>'path', line->>'json')) FROM ingest.rows WHERE \"table\" IN ('claude', 'hammerspoon') AND kind IS DISTINCT FROM 'memory')
+    AND (SELECT count(*) = count(DISTINCT line->>'event_id') FROM ingest.rows WHERE \"table\" = 'cmux')
+    AND (SELECT count(*) = 1 FROM ingest.rows WHERE line->>'json' LIKE '%\"after-start-$RUN\"%' AND kind = 'transcript')
+    AND (SELECT count(*) = 2 FROM ingest.rows WHERE \"table\" = 'claude' AND kind = 'memory' AND line->>'path' LIKE '%/kept.md')" 2>&1) || true
+if [ "$got" = true ]; then pass "explore: a line shipped by both is there once, and memory versions are kept"; else failed "explore: a line shipped by both is there once (got: $got)"; fi
 
 if [ "$FAILED" -gt 0 ]; then echo "--- agent"; docker logs --tail 30 "$AGENT" 2>&1 | grep -v 'unattended-upgrades' || true; fi
 echo

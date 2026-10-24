@@ -31,7 +31,7 @@ label=com.yolean.observability-host
 plist=$HOME/Library/LaunchAgents/$label.plist
 say() { echo "install: $*" >&2; }
 
-[ -x "$built/bin/dev-feed-r2" ] && [ -x "$built/bin/dev-feed-git" ] \
+[ -x "$built/bin/dev-feed-r2" ] && [ -x "$built/bin/dev-feed-git" ] && [ -x "$built/bin/dev-feed-backfill" ] \
   || { echo "install: nothing built in $built; run developer-feed/macos/build.sh" >&2; exit 2; }
 
 echo "== program $prefix"
@@ -48,7 +48,7 @@ fi
 [ ! -f "$built/BUILD" ] || install -m 0644 "$built/BUILD" "$prefix/BUILD"
 install -m 0755 "$host/launch.sh" "$prefix/bin/observability-host-launch"
 install -m 0755 "$host/heartbeat.sh" "$prefix/bin/observability-host-heartbeat"
-install -m 0755 "$built/bin/dev-feed-r2" "$built/bin/dev-feed-git" "$prefix/bin/"
+install -m 0755 "$built/bin/dev-feed-r2" "$built/bin/dev-feed-git" "$built/bin/dev-feed-backfill" "$prefix/bin/"
 install -m 0755 "$repo/developer-feed/bin/dev-feed-cmux" "$repo/developer-feed/bin/dev-feed-snapshot" \
   "$here/dev-feed-agent" "$here/dev-feed-credentials" "$prefix/bin/"
 install -m 0644 "$repo/developer-feed/lib/config.sh" "$prefix/lib/config.sh"

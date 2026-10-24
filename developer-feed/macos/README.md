@@ -15,7 +15,7 @@ directories, with a version in the config and state paths (`../lib/config.sh`):
 | program | `~/.local/opt/observability-host/` | `/opt/observability-host/` |
 | config | `~/.config/observability-host/v1/`: `env`, `args`, `aws-config` | `/etc/observability-host/` |
 | credential | the login Keychain, service `observability-host-v1` | `/etc/observability-host/s3-credentials` |
-| state | `~/.local/state/observability-host/v1/`: positions, buffers, the generated configuration, `log/agent.log` | `/var/lib/observability-host/` |
+| state | `~/.local/state/observability-host/v1/`: positions, buffers, the generated configuration, `log/agent.log`, `agent-starts`, the backfill's `backfill/` | `/var/lib/observability-host/` |
 
 `OBSERVABILITY_HOST_PREFIX`, `OBSERVABILITY_HOST_CONFIG` and `OBSERVABILITY_HOST_STATE` move
 them, which tests do. Nothing a run needs is kept in the checkout: `target/macos/` holds only

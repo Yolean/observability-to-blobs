@@ -9,9 +9,15 @@
 # and pane it ran in. Metadata only: the detail column is left out.
 #
 # Live only: the first run records the journal's newest sequence and prints
-# nothing; the rows before it are the backfill binary's. The sequence is
-# saved after the rows are printed, so a crash in between ships some rows
-# twice (event_id tells them apart), never loses one.
+# nothing; the rows before it are the backfill's (developer-feed/backfill/).
+# The sequence is saved after the rows are printed, so a crash in between
+# ships some rows twice (event_id tells them apart), never loses one.
+#
+#   dev-feed-cmux                        the collector: needs HOST_STATE_DIR
+#   dev-feed-cmux rows <after> [<upto>]  the rows with a sequence after
+#                                        <after>, up to <upto> or the newest,
+#                                        as the collector prints them, and no
+#                                        state: the backfill's
 #
 # Env:
 #   HOST_STATE_DIR         the agent's state directory (the launcher sets it)
@@ -20,26 +26,16 @@
 # No journal (no cmux on the machine) is no rows and no error.
 set -eu
 
-: "${HOST_STATE_DIR:?HOST_STATE_DIR is not set: the launcher of the agent sets it}"
 journal=${DEV_FEED_CMUX_JOURNAL:-$HOME/Library/Application Support/cmux/agent-journal-com.cmuxterm.app.sqlite3}
-seq_file=$HOST_STATE_DIR/cmux-journal.seq
-[ -f "$journal" ] || exit 0
 
 # query_only rather than -readonly: the journal is in WAL mode, and a
 # read-only connection can't create the -shm file that readers need when
 # cmux isn't running; query_only refuses every write all the same
 q() { sqlite3 -batch -noheader -cmd 'PRAGMA query_only = 1' "$journal" "$1"; }
 
-if [ ! -f "$seq_file" ]; then
-  q 'SELECT coalesce(max(sequence), 0) FROM agent_journal' >"$seq_file.tmp"
-  mv "$seq_file.tmp" "$seq_file"
-  exit 0
-fi
-last=$(tr -cd '0-9' <"$seq_file")
-[ -n "$last" ] || last=0
-
-# at most 10000 rows a run; the next run continues after the last of them
-rows=$(q "SELECT json_object(
+# rows <SQL condition and limit>: the journal's rows as the feed's lines
+rows() {
+  q "SELECT json_object(
     'table', 'cmux', 'kind', kind, 'sequence', sequence, 'event_id', event_id,
     'schema_version', schema_version,
     'occurred_at', strftime('%Y-%m-%dT%H:%M:%fZ', occurred_at_ms / 1000.0, 'unixepoch'),
@@ -50,7 +46,34 @@ rows=$(q "SELECT json_object(
     'is_subagent', json(CASE is_subagent WHEN 1 THEN 'true' ELSE 'false' END),
     'pending_work', json(CASE pending_work WHEN 1 THEN 'true' ELSE 'false' END),
     'native_event', native_event, 'declared_phase', declared_phase)
-  FROM agent_journal WHERE sequence > $last ORDER BY sequence LIMIT 10000")
+  FROM agent_journal WHERE $1"
+}
+whole() { case $1 in ''|*[!0-9]*) echo "dev-feed-cmux: not a sequence: $1" >&2; exit 2;; esac; }
+
+if [ "${1:-}" = rows ]; then
+  [ $# -ge 2 ] || { echo "usage: dev-feed-cmux rows <after> [<upto>]" >&2; exit 2; }
+  whole "$2"
+  upto=
+  if [ $# -ge 3 ]; then whole "$3"; upto=" AND sequence <= $3"; fi
+  [ -f "$journal" ] || exit 0
+  rows "sequence > $2$upto ORDER BY sequence"
+  exit 0
+fi
+
+: "${HOST_STATE_DIR:?HOST_STATE_DIR is not set: the launcher of the agent sets it}"
+seq_file=$HOST_STATE_DIR/cmux-journal.seq
+[ -f "$journal" ] || exit 0
+
+if [ ! -f "$seq_file" ]; then
+  q 'SELECT coalesce(max(sequence), 0) FROM agent_journal' >"$seq_file.tmp"
+  mv "$seq_file.tmp" "$seq_file"
+  exit 0
+fi
+last=$(tr -cd '0-9' <"$seq_file")
+[ -n "$last" ] || last=0
+
+# at most 10000 rows a run; the next run continues after the last of them
+rows=$(rows "sequence > $last ORDER BY sequence LIMIT 10000")
 [ -n "$rows" ] || exit 0
 printf '%s\n' "$rows"
 newest=$(printf '%s\n' "$rows" | tail -n 1 | sed -n 's/.*"sequence":\([0-9]*\).*/\1/p')

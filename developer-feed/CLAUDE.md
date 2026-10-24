@@ -3,7 +3,8 @@
 - This tree is on the branch `developer-feed`, which runs no CI (README.md). Test what you
   change here on the machine, and put what you ran and its result in the commit message:
   there is no pull request to report it in.
-  - `cloudflare/` and `git/`: `gofmt -l .`, `go vet ./...` and `go test ./...` in each.
+  - `cloudflare/`, `git/` and `backfill/`: `gofmt -l .`, `go vet ./...` and `go test ./...`
+    in each.
   - `bin/`: `shellcheck bin/*` and `shellcheck itest/run.sh`.
   - `explore/`: `shellcheck -x -P SCRIPTDIR explore/explore.sh`; run it against a local
     versitygw with `OBSERVABILITY_HOST_*` temporary and `DEV_FEED_EXPLORE_CREDENTIAL_COMMAND`
@@ -24,7 +25,9 @@
 - Never open a pull request from `developer-feed`, and never tag it `v*`.
 - A change meant for `main` goes on its own topic branch off `main`, under the root
   `CLAUDE.md`'s rules (`./test.sh`).
-- `cloudflare/sigv4.go` and `sigv4_test.go` are copies of `compactor/`'s; edit the
-  compactor's and run `go generate` in `cloudflare/`.
+- `cloudflare/` and `backfill/` have copies of `compactor/`'s `sigv4.go` and `sigv4_test.go`;
+  edit the compactor's and run `go generate` in each.
+- `dev-feed-backfill --ship` writes to a bucket for good (the credential cannot delete): run it
+  against versitygw, never the developer's real bucket. The developer runs it there.
 - Never write a parent token's secret or a minted credential to a file, a test fixture or a
   commit. The tests use made-up values.

@@ -36,6 +36,7 @@ All machines of one developer write to one bucket, in the host agent's key layou
 | [`collectors/`](collectors/) | the feed's collectors, a directory for the host agent's `HOST_COLLECTOR_DIRS` (`HOST_MODE.md`, Collectors) |
 | [`git/`](git/) | `dev-feed-git`, the git collector's command |
 | [`bin/`](bin/) | `dev-feed-cmux`, the cmux collector's command |
+| [`backfill/`](backfill/) | `dev-feed-backfill`: the history from before the collectors ran, per category |
 | [`sql/feed.sql`](sql/feed.sql) | the feed's line contract, for DuckDB |
 | [`itest/`](itest/) | the collectors end to end, in docker against versitygw |
 | [`macos/`](macos/) | the user-level host agent on a Mac: a native build, the install and LaunchAgent, the credential in the Keychain |
@@ -72,9 +73,8 @@ is a position, not something to ship:
 After that each collector resumes where it stopped, across restarts. `claude-memory` ships every
 memory file there is on its first run. A memory's content is state rather than history, and
 Claude Code's cleanup of old sessions leaves memories alone, so they reach back further than the
-transcripts. The history before the
-first start is for a backfill binary, still to be written, to run once forwarding is
-validated.
+transcripts. The history from before the first start is `dev-feed-backfill`'s
+([`backfill/`](backfill/)), category by category.
 
 The rows are read through `sql/feed.sql`:
 

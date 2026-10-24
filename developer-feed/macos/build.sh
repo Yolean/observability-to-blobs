@@ -34,9 +34,10 @@ commit=$(git -C "$repo" rev-parse HEAD)
 dirty=$(git -C "$repo" status --porcelain | grep -q . && echo yes || echo no)
 echo "== building from $commit (uncommitted changes: $dirty)"
 
-echo "== dev-feed-r2, dev-feed-git"
+echo "== dev-feed-r2, dev-feed-git, dev-feed-backfill"
 (cd "$repo/developer-feed/cloudflare" && go build -trimpath -o "$out/bin/dev-feed-r2" .)
 (cd "$repo/developer-feed/git" && go build -trimpath -o "$out/bin/dev-feed-git" .)
+(cd "$repo/developer-feed/backfill" && go build -trimpath -o "$out/bin/dev-feed-backfill" .)
 
 version=$(sed -n 's/^ARG FLB_VERSION=//p' "$repo/images/fluentbit/Dockerfile")
 src=$out/fluent-bit-$version
