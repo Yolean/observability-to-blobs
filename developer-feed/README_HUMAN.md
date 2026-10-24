@@ -56,4 +56,4 @@ Stop: `developer-feed/macos/uninstall.sh` (`--purge` removes everything).
 developer-feed/explore/explore.sh 7d
 ```
 
-It explains the read token the first time. Then connect from `y-duckdb -ui` with the `ATTACH` line it prints.
+It explains the read token the first time, and prints the `y-duckdb ... -ui` line that opens the UI on it.

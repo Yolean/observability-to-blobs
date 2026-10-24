@@ -30,10 +30,12 @@ serving.
 listener after starting it, and stops if anything beyond loopback can reach the port. The
 token is new every run, printed once, and not kept:
 
-```sql
-ATTACH 'quack:localhost:18338' AS feed (TOKEN '<printed token>');
-FROM feed.claude.prompts ORDER BY occurred_at DESC;
+```sh
+y-duckdb -cmd "ATTACH 'quack:localhost:18338' AS feed (TOKEN '<printed token>');" -ui
 ```
+
+The script prints that line with the token in it. `-cmd` attaches before the UI starts, and
+the UI's notebooks see `feed`.
 
 ## Ingest
 

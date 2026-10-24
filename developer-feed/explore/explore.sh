@@ -177,8 +177,9 @@ feed() {
   cat >&2 <<HELLO
 
 == serving $db with quack on localhost:$port, until Ctrl-C
-connect, for example from y-duckdb -ui:
-  ATTACH 'quack:localhost:$port' AS feed (TOKEN '$token');
+open it in the DuckDB UI:
+  y-duckdb -cmd "ATTACH 'quack:localhost:$port' AS feed (TOKEN '$token');" -ui
+then, for example:
   FROM feed.claude.prompts ORDER BY occurred_at DESC;
 
 HELLO
