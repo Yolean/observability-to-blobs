@@ -60,6 +60,22 @@ feed's line contract changes a view, not the stored data.
 | `cmux` | `journal` |
 | `host` | `heartbeats` |
 
+## The DuckDB UI
+
+`y-duckdb -ui` (2.0.0) runs its notebooks in an engine of its own, built into the `ui`
+extension, which reports `v2.0.0-alpha49307`. That engine installs the `v2.0.0` builds of
+`quack` and `httpfs` into `~/.duckdb/extensions/v2.0.0-alpha49307/` and then refuses to load
+them ("built specifically for DuckDB version 'v2.0.0'"). The repository has builds for the
+alpha. With the UI stopped, put them there, and `ATTACH` works:
+
+```sh
+X=~/.duckdb/extensions/v2.0.0-alpha49307/osx_arm64
+for e in quack httpfs; do
+  curl -fsS "http://extensions.duckdb.org/v2.0.0-alpha49307/osx_arm64/$e.duckdb_extension.gz" | gunzip > "$X/$e.duckdb_extension"
+  rm -f "$X/$e.duckdb_extension.info"
+done
+```
+
 ## Tested
 
 Run against a local versitygw with seeded objects of every row kind:
