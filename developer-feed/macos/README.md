@@ -29,7 +29,7 @@ build output.
   | Script | What it writes to `env` |
   |---|---|
   | `setup-bucket.sh` | the account, bucket, jurisdiction, `S3_BUCKET`, `S3_ENDPOINT`, `S3_REGION` |
-  | `install.sh` | `CLUSTER_NAME` (the login name), `NODE_NAME` (this Mac's LocalHostName, fixed once), and every other setting with its value, where not already set |
+  | `install.sh` | `CLUSTER_NAME` and `NODE_NAME`, both this Mac's LocalHostName, fixed once: each machine is a cluster of its own, under `dev1/{host}/`; every other setting with its value, where not already set |
   | `dev-feed-r2 mint` | the parent token's Access Key ID |
   | `dev-feed-r2 verify` | when the write credential passed |
   | `dev-feed-credentials store` | the credential's expiry |

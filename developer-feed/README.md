@@ -27,8 +27,8 @@ All machines of one developer write to one bucket, in the host agent's key layou
 ```
 
 - `KEY_ROOT` is `dev1`.
-- `CLUSTER_NAME` names the feed (the developer), the same on all their machines.
-- `NODE_NAME` names the machine.
+- `CLUSTER_NAME` and `NODE_NAME` name the machine: for the user-level agent each machine is a
+  cluster of its own. The feed is the bucket.
 
 | Directory | What |
 |---|---|

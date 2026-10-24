@@ -15,8 +15,6 @@ developer-feed/cloudflare/setup-bucket.sh --account <account id> --bucket <bucke
 developer-feed/macos/install.sh
 ```
 
-Check `CLUSTER_NAME` in `~/.config/observability-host/v1/env`: the same on all your machines (default: login name).
-
 Dashboard, R2, Manage API tokens: a parent token for this machine, Object Read & Write, this bucket only, no expiry, no IP filter.
 
 ```sh

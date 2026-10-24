@@ -7,9 +7,10 @@
 #
 # The program is copied to OBSERVABILITY_HOST_PREFIX, never linked to the
 # checkout. The config (developer-feed/lib/config.sh) gets every setting
-# the agent reads, with what this script can tell (CLUSTER_NAME the login
-# name, NODE_NAME this Mac's LocalHostName) for those not set; what is set
-# stays. The LaunchAgent is (re)loaded when the config has a bucket and the
+# the agent reads, with what this script can tell (CLUSTER_NAME and
+# NODE_NAME this Mac's LocalHostName: for the user-level agent each machine
+# is a cluster of its own, under dev1/<host>/) for those not set; what is
+# set stays. The LaunchAgent is (re)loaded when the config has a bucket and the
 # Keychain a credential, and the script says what is missing when not.
 # Run it again after build.sh to update.
 #
@@ -60,8 +61,9 @@ say "from commit $(sed -n 's/^commit=//p' "$prefix/BUILD" 2>/dev/null || echo un
 
 echo "== config $config"
 cfg_init
-cfg_default CLUSTER_NAME "$(id -un)"
-cfg_default NODE_NAME "$(scutil --get LocalHostName 2>/dev/null || hostname -s)"
+host=$(scutil --get LocalHostName 2>/dev/null || hostname -s)
+cfg_default CLUSTER_NAME "$host"
+cfg_default NODE_NAME "$host"
 cfg_default KEY_ROOT dev1
 cfg_default S3_REGION auto
 cfg_default HOST_TLS_CA_FILE /etc/ssl/cert.pem

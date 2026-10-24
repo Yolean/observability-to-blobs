@@ -47,16 +47,16 @@ Every machine writes to the same bucket with the host agent's key layout (`HOST_
 | Segment | For a developer feed | Default |
 |---|---|---|
 | `KEY_ROOT` | `dev1`, the feed's root, never shared with a production root | `dev1` |
-| `CLUSTER_NAME` | the feed: one per developer, for example their name. All of that developer's machines use the same value | none: required, as in the agents |
-| `NODE_NAME` | the machine | the host name, in the agent |
+| `CLUSTER_NAME` | the machine, as for the user-level agent every machine is a cluster of its own | the host name (`install.sh`) |
+| `NODE_NAME` | the machine | the host name (`install.sh`) |
 
-**A credential can be scoped to a cluster, not to a machine.** The machine's segment comes
-after the date, so no prefix narrows a credential to one machine. Every machine's credential
-can write anywhere under `dev1/{cluster}/`. That is harmless for a write-only credential that
-cannot list or read, and moving the machine above the date would break every fixed-depth
-reader of the layout.
+The feed is the bucket: all of a developer's machines write to it, each under its own
+`dev1/{host}/`.
 
-**Revocation is per machine instead, through the parent.** Give each machine **its own parent
+**A credential is scoped to its machine's prefix,** `dev1/{CLUSTER_NAME}/`. A machine's
+credential can't write under another machine's prefix.
+
+**Revocation is per machine too, through the parent.** Give each machine **its own parent
 token**. Deleting or rolling a parent kills every credential minted from it at once, so a
 lost laptop costs one click in the dashboard and leaves the other machines running.
 
