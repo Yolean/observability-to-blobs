@@ -8,6 +8,10 @@ client.
 
 It uses `y-duckdb` (ystack, DuckDB 2.0.0).
 
+One explore database at a time: the script refuses to start while any process has
+`feed.duckdb` open, and names that process. It checks before minting a credential. DuckDB's
+own lock on the file is the backstop.
+
 ## Credential
 
 A read credential is minted with `dev-feed-r2 mint --role read --prefix dev1/` from a

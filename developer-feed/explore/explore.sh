@@ -57,6 +57,14 @@ region=$(cfg_get S3_REGION); region=${region:-auto}
   || { echo "explore: no S3_BUCKET, S3_ENDPOINT or CLUSTER_NAME in $cfg_file (developer-feed/macos/README.md)" >&2; exit 2; }
 command -v y-duckdb >/dev/null || { echo "explore: needs y-duckdb (ystack/bin)" >&2; exit 2; }
 r2=$OBSERVABILITY_HOST_PREFIX/bin/dev-feed-r2
+# one explore database at a time: a process that has it open is another
+# explore.sh (or a client of it opened directly); checked before minting
+dir=$OBSERVABILITY_HOST_STATE/explore
+db=$dir/feed.duckdb
+if holders=$(lsof -t "$db" "$db.wal" 2>/dev/null | sort -u | tr '\n' ' ') && [ -n "$holders" ]; then
+  echo "explore: $db is open in process $holders($(ps -o command= -p "${holders%% *}" | cut -c1-80)); stop that first" >&2
+  exit 2
+fi
 if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
   echo "explore: port $port is in use; --port another" >&2; exit 2
 fi
@@ -98,11 +106,9 @@ case $endpoint in
   *) echo "explore: S3_ENDPOINT $endpoint has no scheme" >&2; exit 2;;
 esac
 host=${host%/}
-dir=$OBSERVABILITY_HOST_STATE/explore
 (umask 077 && mkdir -p "$dir")
 empty=$dir/empty.jsonl
 : >"$empty"
-db=$dir/feed.duckdb
 token=$(openssl rand -hex 24)
 q() { printf "'%s'" "${1//\'/\'\'}"; }
 
