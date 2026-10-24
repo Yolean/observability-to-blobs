@@ -48,6 +48,14 @@ the UI's notebooks see `feed`.
 - **Storage:** each object's lines go into `ingest.lines` as JSON, and the object into
   `ingest.files`, in one transaction, so an object is never read twice nor half.
 
+**Ingesting now, from a notebook:** write the refresh file the script names. It checks
+every 2 s, ingests the last three hours at once, and removes the file:
+
+```sql
+COPY (SELECT 1) TO '<state>/explore/refresh' (FORMAT csv);
+FROM feed.ingest.files ORDER BY ingested_at DESC LIMIT 5;
+```
+
 ## Schemas
 
 `sql/` holds the schemas: numbered, idempotent, applied in order at every start and recorded

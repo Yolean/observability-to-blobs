@@ -20,6 +20,9 @@
 # secret on stdin: never a file or a command line. So does quack's token,
 # which is new every run and printed once. Ctrl-C stops it.
 #
+# A notebook triggers an ingest at once by writing the file the script names
+# (<state>/explore/refresh), with COPY.
+#
 # Env: DEV_FEED_EXPLORE_CREDENTIAL_COMMAND, a command that prints the
 # credential_process JSON instead of minting one, is for tests.
 set -euo pipefail
@@ -114,6 +117,8 @@ host=${host%/}
 (umask 077 && mkdir -p "$dir")
 empty=$dir/empty.jsonl
 : >"$empty"
+refresh=$dir/refresh
+rm -f "$refresh"
 token=$(openssl rand -hex 24)
 q() { printf "'%s'" "${1//\'/\'\'}"; }
 
@@ -181,11 +186,19 @@ open it in the DuckDB UI:
   y-duckdb -cmd "ATTACH 'quack:localhost:$port' AS feed (TOKEN '$token');" -ui
 then, for example:
   FROM feed.claude.prompts ORDER BY occurred_at DESC;
+ingest now, from a notebook, rather than in $every min:
+  COPY (SELECT 1) TO '$refresh' (FORMAT csv);
 
 HELLO
   ingest "$(( $(date -u +%s) - since_s ))"
   while :; do
-    sleep $(( every * 60 ))
+    # every --every minutes, or at once when a notebook writes the refresh file
+    waited=0
+    while [ "$waited" -lt $(( every * 60 )) ] && [ ! -e "$refresh" ]; do
+      sleep 2
+      waited=$(( waited + 2 ))
+    done
+    rm -f "$refresh"
     if [ "$expires_s" -gt 0 ] && [ "$(date -u +%s)" -ge "$expires_s" ]; then
       echo "explore: the read credential expired at $expiration; still serving, no more ingests; run explore.sh again to go on" >&2
       while :; do sleep 3600; done
