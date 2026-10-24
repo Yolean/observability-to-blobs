@@ -62,6 +62,18 @@ lost laptop costs one click in the dashboard and leaves the other machines runni
 
 ## Setup
 
+### 0. The bucket
+
+```sh
+developer-feed/cloudflare/setup-bucket.sh --account <account id> --bucket <name>
+```
+
+This creates the bucket in the EU jurisdiction, or finds it there, and prints its S3 endpoint
+and the next steps. It needs a Cloudflare API token with "Workers R2 Storage: Edit" on the
+account. The token is used for this step only, so give it a short expiry and an IP filter. The
+script reads it from `CLOUDFLARE_API_TOKEN` or from the terminal, and passes it to curl on
+stdin, never on a command line. Running it again leaves an existing bucket as it is.
+
 ### 1. A parent token per machine
 
 In the Cloudflare dashboard, under R2, manage the R2 API tokens and create one:
