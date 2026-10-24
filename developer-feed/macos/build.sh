@@ -90,9 +90,12 @@ cmake \
   -DFLB_LOG_NO_CONTROL_CHARS=On \
   .. 2>&1 | tee "$out/cmake.log"
 make -j"$(sysctl -n hw.ncpu)" 2>&1 | tee "$out/make.log"
-# with its debug info, not stripped: fluent-bit prints a crash's backtrace
-# only from that (a SIGSEGV on a stop under launchd is not yet understood)
+# with its debug info, not stripped, and the .dSYM beside it, where macOS
+# keeps debug info: fluent-bit prints a crash's backtrace only from that (a
+# SIGSEGV on a stop under launchd is not yet understood)
 install -m 0755 bin/fluent-bit "$out/bin/fluent-bit"
+rm -rf "$out/bin/fluent-bit.dSYM"
+dsymutil "$out/bin/fluent-bit" -o "$out/bin/fluent-bit.dSYM"
 
 {
   echo "commit=$commit"

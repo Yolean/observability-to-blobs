@@ -39,6 +39,8 @@ umask 022
 mkdir -p "$prefix/bin" "$prefix/lib" "$prefix/etc"
 if [ -x "$built/bin/fluent-bit" ]; then
   install -m 0755 "$built/bin/fluent-bit" "$prefix/bin/fluent-bit"
+  rm -rf "$prefix/bin/fluent-bit.dSYM"
+  [ ! -d "$built/bin/fluent-bit.dSYM" ] || cp -R "$built/bin/fluent-bit.dSYM" "$prefix/bin/"
   say "fluent-bit: $("$prefix/bin/fluent-bit" --version | head -1)"
 else
   say "fluent-bit: not built yet; the tools are installed, the agent is not started"
