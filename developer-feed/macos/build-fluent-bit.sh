@@ -58,8 +58,8 @@ PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH" cmake \
   -DFLB_LUAJIT=Off \
   -DFLB_PROXY_GO=Off \
   -DFLB_LOG_NO_CONTROL_CHARS=On \
-  .. >"$out/cmake.log"
-PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH" make -j"$(sysctl -n hw.ncpu)" >"$out/make.log"
+  .. 2>&1 | tee "$out/cmake.log"
+PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH" make -j"$(sysctl -n hw.ncpu)" 2>&1 | tee "$out/make.log"
 install -m 0755 bin/fluent-bit "$out/fluent-bit"
 strip -x "$out/fluent-bit"
 "$out/fluent-bit" --version | head -1
