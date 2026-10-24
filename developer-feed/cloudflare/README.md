@@ -68,8 +68,9 @@ lost laptop costs one click in the dashboard and leaves the other machines runni
 developer-feed/cloudflare/setup-bucket.sh --account <account id> --bucket <name>
 ```
 
-This creates the bucket in the EU jurisdiction, or finds it there, and prints its S3 endpoint
-and the next steps. It needs a Cloudflare API token with "Workers R2 Storage: Edit" on the
+This creates the bucket in the EU jurisdiction, or finds it there. It writes the account,
+bucket, jurisdiction and S3 endpoint to the user-level config (`../lib/config.sh`), where
+`dev-feed-r2` and the agent read them, so nothing needs exporting. It needs a Cloudflare API token with "Workers R2 Storage: Edit" on the
 account. The token is used for this step only, so give it a short expiry and an IP filter. The
 script reads it from `CLOUDFLARE_API_TOKEN` or from the terminal, and passes it to curl on
 stdin, never on a command line. Running it again leaves an existing bucket as it is.
@@ -92,39 +93,31 @@ the machine.
 The dashboard's exact labels may differ from these; the permission and bucket scope are what
 matter.
 
-### 2. Build
+### 2. Build and settings
+
+`../macos/build.sh` builds `dev-feed-r2` with the agent. Its flags default to the config's
+values: `DEV_FEED_ACCOUNT`, `DEV_FEED_BUCKET`, `DEV_FEED_JURISDICTION`, `CLUSTER_NAME`,
+`KEY_ROOT` and `DEV_FEED_PARENT_KEY_ID`. An environment variable of the same name wins over the
+config, and a flag over both.
+
+### 3. Mint and verify, with nothing on disk
+
+`dev-feed-r2` is installed in `~/.local/opt/observability-host/bin/` by `../macos/install.sh`.
 
 ```sh
-cd developer-feed/cloudflare
-go build -o dev-feed-r2 .
-```
-
-### 3. The feed's settings
-
-```sh
-export DEV_FEED_ACCOUNT=<account id>    # the dashboard's account id, also in the R2 S3 endpoint
-export DEV_FEED_BUCKET=<bucket>
-export DEV_FEED_JURISDICTION=eu         # only if the bucket was created in the EU jurisdiction
-export CLUSTER_NAME=<feed>              # the same on every machine of this developer
-```
-
-`KEY_ROOT` (default `dev1`) and `--endpoint` override the rest. `--prefix` replaces
-`{root}/{cluster}/` altogether.
-
-### 4. Mint and verify, with nothing on disk
-
-```sh
-./dev-feed-r2 mint --parent-key-id <parent access key id> --ttl 1h | ./dev-feed-r2 verify
+dev-feed-r2 mint --parent-key-id <parent access key id> --ttl 1h | dev-feed-r2 verify
 ```
 
 `mint` asks for the parent's secret on the terminal with echo off. If its stdin is not a
 terminal, it reads the secret from stdin instead, so a password manager's CLI can supply it:
 
 ```sh
-op read 'op://<vault>/<item>/secret' | ./dev-feed-r2 mint --parent-key-id <id> | ./dev-feed-r2 verify
+op read 'op://<vault>/<item>/secret' | dev-feed-r2 mint | dev-feed-r2 verify
 ```
 
-`mint` refuses to print a credential to a terminal (`--to-terminal` overrides that), so a
+`mint` keeps the parent's Access Key ID, which isn't secret, in the config, so the next mint
+needs no flag. `verify` records when the write credential passed. `mint` refuses to print a
+credential to a terminal (`--to-terminal` overrides that), so a
 credential only ever goes into a pipe. `verify` reads the credential from stdin and checks it
 against the bucket:
 
@@ -145,7 +138,7 @@ credential cannot delete. Its depth differs from the raw layout's, so readers' f
 globs (`dev1/{cluster}/*/*/*/*.jsonl.zst`) never match it. Delete them with the dashboard when
 convenient.
 
-### 5. Find the longest lifetime R2 accepts
+### 4. Find the longest lifetime R2 accepts
 
 R2 documents no maximum for a locally signed credential: its example defaults to one hour, and
 `exp` is the signer's choice. `mint`'s default is `--ttl 30d`. Try longer ones with `verify`,
@@ -179,7 +172,7 @@ purpose.
 ## Reading the feed
 
 ```sh
-./dev-feed-r2 mint --role read --parent-key-id <id> --ttl 8h | ./dev-feed-r2 verify --role read
+dev-feed-r2 mint --role read --ttl 8h | dev-feed-r2 verify --role read
 ```
 
 This mints `GetObject`, `HeadObject` and `ListObjectsV2` under the same prefix, for `y-obs`,

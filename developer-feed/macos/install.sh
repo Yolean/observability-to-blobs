@@ -1,96 +1,125 @@
 #!/usr/bin/env bash
-# Installs the developer feed's agent for the current user on macOS
-# (developer-feed/macos/README.md): copies, never links, so that the agent
-# runs what was installed and not whatever the checkout holds later. Run it
-# again to update; the env and args files and the state are kept.
+# Installs the user-level host agent with the developer feed's collectors on
+# this Mac, from build.sh's target/macos/, no arguments
+# (developer-feed/macos/README.md):
 #
-#   developer-feed/macos/install.sh [--fluent-bit <binary>] [--no-launchd]
+#   developer-feed/macos/install.sh
 #
-#   --fluent-bit   the binary to install (default target/macos/fluent-bit,
-#                  from build-fluent-bit.sh)
-#   --no-launchd   install the files only; do not write or (re)load the
-#                  LaunchAgent
+# The program is copied to OBSERVABILITY_HOST_PREFIX, never linked to the
+# checkout. The config (developer-feed/lib/config.sh) gets every setting
+# the agent reads, with what this script can tell (CLUSTER_NAME the login
+# name, NODE_NAME this Mac's LocalHostName) for those not set; what is set
+# stays. The LaunchAgent is (re)loaded when the config has a bucket and the
+# Keychain a credential, and the script says what is missing when not.
+# Run it again after build.sh to update.
 #
-# Env:
-#   DEV_FEED_PREFIX   where it goes (default ~/.dev-feed)
+# OBSERVABILITY_HOST_LAUNCHD=off installs and configures without touching
+# ~/Library/LaunchAgents or launchd: for tests, which also point the
+# OBSERVABILITY_HOST_* directories elsewhere.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$here/../.." && pwd)
-prefix=${DEV_FEED_PREFIX:-$HOME/.dev-feed}
-fluent_bit=$repo/target/macos/fluent-bit
-launchd=true
-while [ $# -gt 0 ]; do
-  case $1 in
-    --fluent-bit) fluent_bit=$2; shift 2;;
-    --no-launchd) launchd=false; shift;;
-    *) echo "install.sh: unknown argument $1" >&2; exit 2;;
-  esac
-done
-[ -x "$fluent_bit" ] || { echo "install.sh: no fluent-bit at $fluent_bit (build-fluent-bit.sh builds it)" >&2; exit 2; }
-label=com.yolean.dev-feed
-plist=$HOME/Library/LaunchAgents/$label.plist
+# shellcheck source=../lib/config.sh
+. "$here/../lib/config.sh"
+built=$repo/target/macos
 host=$repo/images/fluentbit/host
+prefix=$OBSERVABILITY_HOST_PREFIX
+config=$OBSERVABILITY_HOST_CONFIG
+state=$OBSERVABILITY_HOST_STATE
+label=com.yolean.observability-host
+plist=$HOME/Library/LaunchAgents/$label.plist
+say() { echo "install: $*" >&2; }
 
-umask 077
-mkdir -p "$prefix"/{opt/bin,opt/etc,developer-feed/bin,state,log}
+[ -x "$built/bin/dev-feed-r2" ] && [ -x "$built/bin/dev-feed-git" ] \
+  || { echo "install: nothing built in $built; run developer-feed/macos/build.sh" >&2; exit 2; }
 
-# the host agent: binary, launcher, heartbeat, pipeline and its collectors
-install -m 0755 "$fluent_bit" "$prefix/opt/bin/fluent-bit"
-install -m 0755 "$host/launch.sh" "$prefix/opt/bin/observability-host-launch"
-install -m 0755 "$host/heartbeat.sh" "$prefix/opt/bin/observability-host-heartbeat"
-rm -rf "$prefix/opt/etc/collectors.d" "$prefix/opt/etc/parts.d"
-mkdir -p "$prefix/opt/etc/collectors.d" "$prefix/opt/etc/parts.d"
-install -m 0644 "$host/host.yaml" "$host/collectors.defaults" "$prefix/opt/etc/"
-install -m 0644 "$host"/collectors.d/*.yaml "$prefix/opt/etc/collectors.d/"
-install -m 0644 "$host"/parts.d/*.yaml "$prefix/opt/etc/parts.d/"
-
-# the feed: its collectors, their commands, the agent and the credential
-rm -rf "$prefix/developer-feed/collectors"
-cp -R "$repo/developer-feed/collectors" "$prefix/developer-feed/collectors"
-(cd "$repo/developer-feed/git" && go build -trimpath -o "$prefix/developer-feed/bin/dev-feed-git" .)
-install -m 0755 "$repo/developer-feed/bin/dev-feed-cmux" "$here/dev-feed-agent" "$here/dev-feed-credentials" "$prefix/developer-feed/bin/"
-
-# settings: written once, kept on update
-if [ ! -f "$prefix/env" ]; then
-  cat >"$prefix/env" <<'ENV'
-# The developer feed's settings (developer-feed/macos/README.md). No secrets
-# here: the bucket credential is in the login Keychain (dev-feed-credentials).
-# The feed, the same on all of this developer's machines; required.
-CLUSTER_NAME=
-# The bucket and its S3 endpoint; required. R2:
-# https://<account id>[.eu].r2.cloudflarestorage.com
-S3_BUCKET=
-S3_ENDPOINT=
-# NODE_NAME=       default: this Mac's LocalHostName
-# KEY_ROOT=dev1
-# HOST_LOG_LEVEL=warn
-# DEV_FEED_GIT_ROOTS=     more repositories for the git collector, colon-separated globs
-ENV
+echo "== program $prefix"
+umask 022
+mkdir -p "$prefix/bin" "$prefix/lib" "$prefix/etc"
+if [ -x "$built/bin/fluent-bit" ]; then
+  install -m 0755 "$built/bin/fluent-bit" "$prefix/bin/fluent-bit"
+  say "fluent-bit: $("$prefix/bin/fluent-bit" --version | head -1)"
+else
+  say "fluent-bit: not built yet; the tools are installed, the agent is not started"
 fi
-if [ ! -f "$prefix/args" ]; then
-  cat >"$prefix/args" <<'ARGS'
-# The collectors (HOST_MODE.md, Collectors): the feed's are on by default
-# from developer-feed/collectors; of the host's own, journal and files are
-# Linux's, and node only serves the metrics port, which nothing reads here.
+[ ! -f "$built/BUILD" ] || install -m 0644 "$built/BUILD" "$prefix/BUILD"
+install -m 0755 "$host/launch.sh" "$prefix/bin/observability-host-launch"
+install -m 0755 "$host/heartbeat.sh" "$prefix/bin/observability-host-heartbeat"
+install -m 0755 "$built/bin/dev-feed-r2" "$built/bin/dev-feed-git" "$prefix/bin/"
+install -m 0755 "$repo/developer-feed/bin/dev-feed-cmux" "$repo/developer-feed/bin/dev-feed-snapshot" \
+  "$here/dev-feed-agent" "$here/dev-feed-credentials" "$prefix/bin/"
+install -m 0644 "$repo/developer-feed/lib/config.sh" "$prefix/lib/config.sh"
+# the host's pipeline and collectors, and the feed's, replaced whole
+rm -rf "$prefix/etc/host" "$prefix/etc/developer-feed"
+mkdir -p "$prefix/etc/host/collectors.d" "$prefix/etc/host/parts.d"
+install -m 0644 "$host/host.yaml" "$host/collectors.defaults" "$prefix/etc/host/"
+install -m 0644 "$host"/collectors.d/*.yaml "$prefix/etc/host/collectors.d/"
+install -m 0644 "$host"/parts.d/*.yaml "$prefix/etc/host/parts.d/"
+cp -R "$repo/developer-feed/collectors" "$prefix/etc/developer-feed"
+say "from commit $(sed -n 's/^commit=//p' "$prefix/BUILD" 2>/dev/null || echo unknown), uncommitted changes $(sed -n 's/^dirty=//p' "$prefix/BUILD" 2>/dev/null || echo unknown)"
+
+echo "== config $config"
+cfg_init
+cfg_default CLUSTER_NAME "$(id -un)"
+cfg_default NODE_NAME "$(scutil --get LocalHostName 2>/dev/null || hostname -s)"
+cfg_default KEY_ROOT dev1
+cfg_default S3_REGION auto
+cfg_default HOST_TLS_CA_FILE /etc/ssl/cert.pem
+cfg_default HOST_LOG_LEVEL warn
+# fluent-bit's node_exporter collectors that exist on darwin, for when the
+# node collector is turned on in args
+cfg_default HOST_NODE_COLLECTORS cpu,loadavg,meminfo,diskstats,filesystem,uname,stat,netdev
+if [ -f "$config/args" ]; then
+  say "$config/args (kept)"
+else
+  (umask 077 && cat >"$config/args" <<'ARGS'
+# The collectors' flags (HOST_MODE.md, Collectors). The feed's collectors are
+# on by default from their own directory; of the host's own, journal and files
+# are Linux's, and node and self only serve a metrics port that nothing reads
+# here. With them off the agent listens on no port.
 --no-collector.journal
 --no-collector.files
 --no-collector.node
+--no-collector.self
 ARGS
+)
+  say "$config/args (created)"
 fi
-printf '[default]\ncredential_process = %s/developer-feed/bin/dev-feed-credentials\n' "$prefix" >"$prefix/aws-config"
+awsconfig="[default]
+credential_process = $prefix/bin/dev-feed-credentials"
+if [ "$(cat "$config/aws-config" 2>/dev/null)" = "$awsconfig" ]; then
+  say "$config/aws-config (unchanged)"
+else
+  (umask 077 && printf '%s\n' "$awsconfig" >"$config/aws-config")
+  say "$config/aws-config (written: credential_process, no secret)"
+fi
 
+echo "== state $state"
+if [ -d "$state" ]; then
+  say "$state (kept)"
+else
+  (umask 077 && mkdir -p "$state/log")
+  say "$state (created)"
+fi
+mkdir -p "$state/log"
 
-echo "installed in $prefix"
-"$prefix/opt/bin/fluent-bit" --version | head -1
-
-$launchd || exit 0
-# shellcheck disable=SC1091
-if ! (set -a; . "$prefix/env"; [ -n "${CLUSTER_NAME:-}" ] && [ -n "${S3_BUCKET:-}" ] && [ -n "${S3_ENDPOINT:-}" ]); then
-  echo "not started: set CLUSTER_NAME, S3_BUCKET and S3_ENDPOINT in $prefix/env, store the credential, run install.sh again"
+echo "== the agent"
+missing=
+for k in S3_BUCKET S3_ENDPOINT; do
+  [ -n "$(cfg_get $k)" ] || missing="$missing $k (developer-feed/cloudflare/setup-bucket.sh);"
+done
+[ -x "$prefix/bin/fluent-bit" ] || missing="$missing fluent-bit (developer-feed/macos/build.sh);"
+"$prefix/bin/dev-feed-credentials" expiry >/dev/null 2>&1 \
+  || missing="$missing a credential ($prefix/bin/dev-feed-r2 mint | $prefix/bin/dev-feed-credentials store);"
+if [ "${OBSERVABILITY_HOST_LAUNCHD:-on}" = off ]; then
+  say "not started: OBSERVABILITY_HOST_LAUNCHD=off; would be missing:${missing:- nothing}"
   exit 0
 fi
-"$prefix/developer-feed/bin/dev-feed-credentials" expiry >/dev/null 2>&1 \
-  || { echo "not started: no credential in the Keychain (developer-feed/macos/README.md, Credential)"; exit 0; }
+if [ -n "$missing" ]; then
+  if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then say "$label is loaded from an earlier install; left as it is"; fi
+  say "not started, missing:$missing"
+  exit 0
+fi
 mkdir -p "$(dirname "$plist")"
 cat >"$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -98,18 +127,28 @@ cat >"$plist" <<PLIST
 <plist version="1.0">
 <dict>
   <key>Label</key><string>$label</string>
-  <key>ProgramArguments</key><array><string>$prefix/developer-feed/bin/dev-feed-agent</string></array>
+  <key>ProgramArguments</key><array><string>$prefix/bin/dev-feed-agent</string></array>
+  <key>EnvironmentVariables</key><dict>
+    <key>OBSERVABILITY_HOST_PREFIX</key><string>$prefix</string>
+    <key>OBSERVABILITY_HOST_CONFIG</key><string>$config</string>
+    <key>OBSERVABILITY_HOST_STATE</key><string>$state</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
+  <!-- tail keeps every file it follows open, a transcript each, and
+       launchd's default limit is 256 -->
+  <key>SoftResourceLimits</key><dict><key>NumberOfFiles</key><integer>16384</integer></dict>
+  <key>HardResourceLimits</key><dict><key>NumberOfFiles</key><integer>16384</integer></dict>
   <key>ProcessType</key><string>Background</string>
   <key>LimitLoadToSessionType</key><string>Aqua</string>
-  <key>StandardOutPath</key><string>$prefix/log/agent.log</string>
-  <key>StandardErrorPath</key><string>$prefix/log/agent.log</string>
+  <key>StandardOutPath</key><string>$state/log/agent.log</string>
+  <key>StandardErrorPath</key><string>$state/log/agent.log</string>
 </dict>
 </plist>
 PLIST
 chmod 0644 "$plist"
-launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+say "$plist (written)"
+if launchctl bootout "gui/$(id -u)/$label" 2>/dev/null; then say "$label stopped"; fi
 launchctl bootstrap "gui/$(id -u)" "$plist"
-echo "started: launchctl print gui/$(id -u)/$label; log in $prefix/log/agent.log"
+say "$label started; log $state/log/agent.log"

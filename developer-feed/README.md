@@ -38,7 +38,8 @@ All machines of one developer write to one bucket, in the host agent's key layou
 | [`bin/`](bin/) | `dev-feed-cmux`, the cmux collector's command |
 | [`sql/feed.sql`](sql/feed.sql) | the feed's line contract, for DuckDB |
 | [`itest/`](itest/) | the collectors end to end, in docker against versitygw |
-| [`macos/`](macos/) | the feed's agent on a Mac: a native fluent-bit build, a per-user install and LaunchAgent, the credential in the Keychain |
+| [`macos/`](macos/) | the user-level host agent on a Mac: a native build, the install and LaunchAgent, the credential in the Keychain |
+| [`lib/config.sh`](lib/config.sh) | the user-level layout (program, `config/v1`, `state/v1`) and the config file the scripts maintain |
 
 ## Collectors
 

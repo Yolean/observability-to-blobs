@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Creates a developer feed's R2 bucket in the EU jurisdiction, or finds it
-# there, and prints what the next steps need (README.md, Setup). Run it
-# again at any time: an existing bucket is left as it is.
+# there (README.md, Setup), and writes what it established to the user-level
+# host agent's config (developer-feed/lib/config.sh): the account, bucket and
+# jurisdiction, S3_BUCKET, S3_ENDPOINT and S3_REGION. Run it again at any
+# time: an existing bucket is left as it is, and a second run needs no flags.
 #
 #   developer-feed/cloudflare/setup-bucket.sh --account <account id> --bucket <name>
 #
@@ -11,12 +13,15 @@
 # CLOUDFLARE_API_TOKEN, or from the terminal with echo off, and handed to
 # curl on stdin, never in a command line.
 #
-# Env: DEV_FEED_ACCOUNT, DEV_FEED_BUCKET as defaults for the flags;
-# CLOUDFLARE_API_BASE (default https://api.cloudflare.com/client/v4) for tests.
+# The flags' defaults are DEV_FEED_ACCOUNT and DEV_FEED_BUCKET from the
+# config. CLOUDFLARE_API_BASE (default https://api.cloudflare.com/client/v4)
+# is for tests.
 set -euo pipefail
+# shellcheck source=../lib/config.sh
+. "$(cd "$(dirname "$0")/.." && pwd)/lib/config.sh"
 
-account=${DEV_FEED_ACCOUNT:-}
-bucket=${DEV_FEED_BUCKET:-}
+account=$(cfg_get DEV_FEED_ACCOUNT)
+bucket=$(cfg_get DEV_FEED_BUCKET)
 jurisdiction=eu
 api=${CLOUDFLARE_API_BASE:-https://api.cloudflare.com/client/v4}
 while [ $# -gt 0 ]; do
@@ -78,15 +83,18 @@ got=$(jq -r '.result.jurisdiction // empty' <<<"$r")
 [ -z "$got" ] || [ "$got" = "$jurisdiction" ] || { echo "$bucket is in jurisdiction $got, not $jurisdiction" >&2; exit 1; }
 jq -r '.result | "  name \(.name), jurisdiction \(.jurisdiction // "default"), location \(.location // "?"), created \(.creation_date // "?"), storage class \(.storage_class // "?")"' <<<"$r"
 
+echo "== config $cfg_file"
+cfg_set DEV_FEED_ACCOUNT "$account"
+cfg_set DEV_FEED_BUCKET "$bucket"
+cfg_set DEV_FEED_JURISDICTION "$jurisdiction"
+cfg_set S3_BUCKET "$bucket"
+cfg_set S3_ENDPOINT "https://$account.$jurisdiction.r2.cloudflarestorage.com"
+cfg_set S3_REGION auto
+
 cat <<NEXT
 
-== next (README.md, Setup)
-S3 endpoint:   https://$account.$jurisdiction.r2.cloudflarestorage.com
-For each machine, a parent token: in the dashboard, R2, Manage API tokens,
-Create Account API token, Object Read & Write, applied to this bucket only,
-no expiry. Its resource in an access policy is
-  com.cloudflare.edge.r2.bucket.${account}_${jurisdiction}_$bucket
-Then on the machine, with the parent's Access Key ID:
-  export DEV_FEED_ACCOUNT=$account DEV_FEED_BUCKET=$bucket DEV_FEED_JURISDICTION=$jurisdiction CLUSTER_NAME=<feed>
-  ./dev-feed-r2 mint --parent-key-id <id> --ttl 1d | ./dev-feed-r2 verify
+== next (developer-feed/macos/README.md, Setup)
+For this machine, a parent token: in the dashboard, R2, Manage API tokens,
+Create Account API token, Object Read & Write, applied to this bucket only
+(com.cloudflare.edge.r2.bucket.${account}_${jurisdiction}_$bucket), no expiry, no IP filter.
 NEXT

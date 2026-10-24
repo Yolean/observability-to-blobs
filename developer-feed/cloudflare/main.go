@@ -47,10 +47,14 @@ func main() {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprint(w, `usage: dev-feed-r2 mint   --account ID --bucket NAME --cluster NAME --parent-key-id ID [--role write|read] [--ttl 30d]
-       dev-feed-r2 verify --account ID --bucket NAME --cluster NAME [--role write|read] < credential.json
-Run a subcommand with -h for its flags. Defaults come from DEV_FEED_ACCOUNT,
-DEV_FEED_BUCKET, DEV_FEED_JURISDICTION, CLUSTER_NAME and KEY_ROOT.
+	fmt.Fprint(w, `usage: dev-feed-r2 mint   [--parent-key-id ID] [--role write|read] [--ttl 30d] [flags]
+       dev-feed-r2 verify [--role write|read] [flags] < credential.json
+Run a subcommand with -h for its flags. Their defaults are DEV_FEED_ACCOUNT,
+DEV_FEED_BUCKET, DEV_FEED_JURISDICTION, CLUSTER_NAME, KEY_ROOT and
+DEV_FEED_PARENT_KEY_ID, from the environment, else from the user-level host
+agent's config ($OBSERVABILITY_HOST_CONFIG/env, default
+~/.config/observability-host/v1/env), where setup-bucket.sh and install.sh
+put them. mint keeps the parent's key id there, verify when it passed.
 `)
 }
 
@@ -61,13 +65,15 @@ type feedFlags struct {
 	root, cluster, prefix, role             string
 }
 
-func (f *feedFlags) register(fs *flag.FlagSet) {
-	fs.StringVar(&f.account, "account", os.Getenv("DEV_FEED_ACCOUNT"), "Cloudflare account id ($DEV_FEED_ACCOUNT)")
-	fs.StringVar(&f.bucket, "bucket", os.Getenv("DEV_FEED_BUCKET"), "R2 bucket ($DEV_FEED_BUCKET)")
-	fs.StringVar(&f.jurisdiction, "jurisdiction", os.Getenv("DEV_FEED_JURISDICTION"), "the bucket's jurisdiction: default or eu ($DEV_FEED_JURISDICTION)")
+// register defines the shared flags, each defaulting to its variable in the
+// environment, else in the config file (config.go).
+func (f *feedFlags) register(fs *flag.FlagSet, cfg map[string]string) {
+	fs.StringVar(&f.account, "account", setting(cfg, "DEV_FEED_ACCOUNT", ""), "Cloudflare account id ($DEV_FEED_ACCOUNT)")
+	fs.StringVar(&f.bucket, "bucket", setting(cfg, "DEV_FEED_BUCKET", ""), "R2 bucket ($DEV_FEED_BUCKET)")
+	fs.StringVar(&f.jurisdiction, "jurisdiction", setting(cfg, "DEV_FEED_JURISDICTION", ""), "the bucket's jurisdiction: default or eu ($DEV_FEED_JURISDICTION)")
 	fs.StringVar(&f.endpoint, "endpoint", "", "the S3 endpoint, instead of the one account and jurisdiction give")
-	fs.StringVar(&f.root, "root", envOr("KEY_ROOT", "dev1"), "the key root ($KEY_ROOT)")
-	fs.StringVar(&f.cluster, "cluster", os.Getenv("CLUSTER_NAME"), "the feed's cluster name, the key segment below the root ($CLUSTER_NAME); no default")
+	fs.StringVar(&f.root, "root", setting(cfg, "KEY_ROOT", "dev1"), "the key root ($KEY_ROOT)")
+	fs.StringVar(&f.cluster, "cluster", setting(cfg, "CLUSTER_NAME", ""), "the feed's cluster name, the key segment below the root ($CLUSTER_NAME); no default")
 	fs.StringVar(&f.prefix, "prefix", "", "the key prefix, instead of {root}/{cluster}/")
 	fs.StringVar(&f.role, "role", "write", "write (PutObject, the agent's) or read (Get, Head, List; the developer's)")
 }
@@ -100,9 +106,11 @@ func (f *feedFlags) resolve() (endpointURL, prefix string, actions []string, err
 
 func cmdMint(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("mint", flag.ContinueOnError)
+	cfgPath := configFile()
+	cfg := readConfig(cfgPath)
 	var f feedFlags
-	f.register(fs)
-	parentKeyID := fs.String("parent-key-id", os.Getenv("DEV_FEED_PARENT_KEY_ID"), "the parent R2 API token's access key id ($DEV_FEED_PARENT_KEY_ID)")
+	f.register(fs, cfg)
+	parentKeyID := fs.String("parent-key-id", setting(cfg, "DEV_FEED_PARENT_KEY_ID", ""), "the parent R2 API token's access key id ($DEV_FEED_PARENT_KEY_ID); not secret, kept in the config")
 	ttl := fs.String("ttl", "30d", "how long the credential is valid: a Go duration, or days as 30d")
 	toTerminal := fs.Bool("to-terminal", false, "print the credential even when stdout is a terminal")
 	if err := fs.Parse(args); err != nil {
@@ -135,13 +143,19 @@ func cmdMint(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stderr, "minted: %s on %s/%s, expires %s\n", strings.Join(actions, ","), f.bucket, prefix, c.Expiration)
-	return json.NewEncoder(stdout).Encode(c)
+	if err := json.NewEncoder(stdout).Encode(c); err != nil {
+		return err
+	}
+	// the parent's key id is not secret: kept, so that the next mint needs no flag
+	return setConfig(cfgPath, "DEV_FEED_PARENT_KEY_ID", *parentKeyID, stderr)
 }
 
 func cmdVerify(args []string, stdin io.Reader, stdout io.Writer) error {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
+	cfgPath := configFile()
+	cfg := readConfig(cfgPath)
 	var f feedFlags
-	f.register(fs)
+	f.register(fs, cfg)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -166,7 +180,10 @@ func cmdVerify(args []string, stdin io.Reader, stdout io.Writer) error {
 	if failed := report(stdout, runChecks(verifyChecks(client, f.role, prefix))); failed > 0 {
 		return fmt.Errorf("%d of the checks failed", failed)
 	}
-	return nil
+	if f.role != "write" {
+		return nil
+	}
+	return setConfig(cfgPath, "DEV_FEED_VERIFIED", time.Now().UTC().Format(time.RFC3339)+"/"+c.Expiration, stdout)
 }
 
 // readSecret reads one line: from the terminal with echo off when stdin is
@@ -213,11 +230,4 @@ func isTerminal(w any) bool {
 		return false
 	}
 	return stty(f, "-g") == nil
-}
-
-func envOr(name, def string) string {
-	if v := os.Getenv(name); v != "" {
-		return v
-	}
-	return def
 }

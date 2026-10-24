@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -158,6 +160,8 @@ func TestFeedPrefixAndFlags(t *testing.T) {
 
 // cmdMint with the secret piped in, as a password manager's CLI would.
 func TestCmdMintFromStdin(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("OBSERVABILITY_HOST_CONFIG", cfgDir)
 	var out, errOut bytes.Buffer
 	err := cmdMint([]string{"--account", testAccount, "--bucket", testBucket, "--cluster", "staffan",
 		"--parent-key-id", testKeyID, "--ttl", "7d"}, strings.NewReader(testSecret+"\n"), &out, &errOut)
@@ -177,6 +181,83 @@ func TestCmdMintFromStdin(t *testing.T) {
 	}
 	if strings.Contains(out.String()+errOut.String(), testSecret) {
 		t.Error("the parent's secret was printed")
+	}
+	cfgFile, _ := os.ReadFile(filepath.Join(cfgDir, "env"))
+	if !strings.Contains(string(cfgFile), "DEV_FEED_PARENT_KEY_ID="+testKeyID+"\n") || strings.Contains(string(cfgFile), testSecret) {
+		t.Errorf("config after mint: %q", cfgFile)
+	}
+	if !strings.Contains(errOut.String(), "config: DEV_FEED_PARENT_KEY_ID="+testKeyID+" (added)") {
+		t.Errorf("no feedback on the config: %q", errOut.String())
+	}
+}
+
+// The defaults come from the config, after the environment; mint needs no
+// flags once setup-bucket.sh and a first mint have written it.
+func TestCmdMintFromConfig(t *testing.T) {
+	cfgDir := t.TempDir()
+	t.Setenv("OBSERVABILITY_HOST_CONFIG", cfgDir)
+	for _, k := range []string{"DEV_FEED_ACCOUNT", "DEV_FEED_BUCKET", "DEV_FEED_JURISDICTION", "CLUSTER_NAME", "KEY_ROOT", "DEV_FEED_PARENT_KEY_ID"} {
+		t.Setenv(k, "")
+	}
+	cfg := filepath.Join(cfgDir, "env")
+	var fb bytes.Buffer
+	for k, v := range map[string]string{"DEV_FEED_ACCOUNT": testAccount, "DEV_FEED_BUCKET": testBucket,
+		"DEV_FEED_JURISDICTION": "eu", "CLUSTER_NAME": "staffan", "DEV_FEED_PARENT_KEY_ID": testKeyID} {
+		if err := setConfig(cfg, k, v, &fb); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out, errOut bytes.Buffer
+	if err := cmdMint(nil, strings.NewReader(testSecret+"\n"), &out, &errOut); err != nil {
+		t.Fatalf("mint with no flags: %v (%s)", err, errOut.String())
+	}
+	var c credential
+	if err := json.Unmarshal(out.Bytes(), &c); err != nil {
+		t.Fatal(err)
+	}
+	_, claims := decodeToken(t, c.SessionToken)
+	if claims["aud"] != testAccount+".eu.r2.cloudflarestorage.com" || claims["iss"] != testKeyID {
+		t.Errorf("claims from the config: %v", claims)
+	}
+	if !strings.Contains(errOut.String(), "DEV_FEED_PARENT_KEY_ID="+testKeyID+" (unchanged)") {
+		t.Errorf("feedback: %q", errOut.String())
+	}
+	t.Setenv("CLUSTER_NAME", "other")
+	out.Reset()
+	errOut.Reset()
+	if err := cmdMint(nil, strings.NewReader(testSecret+"\n"), &out, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(errOut.String(), "dev1/other/") {
+		t.Errorf("the environment did not win over the config: %q", errOut.String())
+	}
+}
+
+// setConfig as lib/config.sh's cfg_set: the same file and the same words.
+func TestSetConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v1", "env")
+	var fb bytes.Buffer
+	for _, kv := range [][2]string{{"S3_BUCKET", "a"}, {"S3_BUCKET", "a"}, {"S3_BUCKET", "b"}, {"KEY_ROOT", "dev1"}} {
+		if err := setConfig(path, kv[0], kv[1], &fb); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := "config: S3_BUCKET=a (added)\nconfig: S3_BUCKET=a (unchanged)\nconfig: S3_BUCKET=b (was a)\nconfig: KEY_ROOT=dev1 (added)\n"
+	if fb.String() != want {
+		t.Errorf("feedback %q, want %q", fb.String(), want)
+	}
+	b, _ := os.ReadFile(path)
+	if !strings.HasSuffix(string(b), "S3_BUCKET=b\nKEY_ROOT=dev1\n") || !strings.HasPrefix(string(b), "# ") {
+		t.Errorf("file %q", b)
+	}
+	if st, _ := os.Stat(path); st.Mode().Perm() != 0o600 {
+		t.Errorf("mode %v", st.Mode())
+	}
+	if err := setConfig(path, "X", "has space", &fb); err == nil {
+		t.Error("a value with a space was written")
+	}
+	if m := readConfig(path); m["S3_BUCKET"] != "b" || m["KEY_ROOT"] != "dev1" {
+		t.Errorf("read back %v", m)
 	}
 }
 
