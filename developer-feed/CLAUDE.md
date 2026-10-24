@@ -3,7 +3,10 @@
 - This tree is on the branch `developer-feed`, which runs no CI (README.md). Test what you
   change here on the machine, and put what you ran and its result in the commit message:
   there is no pull request to report it in.
-  - `cloudflare/`: `gofmt -l .`, `go vet ./...` and `go test ./...` in that directory.
+  - `cloudflare/` and `git/`: `gofmt -l .`, `go vet ./...` and `go test ./...` in each.
+  - `bin/`: `shellcheck bin/*` and `shellcheck itest/run.sh`.
+  - `collectors/`: `itest/run.sh` with a host tarball (`images/fluentbit/host/build.sh
+    target/host`), which runs them in docker against versitygw.
 - Develop and test end to end against versitygw in docker, as `itest/host/` does: a
   PutObject-only user under a bucket policy stands in for the minted R2 credential. The
   developer's real bucket is never used for development; `dev-feed-r2 verify` against it is

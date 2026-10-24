@@ -1,0 +1,125 @@
+# The claude collector (developer-feed/README.md, Collectors): Claude Code's
+# session transcripts, its subagents' transcripts and its prompt history, a
+# row per line with the line verbatim in json. Live only: a file found at the
+# agent's first start is followed from its end (tail's read_from_head off),
+# a file that appears later is read from its first line
+# (read_newly_discovered_files_from_head, on by default), and later starts
+# resume at the positions in the db. What was written before the first start
+# is the backfill binary's, not this collector's.
+#
+# Claude Code's own directory is ${HOME}/.claude; a CLAUDE_CONFIG_DIR
+# elsewhere is not followed.
+pipeline:
+  inputs:
+    - name: tail
+      alias: claude_transcripts
+      tag: blob
+      path: ${HOME}/.claude/projects/*/*.jsonl
+      path_key: path
+      db: ${HOST_STATE_DIR}/claude-transcripts.db
+      db.sync: full
+      db.locking: true
+      refresh_interval: 5
+      # a transcript line holds whole tool results: 2.6 MB was the longest
+      # on the machine this was written on, and tail's default is 32 KB
+      buffer_chunk_size: 256k
+      buffer_max_size: 16M
+      skip_long_lines: on
+      storage.type: filesystem
+      processors:
+        logs:
+          - name: modify
+            add:
+              - table claude
+              - kind transcript
+              - cluster ${CLUSTER_NAME}
+              - node ${NODE_NAME}
+            rename:
+              - log json
+          # projects/<project>/<session id>[.orphaned-…].jsonl
+          - name: content_modifier
+            action: extract
+            key: path
+            pattern: '/projects/(?<project>[^/]+)/(?<session_id>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})[^/]*\.jsonl$'
+          - name: record_modifier
+            allowlist_key:
+              - table
+              - kind
+              - cluster
+              - node
+              - path
+              - project
+              - session_id
+              - json
+
+    - name: tail
+      alias: claude_subagents
+      tag: blob
+      path: ${HOME}/.claude/projects/*/*/subagents/*.jsonl
+      path_key: path
+      db: ${HOST_STATE_DIR}/claude-subagents.db
+      db.sync: full
+      db.locking: true
+      refresh_interval: 5
+      buffer_chunk_size: 256k
+      buffer_max_size: 16M
+      skip_long_lines: on
+      storage.type: filesystem
+      processors:
+        logs:
+          - name: modify
+            add:
+              - table claude
+              - kind subagent
+              - cluster ${CLUSTER_NAME}
+              - node ${NODE_NAME}
+            rename:
+              - log json
+          # projects/<project>/<session id>/subagents/<agent>.jsonl
+          - name: content_modifier
+            action: extract
+            key: path
+            pattern: '/projects/(?<project>[^/]+)/(?<session_id>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/subagents/[^/]+\.jsonl$'
+          - name: record_modifier
+            allowlist_key:
+              - table
+              - kind
+              - cluster
+              - node
+              - path
+              - project
+              - session_id
+              - json
+
+    # every prompt typed, with its project path and session id in the line
+    - name: tail
+      alias: claude_history
+      tag: blob
+      path: ${HOME}/.claude/history.jsonl
+      path_key: path
+      db: ${HOST_STATE_DIR}/claude-history.db
+      db.sync: full
+      db.locking: true
+      refresh_interval: 5
+      buffer_chunk_size: 256k
+      buffer_max_size: 16M
+      skip_long_lines: on
+      storage.type: filesystem
+      processors:
+        logs:
+          - name: modify
+            add:
+              - table claude
+              - kind history
+              - cluster ${CLUSTER_NAME}
+              - node ${NODE_NAME}
+            rename:
+              - log json
+          - name: record_modifier
+            allowlist_key:
+              - table
+              - kind
+              - cluster
+              - node
+              - path
+              - json

@@ -1,0 +1,5 @@
+# The developer feed's collectors that run by default when this directory
+# is in HOST_COLLECTOR_DIRS (developer-feed/README.md, Collectors).
+claude
+git
+cmux

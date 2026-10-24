@@ -1,0 +1,6 @@
+# The parser of the feed's exec collectors (git, cmux), a part they name on
+# their "# needs:" lines: a line of JSON, its fields as they are, the row's
+# time the agent's.
+parsers:
+  - name: dev_feed_json
+    format: json

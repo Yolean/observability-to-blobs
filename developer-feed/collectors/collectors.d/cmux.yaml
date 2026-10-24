@@ -1,0 +1,27 @@
+# The cmux collector (developer-feed/README.md, Collectors): dev-feed-cmux
+# (developer-feed/bin/), on PATH, every DEV_FEED_CMUX_INTERVAL seconds: the
+# rows cmux's agent journal gained since the previous run, a row each, with
+# the agent's session id and the cmux workspace and pane it ran in. Live
+# only. A machine without cmux has no journal, and no rows.
+# needs: dev-feed-json
+pipeline:
+  inputs:
+    - name: exec
+      alias: cmux
+      tag: blob
+      command: dev-feed-cmux
+      parser: dev_feed_json
+      interval_sec: ${DEV_FEED_CMUX_INTERVAL:-60}
+      # up to 10000 rows a run, each a short line
+      buf_size: 1M
+      storage.type: filesystem
+      processors:
+        logs:
+          # no record_modifier allowlist: dev-feed-cmux prints the contract's
+          # fields only, and fluent-bit v5.1.2 refuses a list of more than
+          # 10 items in a processor's configuration (flb_cf_yaml.c makes
+          # the array with room for 10 and does not let it grow)
+          - name: modify
+            add:
+              - cluster ${CLUSTER_NAME}
+              - node ${NODE_NAME}

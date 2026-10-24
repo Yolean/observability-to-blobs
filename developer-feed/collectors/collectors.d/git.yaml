@@ -1,0 +1,28 @@
+# The git collector (developer-feed/README.md, Collectors): dev-feed-git
+# (developer-feed/git/), on PATH, every DEV_FEED_GIT_INTERVAL seconds: the
+# remotes, reflog entries and new commits of the repositories in Claude
+# Code's prompt history and DEV_FEED_GIT_ROOTS, a row each. Live only, as
+# dev-feed-git's first run of a repository records where it stands.
+# needs: dev-feed-json
+pipeline:
+  inputs:
+    - name: exec
+      alias: git
+      tag: blob
+      command: dev-feed-git
+      parser: dev_feed_json
+      interval_sec: ${DEV_FEED_GIT_INTERVAL:-300}
+      # a commit's whole message is one line of JSON; exec's default 4 KB
+      # would cut a long one into pieces
+      buf_size: 8M
+      storage.type: filesystem
+      processors:
+        logs:
+          # no record_modifier allowlist: dev-feed-git prints the contract's
+          # fields only, and fluent-bit v5.1.2 refuses a list of more than
+          # 10 items in a processor's configuration (flb_cf_yaml.c makes
+          # the array with room for 10 and does not let it grow)
+          - name: modify
+            add:
+              - cluster ${CLUSTER_NAME}
+              - node ${NODE_NAME}

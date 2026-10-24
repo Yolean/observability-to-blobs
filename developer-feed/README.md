@@ -33,3 +33,50 @@ All machines of one developer write to one bucket, in the host agent's key layou
 | Directory | What |
 |---|---|
 | [`cloudflare/`](cloudflare/) | `dev-feed-r2`: write-only and read credentials for an R2 bucket, minted locally from a parent token per machine, and a check that they are what they claim |
+| [`collectors/`](collectors/) | the feed's collectors, a directory for the host agent's `HOST_COLLECTOR_DIRS` (`HOST_MODE.md`, Collectors) |
+| [`git/`](git/) | `dev-feed-git`, the git collector's command |
+| [`bin/`](bin/) | `dev-feed-cmux`, the cmux collector's command |
+| [`sql/feed.sql`](sql/feed.sql) | the feed's line contract, for DuckDB |
+| [`itest/`](itest/) | the collectors end to end, in docker against versitygw |
+
+## Collectors
+
+The feed's collectors run in the host agent, from `developer-feed/collectors/` named in
+`HOST_COLLECTOR_DIRS`. Their commands must be on the agent's `PATH`:
+
+- `developer-feed/bin/`;
+- `dev-feed-git`, built with `go build` in `git/`.
+
+All three are on by default from that directory. The host's own defaults are turned off with
+`--no-collector.<name>` in the args file.
+
+| Collector | Reads | Rows |
+|---|---|---|
+| `claude` | `~/.claude/projects/*/*.jsonl` (sessions), `.../*/subagents/*.jsonl`, `~/.claude/history.jsonl` (prompts) | `claude`: `kind`, `project` and `session_id` from the path, the line verbatim in `json` |
+| `git` | every repository in the prompt history's `project`s and in `DEV_FEED_GIT_ROOTS`, every 300 s (`DEV_FEED_GIT_INTERVAL`) | `git`: `remote`, `ref-update` (a reflog entry: a push from here, a fetch of anyone's push, a commit), `commit` (whole message, parents, author, committer) |
+| `cmux` | cmux's agent journal, every 60 s (`DEV_FEED_CMUX_INTERVAL`) | `cmux`: a journal row, with the agent's session and the cmux workspace and pane; metadata only |
+
+**Every collector is live only.** What it finds at the agent's first start is a position, not
+something to ship:
+
+- `claude` follows the files that exist at the first start from their ends, and new files
+  from their first line.
+- `git` records each repository's reflogs and tips, and ships its remotes.
+- `cmux` records the journal's newest sequence.
+
+After that each collector resumes where it stopped, across restarts. The history before the
+first start is for a backfill binary, still to be written, to run once forwarding is
+validated.
+
+The rows are read through `sql/feed.sql`:
+
+```sql
+SET VARIABLE raw_files = 's3://<bucket>/dev1/<cluster>/*/*/*/*.jsonl.zst';
+.read developer-feed/sql/feed.sql
+SELECT kind, session_id, json FROM feed WHERE "table" = 'claude';
+```
+
+**What the rows contain:** `claude` and `git` rows hold free text, verbatim. Prompts, tool
+output (which can include secrets a tool printed) and commit messages all go to the
+developer's own bucket. Redaction is for the tools that read it, before anything is
+published.
