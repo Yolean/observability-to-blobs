@@ -85,7 +85,8 @@ nothing of but its Access Key ID. Create one at
 3. Permissions: Object Read only.
 4. Specify bucket(s): Apply to specific buckets only, and select $bucket.
 5. TTL: as long as you want to explore with it; delete it when done.
-6. Client IP Address Filtering: none.
+6. Client IP Address Filtering: Allow, the public IPs you explore from. A read
+   credential reads everything; a refused read away from them is harmless.
 7. Create Account API token, then copy the Access Key ID and the Secret Access Key.
 HOWTO
     printf 'Access Key ID of the read token: ' >&2

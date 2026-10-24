@@ -15,7 +15,9 @@ own lock on the file is the backstop.
 ## Credential
 
 A read credential is minted with `dev-feed-r2 mint --role read --prefix dev1/` from a
-read-only parent token, which the script says how to create, with a link to the account's R2
+read-only parent token with an IP filter (unlike the write parent's, a refused read is
+harmless, and a read credential reads everything; whether R2 holds minted credentials to the
+parent's filter is not verified), which the script says how to create, with a link to the account's R2
 API tokens page. The parent's Access Key ID is kept in the config
 (`DEV_FEED_READ_PARENT_KEY_ID`); its secret is pasted at the prompt and never kept. The
 credential lasts `--ttl` (default `12h`). It goes to DuckDB as a temporary secret, on stdin,
