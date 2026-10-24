@@ -1,0 +1,8 @@
+# The collectors the host agent runs when nothing says otherwise
+# (HOST_MODE.md, Collectors): one name per line, a collector in
+# collectors.d/<name>.yaml. "forced" means it cannot be turned off.
+heartbeat forced
+journal
+files
+node
+self

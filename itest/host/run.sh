@@ -214,8 +214,9 @@ TB=$(basename "$TARBALL")
 mkdir "$TMP/pkg"
 tar xzf "$TARBALL" -C "$TMP/pkg"
 if "$TMP/pkg/bin/fluent-bit" --version >/dev/null 2>&1; then
-  check "the tarball's pipeline passes fluent-bit's dry run" \
-    env CLUSTER_NAME=c NODE_NAME=n S3_BUCKET=b S3_ENDPOINT=http://127.0.0.1:1 "$TMP/pkg/bin/fluent-bit" --dry-run -c "$TMP/pkg/etc/host.yaml"
+  check "the tarball's pipeline, the default collectors, passes fluent-bit's dry run" \
+    env CLUSTER_NAME=c NODE_NAME=n S3_BUCKET=b S3_ENDPOINT=http://127.0.0.1:1 \
+    HOST_ARGS_FILE=/nonexistent STATE_DIRECTORY="$TMP/state" "$TMP/pkg/bin/observability-host-launch" -- --dry-run
 else
   echo "  (the binary does not run on this machine, no dry run here)"
 fi

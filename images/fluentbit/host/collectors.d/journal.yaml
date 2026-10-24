@@ -1,0 +1,51 @@
+# The journal collector (HOST_MODE.md, Collectors): every unit of the
+# systemd journal, as logs rows with stream journal.
+pipeline:
+  inputs:
+    # The journal, every unit: a denylist fails toward collecting too much.
+    # The processors are the node agent's journal processors (rows are
+    # the same), plus the denylist.
+    - name: systemd
+      alias: journal
+      tag: blob
+      db: /var/lib/observability-host/journal.db
+      db.sync: full
+      # the first start; later starts continue from the cursor in db
+      read_from_tail: on
+      lowercase: on
+      strip_underscores: on
+      storage.type: filesystem
+      processors:
+        logs:
+          - name: modify
+            add:
+              - table logs
+              - cluster ${CLUSTER_NAME}
+              - node ${NODE_NAME}
+              - stream journal
+            # rename does not overwrite, so the first existing key wins:
+            # the unit, else the syslog identifier, else the transport
+            # ("kernel" for kernel messages)
+            rename:
+              - systemd_unit unit
+              - syslog_identifier unit
+              - transport unit
+          - name: content_modifier
+            action: convert
+            key: priority
+            converted_type: int
+          # the denylist: a row whose unit matches is left out; a row
+          # without a unit, or any row when nothing is configured, stays
+          # ((?!) matches nothing)
+          - name: grep
+            exclude: $unit ${HOST_JOURNAL_DENY:-(?!)}
+          # the journal's other fields stay out of the blob
+          - name: record_modifier
+            allowlist_key:
+              - table
+              - cluster
+              - node
+              - stream
+              - unit
+              - priority
+              - message

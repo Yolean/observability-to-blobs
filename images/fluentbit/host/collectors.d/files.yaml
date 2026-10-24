@@ -1,0 +1,41 @@
+# The files collector (HOST_MODE.md, Collectors): the audit log, the
+# package logs and HOST_EXTRA_FILES, as logs rows with stream file.
+pipeline:
+  inputs:
+    # Files. The audit log is followed by inode, never the numbered files
+    # (a rotated file is read to its end, then dropped); the position of
+    # every file is kept in db.
+    - name: tail
+      alias: files
+      tag: blob
+      path: /var/log/audit/audit.log,/var/log/dpkg.log,/var/log/apt/history.log,/var/log/unattended-upgrades/*.log,${HOST_EXTRA_FILES:-}
+      # the path is the row's unit
+      path_key: unit
+      read_from_head: true
+      db: /var/lib/observability-host/tail.db
+      db.sync: full
+      db.locking: true
+      refresh_interval: 5
+      rotate_wait: 30
+      buffer_chunk_size: 256k
+      buffer_max_size: 2M
+      skip_long_lines: on
+      storage.type: filesystem
+      processors:
+        logs:
+          - name: modify
+            add:
+              - table logs
+              - cluster ${CLUSTER_NAME}
+              - node ${NODE_NAME}
+              - stream file
+            rename:
+              - log message
+          - name: record_modifier
+            allowlist_key:
+              - table
+              - cluster
+              - node
+              - stream
+              - unit
+              - message

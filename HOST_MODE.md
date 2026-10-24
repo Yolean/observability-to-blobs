@@ -106,7 +106,11 @@ it is created, which is one more reason for `use_put_object`.
   |---|---|
   | `bin/fluent-bit` | the binary, stripped |
   | `bin/observability-host-heartbeat` | the heartbeat script (POSIX `sh`, coreutils and `sed`) |
-  | `etc/host.yaml` | the pipeline, with the defaults of every setting |
+  | `bin/observability-host-launch` | the launcher (POSIX `sh`, see Collectors), which the unit runs |
+  | `etc/host.yaml` | the pipeline's service section and S3 output, with the defaults of their settings |
+  | `etc/collectors.d/<name>.yaml` | one collector each: its inputs and their processors |
+  | `etc/parts.d/<name>.yaml` | what collectors share: `serve-metrics`, the metrics port |
+  | `etc/collectors.defaults` | the collectors that run when nothing says otherwise |
   | `etc/observability-host.env.example` | the environment file, commented |
   | `lib/systemd/system/observability-host.service` | the unit; goes to `/etc/systemd/system/` |
   | `share/fluent-bit-LICENSE` | Fluent Bit's licence |
@@ -144,7 +148,7 @@ it is created, which is one more reason for `use_put_object`.
 
 ### Settings
 
-All are optional but the first four; the defaults are in `etc/host.yaml`.
+All are optional but the first four; the defaults are in `etc/host.yaml` and `etc/collectors.d/`.
 
 | setting | default | |
 |---|---|---|
@@ -158,6 +162,68 @@ All are optional but the first four; the defaults are in `etc/host.yaml`.
 | `HOST_NODE_COLLECTORS` | see Metrics | `textfile` alone on a Kubernetes node |
 | `HOST_METRICS_LISTEN`, `HOST_METRICS_PORT` | `127.0.0.1`, `2023` | the address and the port the metrics are served on |
 | `HOST_BUFFER_LIMIT` | `4G` | each of the output's two on-disk buffers |
+
+### Collectors
+
+Each source is a collector: a file in `etc/collectors.d/` with its inputs and their processors. The
+unit runs `bin/observability-host-launch`. The launcher picks the collectors, writes
+`/var/lib/observability-host/fluent-bit.yaml`, which includes `etc/host.yaml`, the enabled
+collectors and the parts they need, and execs fluent-bit with it. A collector that does not run
+adds nothing to the process: no input, no port, no command.
+
+| collector | default | what |
+|---|---|---|
+| `heartbeat` | on, cannot be turned off | the heartbeat row (see What it ships); its silence is how a receiver tells a stopped agent from a quiet one |
+| `journal` | on | the journal, with `HOST_JOURNAL_DENY` |
+| `files` | on | the audit log, the package logs and `HOST_EXTRA_FILES` |
+| `node` | on | `node_exporter_metrics`, served on the metrics port (see Metrics) |
+| `self` | on | the agent's own metrics, served on the metrics port |
+
+The defaults are the pipeline as it was before collectors existed. The metrics port, the part
+`parts.d/serve-metrics.yaml`, is opened only when a collector that runs needs it, `node` or
+`self`: with both off, nothing listens. `HOST_NODE_COLLECTORS` remains the list of
+node_exporter's own collectors within `node`.
+
+The flags are node_exporter's (its README, "Collectors"):
+
+- `--collector.<name>` enables a collector, and `--no-collector.<name>` disables one.
+- `--collector.disable-defaults` disables every collector that is not enabled explicitly, wherever
+  it is in the flags.
+- For one collector the last flag wins.
+- An unknown collector or flag, or `--no-collector.heartbeat`, is refused, and the unit then does
+  not start.
+
+The flags come from `/etc/observability-host/args`, one or more per line with `#` for comments
+(`HOST_ARGS_FILE`; a missing file is no flags), followed by the launcher's own command line. For
+example, on a Kubernetes node, where the DaemonSet exports the machine's `node_*` (see Metrics),
+`HOST_NODE_COLLECTORS=textfile` keeps `node` for the restart flag alone. A host that only
+forwards its journal would have:
+
+```
+# /etc/observability-host/args
+--collector.disable-defaults
+--collector.journal
+```
+
+A change of collectors takes a restart of the unit, as a change of the environment file does.
+`observability-host-launch --list` shows what would run, and `--print` the configuration it would
+write.
+
+The collectors have two tests:
+
+- `images/fluentbit/host/test-launch.sh`, run by `./test.sh checks`, covers the flags and the
+  configuration written.
+- `itest/host-docker/run.sh` runs the tarball in Ubuntu containers against versitygw, with no
+  systemd and no qemu, so it also runs where the host phase can't. A user that a bucket policy
+  allows only PutObject under the root writes, and the test checks for each set of flags what
+  the process does:
+  - the collectors it logs;
+  - whether the metrics port is open, and what it serves;
+  - the rows in the bucket, read through `compactor/sql/raw.sql`;
+  - that `--no-collector.heartbeat` stops the launcher with exit 2 before fluent-bit starts.
+
+  Run it with `TARBALL=target/host/<tarball> itest/host-docker/run.sh`. The itest's host phase
+  passes the defaults through fluent-bit's dry run and runs them as the unit.
 
 ## Metrics
 
