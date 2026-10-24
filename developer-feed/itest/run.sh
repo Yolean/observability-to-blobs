@@ -19,6 +19,10 @@
 # ship, and one pushed after dev-feed-git's first run, which must, with its
 # whole message and the push in the remote-tracking branch's reflog.
 #
+# claude-memory: memory files there before the start, shipped on the first
+# run (a memory's content is state), then edited, deleted and added, each
+# change shipped once.
+#
 # cmux: a journal with cmux's schema, with rows before the start, which must
 # not ship, and after dev-feed-cmux's first run, which must, once each.
 #
@@ -91,7 +95,7 @@ phase "agent: the host tarball, the feed's collectors, and a ~/.claude written b
 docker build -q -t "$AGENT_IMAGE" - >/dev/null <<'DOCKERFILE'
 FROM ubuntu:24.04
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-    libyaml-0-2 libsystemd0 ca-certificates git sqlite3 >/dev/null && rm -rf /var/lib/apt/lists/*
+    libyaml-0-2 libsystemd0 ca-certificates git sqlite3 jq >/dev/null && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
 # dev-feed-git for the container: no cgo, so a cross-compile from here
 mkdir -p "$TMP/bin"
@@ -105,7 +109,7 @@ docker run -d --name "$AGENT" --network "$NET" \
   -v "$TMP/s3-credentials:/etc/observability-host/s3-credentials:ro" -v "$TMP/args:/etc/observability-host/args:ro" \
   -v "$TMP/bin:/opt/developer-feed/built:ro" -v "$PWD/developer-feed/bin:/opt/developer-feed/bin:ro" \
   -e PATH=/opt/developer-feed/built:/opt/developer-feed/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-  -e DEV_FEED_GIT_INTERVAL=3 -e DEV_FEED_CMUX_INTERVAL=3 -e DEV_FEED_CMUX_JOURNAL=/root/cmux/journal.sqlite3 \
+  -e DEV_FEED_GIT_INTERVAL=3 -e DEV_FEED_CMUX_INTERVAL=3 -e DEV_FEED_MEMORY_INTERVAL=3 -e DEV_FEED_CMUX_JOURNAL=/root/cmux/journal.sqlite3 \
   -e CLUSTER_NAME=$CLUSTER -e NODE_NAME=$NODE -e "S3_BUCKET=$BUCKET" -e "S3_ENDPOINT=http://$GW:7070" -e S3_TLS=off \
   -e KEY_ROOT=$KEY_ROOT -e UPLOAD_TIMEOUT=5s -e HOST_COLLECTOR_DIRS=/opt/developer-feed/collectors \
   -e AWS_SHARED_CREDENTIALS_FILE=/etc/observability-host/s3-credentials \
@@ -113,7 +117,9 @@ docker run -d --name "$AGENT" --network "$NET" \
   -e "S1=$S1" -e "S2=$S2" -e "PROJ=$PROJ" -e "RUN=$RUN" \
   "$AGENT_IMAGE" sh -c '
     set -e
-    mkdir -p /opt/observability-host "$HOME/.claude/projects/$PROJ"
+    mkdir -p /opt/observability-host "$HOME/.claude/projects/$PROJ/memory"
+    printf -- "---\nname: kept\n---\nmemory-before-start-$RUN\n" >"$HOME/.claude/projects/$PROJ/memory/kept.md"
+    echo "memory-to-delete-$RUN" >"$HOME/.claude/projects/$PROJ/memory/gone.md"
     tar xzf /tmp/host.tar.gz -C /opt/observability-host
     echo "{\"type\":\"user\",\"sessionId\":\"$S1\",\"m\":\"before-start-$RUN\"}" >"$HOME/.claude/projects/$PROJ/$S1.jsonl"
     echo "{\"display\":\"history-before-start-$RUN\",\"sessionId\":\"$S1\",\"project\":\"/root/repo\"}" >"$HOME/.claude/history.jsonl"
@@ -135,8 +141,8 @@ docker run -d --name "$AGENT" --network "$NET" \
     # launchd and systemd do
     while :; do /opt/observability-host/bin/observability-host-launch || true; sleep 1; done' >/dev/null
 in_agent() { docker exec "$AGENT" bash -c "$1"; }
-for _ in $(seq 30); do docker logs "$AGENT" 2>&1 | grep -q 'collectors: claude cmux git heartbeat$' && break; sleep 1; done
-check "the feed's directory's defaults, claude, cmux and git, run beside the heartbeat" sh -c "docker logs $AGENT 2>&1 | grep -q 'collectors: claude cmux git heartbeat\$'"
+for _ in $(seq 30); do docker logs "$AGENT" 2>&1 | grep -q 'collectors: claude claude-memory cmux git heartbeat$' && break; sleep 1; done
+check "the feed's directory's defaults, claude, claude-memory, cmux and git, run beside the heartbeat" sh -c "docker logs $AGENT 2>&1 | grep -q 'collectors: claude claude-memory cmux git heartbeat\$'"
 sleep 6
 for _ in $(seq 20); do in_agent 'ls /var/lib/observability-host/git/*.json' >/dev/null 2>&1 && break; sleep 1; done
 check "dev-feed-git's first run recorded the repository" in_agent 'ls /var/lib/observability-host/git/*.json'
@@ -146,6 +152,12 @@ check "dev-feed-cmux's first run recorded the journal's sequence" in_agent 'test
 in_agent 'sqlite3 /root/cmux/journal.sqlite3 "INSERT INTO agent_journal VALUES
   (NULL, \"after-1-$RUN\", 1, \"agent.turn.started\", 1792800001000, 1792800001000, \"claude\", \"k\", \"$S1\", \"ws-1\", \"sf-1\", NULL, 0, 0, \"UserPromptSubmit\", NULL, \"a detail that must not ship\"),
   (NULL, \"after-2-$RUN\", 1, \"agent.turn.completed\", 1792800002000, 1792800002000, \"claude\", \"k\", \"$S1\", \"ws-1\", \"sf-2\", NULL, 1, 0, \"Stop\", \"done\", NULL)"'
+
+for _ in $(seq 20); do in_agent 'test -s /var/lib/observability-host/snapshot-claude-memory.tsv' && break; sleep 1; done
+in_agent 'd=$HOME/.claude/projects/$PROJ/memory
+  echo "memory-edited-$RUN" >>"$d/kept.md"
+  rm "$d/gone.md"
+  echo "memory-new-$RUN" >"$d/new.md"'
 
 phase "after the first start: a commit pushed and fetched"
 in_agent 'git -C /root/repo commit -q --allow-empty -F - <<MSG
@@ -172,8 +184,8 @@ sleep 12
 phase "restart: fluent-bit killed, lines written while it is down, then it starts again"
 in_agent 'pkill -x fluent-bit'
 in_agent 'echo "{\"type\":\"user\",\"sessionId\":\"$S1\",\"m\":\"during-restart-$RUN\"}" >>"$HOME/.claude/projects/$PROJ/$S1.jsonl"'
-for _ in $(seq 20); do [ "$(docker logs "$AGENT" 2>&1 | grep -c 'collectors: claude cmux git heartbeat$')" -ge 2 ] && break; sleep 1; done
-check "the launcher started fluent-bit again" sh -c "[ \$(docker logs $AGENT 2>&1 | grep -c 'collectors: claude cmux git heartbeat\$') -ge 2 ]"
+for _ in $(seq 20); do [ "$(docker logs "$AGENT" 2>&1 | grep -c 'collectors: claude claude-memory cmux git heartbeat$')" -ge 2 ] && break; sleep 1; done
+check "the launcher started fluent-bit again" sh -c "[ \$(docker logs $AGENT 2>&1 | grep -c 'collectors: claude claude-memory cmux git heartbeat\$') -ge 2 ]"
 in_agent 'echo "{\"type\":\"user\",\"sessionId\":\"$S1\",\"m\":\"after-restart-$RUN\"}" >>"$HOME/.claude/projects/$PROJ/$S1.jsonl"'
 sleep 15
 
@@ -210,11 +222,11 @@ assert "a prompt appended to the history, as kind history" \
 assert "the line written while fluent-bit was down, and the one after, once each" \
   "SELECT count(*) = 2 AND count(DISTINCT json) = 2 $C AND (json LIKE '%during-restart-$RUN%' OR json LIKE '%after-restart-$RUN%')"
 assert "no line is shipped twice across the restart" \
-  "SELECT count(*) = count(DISTINCT json) $C"
+  "SELECT count(*) = count(DISTINCT json) $C AND kind <> 'memory'"
 assert "the line is verbatim: it parses as the JSON that was written" \
   "SELECT bool_and(json_extract_string(json, '\$.m') = 'after-start-$RUN') $C AND json LIKE '%\"after-start-$RUN\"%'"
 assert "a claude line in the objects has the contract's fields and no other" \
-  "SELECT bool_and(list_has_all(['table','kind','cluster','node','path','project','session_id','json','ts'], json_keys(json))) FROM read_json_objects('s3://$BUCKET/$KEY_ROOT/$CLUSTER/*/*/*/*.jsonl.zst', format='newline_delimited', compression='zstd') WHERE json->>'table' = 'claude'"
+  "SELECT bool_and(list_has_all(['table','kind','cluster','node','path','project','session_id','json','ts'], json_keys(json))) FROM read_json_objects('s3://$BUCKET/$KEY_ROOT/$CLUSTER/*/*/*/*.jsonl.zst', format='newline_delimited', compression='zstd') WHERE json->>'table' = 'claude' AND json->>'kind' <> 'memory'"
 G="FROM feed WHERE \"table\" = 'git'"
 assert "git: the remote, as the repository's" \
   "SELECT count(*) >= 1 AND bool_and(repo = '/root/repo' AND fetch_url = '/root/origin.git') $G AND kind = 'remote' AND remote = 'origin'"
@@ -224,6 +236,15 @@ assert "git: nothing from before the start: live only" \
   "SELECT count(*) = 0 $G AND kind = 'commit' AND message = 'before-start-$RUN'"
 assert "git: the push, in the remote-tracking branch's reflog, at the commit" \
   "SELECT count(*) = 1 $G AND kind = 'ref-update' AND ref = 'refs/remotes/origin/main' AND message = 'update by push' AND sha = (SELECT sha $G AND kind = 'commit' AND message LIKE 'feature-after-start-$RUN%')"
+M="FROM feed WHERE \"table\" = 'claude' AND kind = 'memory'"
+assert "memory: a file there before the start, on the first run, whole, with its project" \
+  "SELECT count(*) = 1 AND bool_and(project = '$PROJ' AND NOT deleted AND content LIKE '---%memory-before-start-$RUN%' AND content NOT LIKE '%memory-edited%') $M AND path LIKE '%/kept.md' AND content NOT LIKE '%memory-edited%'"
+assert "memory: the same file after an edit, whole again, with another hash" \
+  "SELECT count(*) = 1 AND bool_and(content LIKE '%memory-before-start-$RUN%memory-edited-$RUN%') AND (SELECT count(DISTINCT sha256) $M AND path LIKE '%/kept.md') = 2 $M AND path LIKE '%/kept.md' AND content LIKE '%memory-edited%'"
+assert "memory: a file deleted, as a deleted row without content" \
+  "SELECT count(*) = 1 AND bool_and(content IS NULL) $M AND path LIKE '%/gone.md' AND deleted"
+assert "memory: a file that appeared after the start" \
+  "SELECT count(*) = 1 $M AND path LIKE '%/new.md' AND content = 'memory-new-$RUN' || chr(10)"
 X="FROM feed WHERE \"table\" = 'cmux'"
 assert "cmux: the journal's rows from after the first run, once each, in order, with their workspace and pane" \
   "SELECT count(*) = 2 AND list(event_id ORDER BY sequence) = ['after-1-$RUN', 'after-2-$RUN'] AND list(surface_id ORDER BY sequence) = ['sf-1', 'sf-2'] AND bool_and(session_id = '$S1' AND workspace_id = 'ws-1') $X"

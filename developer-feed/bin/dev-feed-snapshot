@@ -1,0 +1,48 @@
+#!/bin/sh
+# Snapshots of files that are rewritten rather than appended to, for an
+# exec collector (developer-feed/collectors/collectors.d/claude-memory.yaml):
+#
+#   dev-feed-snapshot <table> <kind> <glob> ...
+#
+# prints one JSON line per file matching a glob that is new or whose content
+# changed since the previous run, with the whole content, and one per file
+# that is gone: {table, kind, path, content, sha256, deleted}. The state, a
+# hash per path, is in HOST_STATE_DIR, one file per <table>-<kind>, saved
+# after the lines are printed (a crash ships a file twice, never misses it).
+#
+# Unlike the tail collectors this ships what it finds on its first run: a
+# file's content is state, as a repository's remotes are, not history.
+# Needs jq (in /usr/bin on macOS) and shasum.
+set -eu
+
+[ $# -ge 3 ] || { echo "usage: dev-feed-snapshot <table> <kind> <glob> ..." >&2; exit 2; }
+: "${HOST_STATE_DIR:?HOST_STATE_DIR is not set: the launcher of the agent sets it}"
+table=$1 kind=$2
+shift 2
+state=$HOST_STATE_DIR/snapshot-$table-$kind.tsv
+new=$state.new
+[ -f "$state" ] || : >"$state"
+: >"$new"
+
+for pattern in "$@"; do
+  # the pattern is expanded here, each match a path; one without a match
+  # stays the pattern itself, which is not a file
+  for f in $pattern; do
+    [ -f "$f" ] || continue
+    sha=$(shasum -a 256 "$f" | cut -c1-64)
+    printf '%s\t%s\n' "$sha" "$f" >>"$new"
+    if ! grep -qxF "$(printf '%s\t%s' "$sha" "$f")" "$state"; then
+      jq -cn --arg table "$table" --arg kind "$kind" --arg path "$f" --arg sha "$sha" --rawfile content "$f" \
+        '{table: $table, kind: $kind, path: $path, content: $content, sha256: $sha, deleted: false}'
+    fi
+  done
+done
+
+# the paths of the previous run that matched nothing this time
+cut -f2 "$state" | while IFS= read -r f; do
+  cut -f2 "$new" | grep -qxF "$f" && continue
+  jq -cn --arg table "$table" --arg kind "$kind" --arg path "$f" \
+    '{table: $table, kind: $kind, path: $path, deleted: true}'
+done
+
+mv "$new" "$state"

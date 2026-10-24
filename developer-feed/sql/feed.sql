@@ -25,11 +25,15 @@ CREATE OR REPLACE VIEW feed AS
       instance:'VARCHAR',
       samples:'STRUCT(name VARCHAR, type VARCHAR, labels MAP(VARCHAR, VARCHAR), value DOUBLE)[]',
       -- claude: a line of Claude Code's, verbatim
-      kind:'VARCHAR',               -- transcript | subagent | history
+      kind:'VARCHAR',               -- transcript | subagent | history | memory
       path:'VARCHAR',               -- the file the line is from
       project:'VARCHAR',            -- transcript, subagent: the projects/ directory, the session's cwd with / as -
       session_id:'VARCHAR',         -- transcript, subagent: from the file's name; history: in the line
       json:'VARCHAR',               -- the line; its format is Claude Code's own and changes between versions
+      -- claude memory: a snapshot of a memory file (developer-feed/bin/dev-feed-snapshot)
+      content:'VARCHAR',            -- the file's whole content, when new or changed
+      sha256:'VARCHAR',
+      deleted:'BOOLEAN',            -- true: the file is gone, and the row has no content
       -- git (kind remote | ref-update | commit; developer-feed/git/main.go)
       repo:'VARCHAR',               -- the repository's top level on the machine
       remote:'VARCHAR',             -- remote rows

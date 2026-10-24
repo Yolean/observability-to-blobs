@@ -1,0 +1,30 @@
+# The claude-memory collector (developer-feed/README.md, Collectors): the
+# memory files Claude Code's agents keep per project, which its cleanup of
+# old sessions does not delete. Agents rewrite and delete them, so they are
+# snapshots, not tails: dev-feed-snapshot (developer-feed/bin/) every
+# DEV_FEED_MEMORY_INTERVAL seconds ships a file's whole content when it is
+# new or changed, and a row when it is gone. Its first run ships every
+# memory there is: a memory's content is state, not history.
+# needs: dev-feed-json
+pipeline:
+  inputs:
+    - name: exec
+      alias: claude_memory
+      tag: blob
+      command: dev-feed-snapshot claude memory '${HOME}/.claude/projects/*/memory/*.md'
+      parser: dev_feed_json
+      interval_sec: ${DEV_FEED_MEMORY_INTERVAL:-60}
+      # a file's whole content in one line
+      buf_size: 8M
+      storage.type: filesystem
+      processors:
+        logs:
+          - name: modify
+            add:
+              - cluster ${CLUSTER_NAME}
+              - node ${NODE_NAME}
+          # projects/<project>/memory/<file>.md
+          - name: content_modifier
+            action: extract
+            key: path
+            pattern: '/projects/(?<project>[^/]+)/memory/[^/]+$'
