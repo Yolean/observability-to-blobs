@@ -231,6 +231,16 @@ func TestCmdMintFromConfig(t *testing.T) {
 	if !strings.Contains(errOut.String(), "dev1/other/") {
 		t.Errorf("the environment did not win over the config: %q", errOut.String())
 	}
+	// a read mint keeps its parent's key id under its own key
+	out.Reset()
+	errOut.Reset()
+	if err := cmdMint([]string{"--role", "read", "--prefix", "dev1/", "--parent-key-id", "readparent"},
+		strings.NewReader(testSecret+"\n"), &out, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	if m := readConfig(cfg); m["DEV_FEED_READ_PARENT_KEY_ID"] != "readparent" || m["DEV_FEED_PARENT_KEY_ID"] != testKeyID {
+		t.Errorf("parent key ids after a read mint: %v", m)
+	}
 }
 
 // setConfig as lib/config.sh's cfg_set: the same file and the same words.

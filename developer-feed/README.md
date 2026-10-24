@@ -39,6 +39,7 @@ All machines of one developer write to one bucket, in the host agent's key layou
 | [`sql/feed.sql`](sql/feed.sql) | the feed's line contract, for DuckDB |
 | [`itest/`](itest/) | the collectors end to end, in docker against versitygw |
 | [`macos/`](macos/) | the user-level host agent on a Mac: a native build, the install and LaunchAgent, the credential in the Keychain |
+| [`explore/`](explore/) | the feed in DuckDB, ingested from the bucket every few minutes, served with quack on localhost |
 | [`lib/config.sh`](lib/config.sh) | the user-level layout (program, `config/v1`, `state/v1`) and the config file the scripts maintain |
 
 ## Collectors

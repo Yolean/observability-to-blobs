@@ -49,3 +49,11 @@ Update: `build.sh`, then `install.sh`.
 Lost machine: delete its parent token in the dashboard.
 
 Stop: `developer-feed/macos/uninstall.sh` (`--purge` removes everything).
+
+## Explore
+
+```sh
+developer-feed/explore/explore.sh 7d
+```
+
+It explains the read token the first time. Then connect from `y-duckdb -ui` with the `ATTACH` line it prints.

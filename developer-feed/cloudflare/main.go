@@ -51,7 +51,7 @@ func usage(w io.Writer) {
        dev-feed-r2 verify [--role write|read] [flags] < credential.json
 Run a subcommand with -h for its flags. Their defaults are DEV_FEED_ACCOUNT,
 DEV_FEED_BUCKET, DEV_FEED_JURISDICTION, CLUSTER_NAME, KEY_ROOT and
-DEV_FEED_PARENT_KEY_ID, from the environment, else from the user-level host
+DEV_FEED_PARENT_KEY_ID (DEV_FEED_READ_PARENT_KEY_ID for --role read), from the environment, else from the user-level host
 agent's config ($OBSERVABILITY_HOST_CONFIG/env, default
 ~/.config/observability-host/v1/env), where setup-bucket.sh and install.sh
 put them. mint keeps the parent's key id there, verify when it passed.
@@ -110,7 +110,7 @@ func cmdMint(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	cfg := readConfig(cfgPath)
 	var f feedFlags
 	f.register(fs, cfg)
-	parentKeyID := fs.String("parent-key-id", setting(cfg, "DEV_FEED_PARENT_KEY_ID", ""), "the parent R2 API token's access key id ($DEV_FEED_PARENT_KEY_ID); not secret, kept in the config")
+	parentKeyID := fs.String("parent-key-id", "", "the parent R2 API token's access key id; not secret, kept in the config, as DEV_FEED_PARENT_KEY_ID for the write role and DEV_FEED_READ_PARENT_KEY_ID for read")
 	ttl := fs.String("ttl", "30d", "how long the credential is valid: a Go duration, or days as 30d")
 	toTerminal := fs.Bool("to-terminal", false, "print the credential even when stdout is a terminal")
 	if err := fs.Parse(args); err != nil {
@@ -119,6 +119,14 @@ func cmdMint(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	ep, prefix, actions, err := f.resolve()
 	if err != nil {
 		return err
+	}
+	// each role has a parent of its own, so each keeps its key id apart
+	parentKey := "DEV_FEED_PARENT_KEY_ID"
+	if f.role == "read" {
+		parentKey = "DEV_FEED_READ_PARENT_KEY_ID"
+	}
+	if *parentKeyID == "" {
+		*parentKeyID = setting(cfg, parentKey, "")
 	}
 	if *parentKeyID == "" {
 		return errors.New("--parent-key-id is required")
@@ -147,7 +155,7 @@ func cmdMint(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return err
 	}
 	// the parent's key id is not secret: kept, so that the next mint needs no flag
-	return setConfig(cfgPath, "DEV_FEED_PARENT_KEY_ID", *parentKeyID, stderr)
+	return setConfig(cfgPath, parentKey, *parentKeyID, stderr)
 }
 
 func cmdVerify(args []string, stdin io.Reader, stdout io.Writer) error {
