@@ -743,9 +743,11 @@ LOGS_HDR=$INIT.logs.headers LOGS_OUT=$INIT.logs.body
 cat >"$INIT_S3" <<SQL
 .output /dev/null
 INSTALL httpfs; LOAD httpfs; SET TimeZone='UTC';
-SET s3_region='us-east-1'; SET s3_endpoint='127.0.0.1:$S3_PORT';
-SET s3_access_key_id='demoaccess'; SET s3_secret_access_key='demosecret';
-SET s3_use_ssl=false; SET s3_url_style='path';
+-- scoped to the bucket, as itest/host-docker does: a persistent secret for
+-- s3:// on this machine would otherwise win over SET s3_*
+CREATE OR REPLACE SECRET node_itest (TYPE s3, KEY_ID 'demoaccess', SECRET 'demosecret',
+  REGION 'us-east-1', ENDPOINT '127.0.0.1:$S3_PORT', USE_SSL false, URL_STYLE 'path',
+  SCOPE 's3://$BUCKET');
 SQL
 # the compactor's parquet keys; 0600 like the S3 one (umask above)
 for f in "$PARQUET_KEYS"/*; do
