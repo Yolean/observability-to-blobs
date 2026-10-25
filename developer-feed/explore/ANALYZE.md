@@ -25,7 +25,7 @@ First, see what is there:
 ```sql
 SELECT "table", kind, cluster, min(ts) AS first, max(ts) AS last, count(*) AS rows
 FROM ingest.rows GROUP BY ALL ORDER BY 1, 2;
-SELECT min(ingested_at), max(ingested_at), count(*) FROM ingest.files;   -- explore's own ingests
+FROM ingest.runs ORDER BY started_at;   -- explore's ingests: from what hour, of which clusters
 ```
 
 Coverage is not everything that happened:

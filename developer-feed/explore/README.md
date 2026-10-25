@@ -39,22 +39,33 @@ the UI's notebooks see `feed`.
 
 ## Ingest
 
-- **Listing:** the script lists one prefix per machine and hour,
-  `dev1/<cluster>/<date>/<hour>/`. The first ingest covers the hours since `<since>`; each
-  later one covers the last three hours, as an object lands in its first line's hour and may
-  arrive late. Objects older than that which arrive late, after a machine was offline, are
-  picked up by the next start of the script, and so are a backfill's
-  (`../backfill/`), whose hours are the history's: start the script again with a `<since>`
-  that reaches back over them.
+- **Listing:** the script lists one prefix per cluster and UTC day, `dev1/<cluster>/<date>/`:
+  two requests, and one more per 1000 objects. A listing per hour, as before, cost two
+  requests for each of the day's 24 hours: 335 days took 18 minutes for one cluster.
+- **The first ingest** covers the hours since `<since>`, a day at a time. Each day's new
+  objects are read and committed together, and a line says how many there were, so a stop
+  keeps the days already done. Each later ingest covers yesterday and today whole, as an
+  object lands in its first line's hour and may arrive after it. Older objects that arrive
+  late, after a machine was offline, are picked up by the next start of the script. So are a
+  backfill's (`../backfill/`), whose hours are the history's: start the script again with a
+  `<since>` that reaches back over them.
 - **Each line once:** `ingest.rows`, which every schema reads, drops a line that was shipped
   twice, by the agent and by the backfill where their ranges meet. `ingest.all_rows` has them
   all.
-- **Machines:** `--clusters` names them; the default is this machine's `CLUSTER_NAME`.
+- **Clusters:** `--clusters` names the `CLUSTER_NAME`s to read, the first part of a key
+  (`dev1/<cluster>/<date>/<hour>/<node>/`); the default is this machine's. Machines that
+  share a cluster are its nodes, told apart by `node`, a column of every row: a backfill
+  with `NODE_NAME` set (`../backfill/README.md`) ships into this machine's cluster. Before
+  it lists anything, the script checks that each named cluster has an object. It stops if
+  none has, and leaves out those that have none, saying so.
 - **Storage:** each object's lines go into `ingest.lines` as JSON, and the object into
-  `ingest.files`, in one transaction, so an object is never read twice nor half.
+  `ingest.files`, in one transaction, so an object is never read twice nor half. An object's
+  `ingested_at` is when its day's transaction began.
+- **`ingest.runs`:** a row per ingest, with when it started and finished, the hour it read
+  from, its clusters, the days it listed and the new objects it read.
 
 **Ingesting now, from a notebook:** write the refresh file the script names. It checks
-every 2 s, ingests the last three hours at once, and removes the file:
+every 2 s, ingests yesterday and today at once, and removes the file:
 
 ```sql
 COPY (SELECT 1) TO '<state>/explore/refresh' (FORMAT csv);

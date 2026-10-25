@@ -30,7 +30,9 @@ sessions kept elsewhere, such as a backup that will never be resumed.
   memories as the home, which would ship again under other paths. A backup of another
   machine's has its own: add `claude-history,claude-memory`. `git` and `cmux` are refused.
 - **The machine:** `NODE_NAME=<name>` in front of the command names the machine the backup
-  came from. `CLUSTER_NAME` would need a credential for that cluster's prefix.
+  came from. Its objects go under this machine's cluster, `<root>/<cluster>/<date>/<hour>/<name>/`,
+  so explore reads them with the cluster, not `--clusters <name>`, and tells them apart by
+  `node`. `CLUSTER_NAME` would need a credential for that cluster's prefix.
 - **State:** its own, in `backfill/homes/<dir with - for />/`, so the home's own state is
   untouched. A second run over the same directory ships only what is new there.
 - **Rows:** `path` is the file's path under `<dir>`. `project` and `session_id` come from it as

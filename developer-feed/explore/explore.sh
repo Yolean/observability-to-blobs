@@ -14,15 +14,20 @@
 #   --ttl       the read credential's lifetime, and so the session's
 #               (default 12h)
 #   --port      quack's port on localhost (default 18338)
-#   --clusters  the machines to read (default: this machine's CLUSTER_NAME)
+#   --clusters  the clusters to read, CLUSTER_NAMEs (default: this
+#               machine's); the machines of one cluster are its nodes, told
+#               apart by node, a column of every row
 #
 # The read credential is minted with dev-feed-r2 from a read-only parent
 # token (the script says how to make one) and goes to DuckDB as a temporary
 # secret on stdin: never a file or a command line. So does quack's token,
 # which is new every run and printed once. Ctrl-C stops it.
 #
-# A notebook triggers an ingest at once by writing the file the script names
-# (<state>/explore/refresh), with COPY.
+# Ingests list the bucket a UTC day at a time, a prefix per cluster and day,
+# and commit each day with the objects read: a stopped first ingest keeps
+# the days it finished, and says how far it got. Later ingests list today
+# and yesterday. A notebook triggers one at once by writing the file the
+# script names (<state>/explore/refresh), with COPY.
 #
 # Env: DEV_FEED_EXPLORE_CREDENTIAL_COMMAND, a command that prints the
 # credential_process JSON instead of minting one, is for tests.
@@ -123,37 +128,59 @@ rm -f "$refresh"
 token=$(openssl rand -hex 24)
 q() { printf "'%s'" "${1//\'/\'\'}"; }
 
-# hour_globs <from epoch>: one ListObjectsV2 prefix per cluster and hour,
-# from that hour to this one, UTC as the keys are; listing the whole
-# bucket every few minutes would cost R2 operations
-hour_globs() {
-  local t now c first=1
-  now=$(date -u +%s)
-  t=$(( $1 / 3600 * 3600 ))
-  while [ "$t" -le "$now" ]; do
-    for c in ${clusters//,/ }; do
-      [ $first = 1 ] || printf ' UNION ALL '
-      printf "SELECT file FROM glob(%s)" "$(q "s3://$bucket/$root/$c/$(date -u -r "$t" +%Y-%m-%d/%H 2>/dev/null || date -u -d "@$t" +%Y-%m-%d/%H)/*/*.jsonl.zst")"
-      first=0
-    done
-    t=$(( t + 3600 ))
+utc() { date -u -r "$1" "$2" 2>/dev/null || date -u -d "@$1" "$2"; }
+
+# the read credential as DuckDB's temporary secret, for the bucket only
+secret_sql() {
+  echo "LOAD httpfs;"
+  printf "CREATE OR REPLACE TEMPORARY SECRET feed_read (TYPE s3, KEY_ID %s, SECRET %s, SESSION_TOKEN %s, REGION %s, ENDPOINT %s, URL_STYLE 'path', USE_SSL %s, SCOPE %s);\n" \
+    "$(q "$key_id")" "$(q "$secret")" "$(q "$session")" "$(q "$region")" "$(q "$host")" "$ssl" "$(q "s3://$bucket/")"
+}
+
+# day_globs <YYYY-MM-DD>: the day's objects of every cluster, a listing of
+# <root>/<cluster>/<day>/ each: two requests and one more per 1000 objects,
+# where a listing per hour is two requests for each of its 24 hours
+day_globs() {
+  local c first=1
+  for c in ${clusters//,/ }; do
+    [ $first = 1 ] || printf ' UNION ALL '
+    printf "SELECT file FROM glob(%s)" "$(q "s3://$bucket/$root/$c/$1/*/*/*.jsonl.zst")"
+    first=0
   done
 }
 
-# ingest <from epoch>: the objects of those hours not read before, in one
-# transaction with the record of them
+# ingest <from epoch>: the objects from that hour on, not read before, a
+# UTC day at a time: each day's in one transaction with the record of them,
+# and a line for each day that had any. Then a row in ingest.runs.
 ingest() {
-  cat <<SQL
+  local from_hour t now day
+  from_hour=$(utc "$1" +%Y-%m-%d/%H)
+  now=$(date -u +%s)
+  echo "SET VARIABLE run_started = now(); SET VARIABLE run_new = 0; SET VARIABLE run_days = 0;"
+  t=$(( $1 / 86400 * 86400 ))
+  while [ "$t" -le "$now" ]; do
+    day=$(utc "$t" +%Y-%m-%d)
+    cat <<SQL
 BEGIN;
-SET VARIABLE listed = (SELECT coalesce(list(file), []::VARCHAR[]) FROM ($(hour_globs "$1")));
-SET VARIABLE new_files = (SELECT coalesce(list(f), []::VARCHAR[]) FROM unnest(coalesce(getvariable('listed'), []::VARCHAR[])) t(f)
-  WHERE f NOT IN (SELECT filename FROM ingest.files));
+SET VARIABLE new_files = (SELECT coalesce(list(file), []::VARCHAR[]) FROM ($(day_globs "$day"))
+  WHERE regexp_extract(file, '/([0-9]{4}-[0-9]{2}-[0-9]{2}/[0-9]{2})/[^/]+/[^/]+\$', 1) >= $(q "$from_hour")
+    AND file NOT IN (SELECT filename FROM ingest.files));
 INSERT INTO ingest.lines SELECT filename, json FROM read_json_objects(list_concat([$(q "$empty")], getvariable('new_files')),
   format = 'newline_delimited', compression = 'auto_detect', filename = true) WHERE filename <> $(q "$empty");
 INSERT INTO ingest.files SELECT unnest(getvariable('new_files')), now();
 COMMIT;
-SELECT strftime(now(), '%H:%M:%S') AS ingested, len(getvariable('new_files')) AS new_objects,
-  (SELECT count(*) FROM ingest.lines) AS lines, (SELECT count(*) FROM ingest.files) AS objects;
+SET VARIABLE run_new = getvariable('run_new') + len(getvariable('new_files'));
+SET VARIABLE run_days = getvariable('run_days') + 1;
+SELECT format('{}: {} new object{}', $(q "$day"), len(getvariable('new_files')), CASE len(getvariable('new_files')) WHEN 1 THEN '' ELSE 's' END)
+  WHERE len(getvariable('new_files')) > 0;
+SQL
+    t=$(( t + 86400 ))
+  done
+  cat <<SQL
+INSERT INTO ingest.runs VALUES (getvariable('run_started'), now(), $(q "$from_hour"), $(q "$clusters"), getvariable('run_days'), getvariable('run_new'));
+SELECT format('ingested at {}: {} new, from {} days; {} objects, {} lines in all',
+  strftime(now(), '%H:%M:%S'), getvariable('run_new'), getvariable('run_days'),
+  (SELECT count(*) FROM ingest.files), (SELECT count(*) FROM ingest.lines));
 SQL
 }
 
@@ -170,9 +197,9 @@ loopback_only() {
 
 feed() {
   echo ".bail off"
-  echo "LOAD httpfs;"
-  printf "CREATE OR REPLACE TEMPORARY SECRET feed_read (TYPE s3, KEY_ID %s, SECRET %s, SESSION_TOKEN %s, REGION %s, ENDPOINT %s, URL_STYLE 'path', USE_SSL %s, SCOPE %s);\n" \
-    "$(q "$key_id")" "$(q "$secret")" "$(q "$session")" "$(q "$region")" "$(q "$host")" "$ssl" "$(q "s3://$bucket")"
+  # the setup's results are no news; errors still show
+  echo ".output /dev/null"
+  secret_sql
   for f in "$here"/sql/*.sql; do
     cat "$f"
     printf "INSERT OR REPLACE INTO ingest.migrations VALUES (%s, now());\n" "$(q "$(basename "$f")")"
@@ -183,7 +210,11 @@ feed() {
     cat "$f"
     printf "INSERT OR REPLACE INTO ingest.migrations VALUES (%s, now());\n" "$(q "config/$(basename "$f")")"
   done
+  # the ingests' lines, one a line
+  echo ".mode list"
+  echo ".headers off"
   printf "CALL quack_serve(%s, token = %s);\n" "$(q "quack:localhost:$port")" "$(q "$token")"
+  echo ".output"
   sleep 3
   loopback_only || return 1
   cat >&2 <<HELLO
@@ -212,11 +243,36 @@ HELLO
       echo "explore: the read credential expired at $expiration; still serving, no more ingests; run explore.sh again to go on" >&2
       while :; do sleep 3600; done
     fi
-    # the last three hours: an object lands in its first line's hour, and
-    # may arrive after that hour is over
-    ingest "$(( $(date -u +%s) - 3 * 3600 ))"
+    # yesterday and today, whole: an object lands in its first line's hour,
+    # and may arrive after that hour is over; a listing per day costs the
+    # same for the whole day
+    ingest "$(( $(date -u +%s) / 86400 * 86400 - 86400 ))"
   done
 }
 
-echo "== $db, from $since back, every $every min, machines: $clusters"
+# every cluster named must have objects: a LIMIT 1 listing each, two
+# requests; a node's name for a cluster's would otherwise list nothing for
+# every day of <since>
+echo "== clusters: $clusters"
+found=$( { secret_sql; for c in ${clusters//,/ }; do
+    printf "SELECT %s, count(*) FROM (SELECT 1 FROM glob(%s) LIMIT 1);\n" "$(q "$c")" "$(q "s3://$bucket/$root/$c/*/*/*/*.jsonl.zst")"
+  done; } | y-duckdb -noheader -csv -no-agent 2>&1) || { echo "explore: listing $bucket failed: $found" >&2; exit 1; }
+present='' missing=''
+for c in ${clusters//,/ }; do
+  if grep -qx "$c,1" <<<"$found"; then present=${present:+$present,}$c
+  elif grep -qx "$c,0" <<<"$found"; then missing="$missing $c"
+  else echo "explore: listing $root/$c/ in $bucket failed: $found" >&2; exit 1
+  fi
+done
+if [ -n "$missing" ]; then
+  echo "explore: no objects under$(for c in $missing; do printf ' %s' "$root/$c/"; done) in $bucket." >&2
+  echo "  --clusters takes CLUSTER_NAMEs, the first part of a key: $root/<cluster>/<date>/<hour>/<node>/." >&2
+  echo "  Machines that share a cluster, such as a backfill's with NODE_NAME set, are its nodes:" >&2
+  echo "  read the cluster, and tell them apart by node, a column of every row." >&2
+  [ -n "$present" ] || exit 2
+  echo "  Going on with $present." >&2
+  clusters=$present
+fi
+
+echo "== $db, from $since back, every $every min, clusters: $clusters"
 feed | y-duckdb "$db"

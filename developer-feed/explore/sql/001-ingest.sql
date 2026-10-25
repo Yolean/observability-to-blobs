@@ -6,6 +6,10 @@ CREATE SCHEMA IF NOT EXISTS ingest;
 CREATE TABLE IF NOT EXISTS ingest.files (filename VARCHAR PRIMARY KEY, ingested_at TIMESTAMPTZ);
 CREATE TABLE IF NOT EXISTS ingest.lines (filename VARCHAR, line JSON);
 CREATE TABLE IF NOT EXISTS ingest.migrations (version VARCHAR PRIMARY KEY, applied_at TIMESTAMPTZ);
+-- an ingest each: from what hour, of which clusters, and how long it took
+-- (an object's ingested_at is the start of its day's transaction)
+CREATE TABLE IF NOT EXISTS ingest.runs (started_at TIMESTAMPTZ, finished_at TIMESTAMPTZ,
+  from_hour VARCHAR, clusters VARCHAR, days INTEGER, new_objects BIGINT);
 
 -- the columns every line has (developer-feed/sql/feed.sql)
 CREATE OR REPLACE VIEW ingest.all_rows AS
