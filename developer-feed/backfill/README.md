@@ -26,8 +26,11 @@ sessions kept elsewhere, such as a backup that will never be resumed.
   `<session>/subagents/`. A tarball of `~/.claude/projects/...` made with absolute paths
   unpacks so: `<dir>` is the unpacked `Users/<you>`.
 - **Categories:** `claude-transcript` and `claude-subagent` unless `--category` says
-  otherwise. A backup's prompt history and memories would mostly ship the home's own lines
-  and files again, under other paths. `git` and `cmux` are refused.
+  otherwise. A backup of this machine's own home has mostly the same prompt history and
+  memories as the home, which would ship again under other paths. A backup of another
+  machine's has its own: add `claude-history,claude-memory`. `git` and `cmux` are refused.
+- **The machine:** `NODE_NAME=<name>` in front of the command names the machine the backup
+  came from. `CLUSTER_NAME` would need a credential for that cluster's prefix.
 - **State:** its own, in `backfill/homes/<dir with - for />/`, so the home's own state is
   untouched. A second run over the same directory ships only what is new there.
 - **Rows:** `path` is the file's path under `<dir>`. `project` and `session_id` come from it as
@@ -37,11 +40,14 @@ sessions kept elsewhere, such as a backup that will never be resumed.
 every `.jsonl` under `<dir>`:
 - it is in that layout;
 - its lines are JSON objects with a `type`;
-- it has user and assistant entries, each with a `uuid`, a `timestamp` and the Claude Code
+- its user and assistant entries each have a `uuid`, a `timestamp` and the Claude Code
   `version`;
-- every `sessionId` in it is the session's.
+- it names the session, as its `sessionId`s, and no other.
 
-It prints each session's span, version, cwd and title, and the `--home` to backfill with.
+It prints each session's span, version, cwd and title, and the `--home` to backfill with. A
+transcript without a conversation passes, with a note: Claude Code leaves a few lines of
+title and mode for a session renamed or left before anything happened. Files elsewhere under
+`.claude/` are skipped.
 
 ## Categories
 

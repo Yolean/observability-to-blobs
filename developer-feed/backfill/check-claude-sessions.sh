@@ -8,10 +8,12 @@
 # <home>/.claude/projects/<project>/:
 #   - <session>.jsonl, a session's transcript, its name a session id;
 #   - <session>/subagents/<agent>.jsonl, a subagent's.
-# A transcript must be JSON lines, each an object with a type; it must have
-# user and assistant entries, each with a uuid, a timestamp and the Claude
-# Code version that wrote it; and every sessionId in it must be the
-# session's. It prints a line per transcript, and then the --home to
+# A transcript must be JSON lines, each an object with a type; its user and
+# assistant entries must each have a uuid, a timestamp and the Claude Code
+# version that wrote it; and it must name the session, as its sessionIds,
+# and no other. A transcript without a conversation passes, with a note:
+# Claude Code leaves a few lines of title and mode for a session renamed or
+# left before anything happened. It prints a line per transcript, and then the --home to
 # backfill them with. Exit status 1 if any check failed, or none was found.
 # Needs jq (in /usr/bin on macOS).
 set -eu
@@ -48,6 +50,14 @@ summary='reduce inputs as $e ({lines: 0, bad: 0, types: {}, ids: {}, versions: {
 while IFS= read -r f; do
   rel=${f#*/.claude/projects/}
   if [ "$rel" = "$f" ]; then
+    case $f in
+      */.claude/history.jsonl)
+        echo "skip  $f: the prompt history, which --category ...,claude-history ships"
+        continue ;;
+      */.claude/*)
+        echo "skip  $f: Claude Code's, but no transcript"
+        continue ;;
+    esac
     echo "FAIL  $f: not under <home>/.claude/projects/<project>/, where --home reads"
     failed=$((failed + 1))
     continue
@@ -75,8 +85,6 @@ while IFS= read -r f; do
   problems=$(printf '%s\n' "$s" | jq -r --arg id "$id" '[
       (select(.lines == 0) | "empty"),
       (select(.bad > 0) | "\(.bad) lines not Claude Code entries"),
-      (select((.types.user // 0) == 0) | "no user entry"),
-      (select((.types.assistant // 0) == 0) | "no assistant entry"),
       (select((.ids | keys) != [$id]) | "session ids \(.ids | keys | join(",")), not only \($id)")
     ] | join("; ")')
   if [ -n "$problems" ]; then
@@ -87,9 +95,11 @@ while IFS= read -r f; do
   found=$((found + 1))
   printf '%s\n' "$home" >>"$tmp/homes"
   printf '%s\n' "$s" | jq -r --arg kind "$kind" --arg id "$id" --arg project "$project" '
-    "ok    \($kind) \($id) in \($project)\n" +
-    "      \(.first) to \(.last), \(.lines) lines: \(.types.user) user, \(.types.assistant) assistant\n" +
-    "      Claude Code \(.versions | keys | join(", ")), cwd \(.cwd // "?")" +
+    "ok    \($kind) \($id) in \($project)" +
+    (if (.types.user // 0) == 0 or (.types.assistant // 0) == 0
+     then ", no conversation: \(.types | to_entries | map("\(.value) \(.key)") | join(", "))" else "" end) + "\n" +
+    "      \(.first // "no time") to \(.last // "no time"), \(.lines) lines: \(.types.user // 0) user, \(.types.assistant // 0) assistant\n" +
+    "      Claude Code \(.versions | keys | join(", ") | if . == "" then "?" else . end), cwd \(.cwd // "?")" +
     (if .title then "\n      \"\(.title)\"" else "" end)'
 done <"$tmp/files"
 

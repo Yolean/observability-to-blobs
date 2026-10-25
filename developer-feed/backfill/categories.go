@@ -425,7 +425,8 @@ func lineTime(line, key string) (time.Time, bool) {
 // ships every file there is, so once it has run there is nothing to do.
 func memory(b *backfill) (func() error, error) {
 	st := b.stats["claude-memory"]
-	if _, err := os.Stat(filepath.Join(b.state, "snapshot-claude-memory.tsv")); err == nil {
+	// the collector follows the home's own memories, not a backup's (--home)
+	if _, err := os.Stat(filepath.Join(b.state, "snapshot-claude-memory.tsv")); err == nil && !b.otherHome {
 		st.note("handed off: the collector's first run shipped every memory there was")
 		return nil, nil
 	}

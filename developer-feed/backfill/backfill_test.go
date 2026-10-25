@@ -324,10 +324,24 @@ func TestOtherHome(t *testing.T) {
 	home := f.s
 	f.s.home, f.s.otherHome = backup, true
 	rows := f.ship(strings.Join(homeCategories, ","))
-	f.s = home
 	if got := strings.Join(messages(rows), ","); got != "old" {
 		t.Fatalf("backup: %s, want its session only", got)
 	}
+	// its memories, though the collector has run for the home's own
+	if err := os.WriteFile(filepath.Join(f.s.state, "snapshot-claude-memory.tsv"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mem := filepath.Join(backup, ".claude", "projects", "-Users-dev-old", "memory", "m.md")
+	if err := os.MkdirAll(filepath.Dir(mem), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mem, []byte("remembered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if mr := f.ship("claude-memory"); len(mr) != 1 || mr[0]["content"] != "remembered\n" || mr[0]["project"] != "-Users-dev-old" {
+		t.Errorf("a backup's memories: %v", mr)
+	}
+	f.s = home
 	if rows[0]["path"] != p || rows[0]["project"] != "-Users-dev-old" || rows[0]["session_id"] != "33333333-3333-4333-8333-333333333333" {
 		t.Errorf("row %v", rows[0])
 	}
