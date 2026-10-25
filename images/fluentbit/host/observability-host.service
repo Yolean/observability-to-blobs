@@ -24,6 +24,9 @@
 #  - optionally /etc/observability-host/args: the collectors, as flags of
 #    bin/observability-host-launch (HOST_MODE.md, Collectors); without it
 #    the defaults run.
+#  - optionally /etc/observability-host/collectors/: the machine's own
+#    collectors (HOST_MODE.md, Your own collectors), and a drop-in for what
+#    they need to read beyond the groups below.
 [Unit]
 Description=observability-to-blobs host agent
 After=network-online.target

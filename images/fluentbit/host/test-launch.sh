@@ -132,6 +132,21 @@ rm "$extra/collectors.d/files.yaml"
 HOST_COLLECTOR_DIRS=$tmp/nothing refuses "a directory without collectors.d/ is refused" "has no collectors.d/"
 unset HOST_COLLECTOR_DIRS
 
+echo "the machine's own collectors, beside the args file"
+own=$(dirname "$HOST_ARGS_FILE")/collectors
+mkdir -p "$own/collectors.d"
+expect "an own collectors/ without collectors.defaults adds nothing by default" "files heartbeat journal node self"
+printf 'pipeline:
+  inputs:
+    - name: dummy
+      alias: mine
+' >"$own/collectors.d/mine.yaml"
+echo mine >"$own/collectors.defaults"
+expect "its defaults add to the host's" "files heartbeat journal mine node self"
+expect "its collectors take the flags" "heartbeat" --no-collector.mine --collector.disable-defaults
+HOST_COLLECTOR_DIRS=$own expect "named in HOST_COLLECTOR_DIRS as well, it counts once" "files heartbeat journal mine node self"
+rm -r "$own"
+
 echo "list"
 list=$("$here/launch.sh" --list --no-collector.journal)
 grep -qx "heartbeat forced" <<<"$list" || fail "list: $list"

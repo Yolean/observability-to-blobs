@@ -124,6 +124,13 @@ pipeline:
 YAML
 echo ndjson >"$TMP/extra/collectors.defaults"
 
+# the machine's own collectors (HOST_MODE.md, Your own collectors): the
+# example there, as written, in /etc/observability-host/collectors/
+mkdir -p "$TMP/own/collectors.d"
+sed -n '/^# \/etc\/observability-host\/collectors\/collectors.d\/myapp.yaml$/,/^```$/p' HOST_MODE.md | sed '$d' >"$TMP/own/collectors.d/myapp.yaml"
+grep -q 'alias: myapp' "$TMP/own/collectors.d/myapp.yaml" || { echo "no myapp example in HOST_MODE.md" >&2; exit 2; }
+echo myapp >"$TMP/own/collectors.defaults"
+
 # agent <scenario> <args file content> [docker run arg ...]: one agent
 # container, the tarball at the install prefix, NODE_NAME the scenario, so
 # that each scenario's objects are under their own node in the key
@@ -140,10 +147,11 @@ agent() {
     -e HEARTBEAT_COMMAND=/opt/observability-host/bin/observability-host-heartbeat \
     "$AGENT_IMAGE" sh -c '
       set -e
-      mkdir -p /opt/observability-host /var/lib/observability-host /var/log/itest /var/log/itest-ndjson
+      mkdir -p /opt/observability-host /var/lib/observability-host /var/log/itest /var/log/itest-ndjson /var/log/myapp
       tar xzf /tmp/host.tar.gz -C /opt/observability-host
       echo "itest-before-start" >/var/log/itest/a.log
       echo "{\"event\":\"itest-ndjson-before\"}" >/var/log/itest-ndjson/feed.jsonl
+      echo "myapp-before-start" >/var/log/myapp/app.log
       exec /opt/observability-host/bin/observability-host-launch' >/dev/null
 }
 in_agent() { docker exec "$P-$1" bash -c "$2"; }
@@ -161,20 +169,25 @@ agent refused '--no-collector.heartbeat'
 agent elsewhere '# the host'"'"'s own defaults off; the extra directory'"'"'s stay on
 --no-collector.journal --no-collector.files --no-collector.node --no-collector.self' \
   -v "$TMP/extra:/opt/extra-collectors:ro" -e HOST_COLLECTOR_DIRS=/opt/extra-collectors -e STATE_DIRECTORY=/srv/agent-state
+agent own '# the host'"'"'s own defaults off; the machine'"'"'s own collectors/ stays on
+--no-collector.journal --no-collector.files --no-collector.node --no-collector.self' \
+  -v "$TMP/own:/etc/observability-host/collectors:ro"
 sleep 8
 for s in files-only self-only defaults; do
   docker exec "$P-$s" sh -c "echo itest-after-start-$RUN >>/var/log/itest/a.log" || true
 done
 docker exec "$P-elsewhere" sh -c "echo '{\"event\":\"itest-ndjson-after-$RUN\"}' >>/var/log/itest-ndjson/feed.jsonl" || true
+docker exec "$P-own" sh -c "echo myapp-after-start-$RUN >>/var/log/myapp/app.log" || true
 
 phase "launch: what each set of flags runs"
-for s in files-only self-only defaults elsewhere; do
+for s in files-only self-only defaults elsewhere own; do
   check "$s: the agent is running" sh -c "[ \"\$(docker inspect -f '{{.State.Running}}' $P-$s)\" = true ]"
 done
 check "files-only: the launcher logged heartbeat and files" sh -c "docker logs $P-files-only 2>&1 | grep -q 'collectors: files heartbeat\$'"
 check "self-only: the launcher logged heartbeat and self" sh -c "docker logs $P-self-only 2>&1 | grep -q 'collectors: heartbeat self\$'"
 check "defaults: the launcher logged the five defaults" sh -c "docker logs $P-defaults 2>&1 | grep -q 'collectors: files heartbeat journal node self\$'"
 check "elsewhere: the extra directory's default collector runs beside the forced heartbeat" sh -c "docker logs $P-elsewhere 2>&1 | grep -q 'collectors: heartbeat ndjson\$'"
+check "own: the example collector of /etc/observability-host/collectors/ runs beside the forced heartbeat" sh -c "docker logs $P-own 2>&1 | grep -q 'collectors: heartbeat myapp\$'"
 check "elsewhere: the configuration, positions and storage are in the moved state directory" \
   in_agent elsewhere 'test -f /srv/agent-state/fluent-bit.yaml && test -f /srv/agent-state/ndjson.db && test -d /srv/agent-state/storage && test -z "$(ls -A /var/lib/observability-host)"'
 for _ in $(seq 20); do [ "$(docker inspect -f '{{.State.Running}}' "$P-refused")" = false ] && break; sleep 1; done
@@ -228,13 +241,17 @@ assert "elsewhere: the NDJSON lines from before and after the start, from the ex
   "SELECT count(DISTINCT message) = 2 FROM raw WHERE node = 'elsewhere' AND stream = 'file' AND unit = '/var/log/itest-ndjson/feed.jsonl' AND message IN ('{\"event\":\"itest-ndjson-before\"}', '{\"event\":\"itest-ndjson-after-$RUN\"}')"
 assert "elsewhere: heartbeat rows, with its state in the moved directory" \
   "SELECT count(*) >= 1 FROM raw WHERE node = 'elsewhere' AND \"table\" = 'metrics'"
+assert "own: the example's log lines from before and after the start, as file rows with the path as unit" \
+  "SELECT count(DISTINCT message) = 2 FROM raw WHERE node = 'own' AND \"table\" = 'logs' AND stream = 'file' AND unit = '/var/log/myapp/app.log' AND message IN ('myapp-before-start', 'myapp-after-start-$RUN')"
+assert "own: the example's rows have raw1's fields and no other" \
+  "SELECT count(*) > 0 AND bool_and(list_sort(json_keys(json)) = ['cluster', 'message', 'node', 'stream', 'table', 'ts', 'unit']) FROM read_json_objects('s3://$BUCKET/$KEY_ROOT/$CLUSTER/*/*/own/*.jsonl.zst', format='newline_delimited', compression='zstd') WHERE json->>'unit' = '/var/log/myapp/app.log'"
 assert "the refused scenario wrote nothing" \
   "SELECT count(*) = 0 FROM raw WHERE node = 'refused'"
 assert "every key is under $KEY_ROOT/$CLUSTER/{date}/{HH}/{node}/" \
-  "SELECT bool_and(regexp_matches(filename, '/$KEY_ROOT/$CLUSTER/[0-9]{4}-[0-9]{2}-[0-9]{2}/[0-9]{2}/(files-only|self-only|defaults|elsewhere)/[0-9]{4}-[A-Za-z0-9]{8}\\.jsonl\\.zst\$')) FROM raw"
+  "SELECT bool_and(regexp_matches(filename, '/$KEY_ROOT/$CLUSTER/[0-9]{4}-[0-9]{2}-[0-9]{2}/[0-9]{2}/(files-only|self-only|defaults|elsewhere|own)/[0-9]{4}-[A-Za-z0-9]{8}\\.jsonl\\.zst\$')) FROM raw"
 
 if [ "$FAILED" -gt 0 ]; then
-  for s in files-only self-only defaults refused elsewhere; do echo "--- $s"; docker logs --tail 15 "$P-$s" 2>&1 || true; done
+  for s in files-only self-only defaults refused elsewhere own; do echo "--- $s"; docker logs --tail 15 "$P-$s" 2>&1 || true; done
 fi
 echo
 echo "host-docker: $FAILED failed"
