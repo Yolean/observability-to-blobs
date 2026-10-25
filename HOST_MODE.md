@@ -132,6 +132,7 @@ it is created, which is one more reason for `use_put_object`.
   | `/opt/observability-host/` | as extracted (`tar --no-same-owner`) |
   | `/etc/observability-host/` | `0755` |
   | `/etc/observability-host/env`, `args` | `0644`: no secret is in them |
+  | `/etc/observability-host/collectors/` (Your own collectors) | `0755`, its files `0644` |
   | `/etc/observability-host/s3-credentials` | `0600` |
 
 ### Upgrading
@@ -199,6 +200,7 @@ are in `etc/host.yaml` and `etc/collectors.d/`.
 | `HOST_BUFFER_LIMIT` | `4G` | each of the output's two on-disk buffers |
 | `HOST_TLS_CA_FILE` | `/etc/ssl/certs/ca-certificates.crt` | the CA bundle the S3 output trusts; `/etc/ssl/cert.pem` on macOS |
 | `HOST_LOG_LEVEL` | `info` | fluent-bit's log level |
+| `HOST_COLLECTOR_DIRS` | none | more directories of collectors, colon-separated (Collectors) |
 
 ### Collectors
 
@@ -284,6 +286,14 @@ name (`compactor/guard.go`). So a collector:
 - writes `logs` rows, with `stream`, `unit` and `message`, `cluster` and `node`, or `metrics`
   rows as the heartbeat's;
 - keeps every other field out with a `record_modifier` allowlist;
+- keeps a source's line whole in `message`, with no `parser`. A parser lifts the line's fields
+  out of `log`, the allowlist then drops them, and the row arrives without a `message`: the guard
+  lets it through, and the content is lost. Readers take fields out of `message`, for example
+  `json_extract_string(message, '$.event')`;
+- sets a tail's `buffer_max_size` above the longest line it will see, with `skip_long_lines: on`.
+  The default is 32 KB: a longer line is then dropped with a warning, and without
+  `skip_long_lines` tail gives up on the whole file ("lines are too long. Skipping file.") and
+  later lines never arrive;
 - keeps its state, such as a tail's `db`, in a file of its own under `${HOST_STATE_DIR}`;
 - buffers on disk: `storage.type: filesystem`.
 
@@ -308,6 +318,7 @@ pipeline:
       db: ${HOST_STATE_DIR}/myapp.db
       db.sync: full
       db.locking: true
+      # above the longest line, or it is dropped (the default is 32k)
       buffer_max_size: 8M
       skip_long_lines: on
       storage.type: filesystem
@@ -328,10 +339,26 @@ pipeline:
 It runs once `myapp` is in `/etc/observability-host/collectors/collectors.defaults`, or with
 `--collector.myapp` in the args file.
 
+**Files already in `HOST_EXTRA_FILES` stay there.** A collector of their own has a `db` of its
+own and reads them from their start, so every line would be shipped again. File rows have no
+identity to drop the second by, and their `ts` is the time they were read. Moving them anyway
+takes `read_from_head: false` in the new collector, and an application that does not write
+between the stop of the agent and its start: the new collector starts at the files' ends.
+
 **What a collector can read.** The unit runs fluent-bit as `observability-host`, in the groups
 `systemd-journal` and `adm`. `ProtectSystem=strict` leaves it nothing to write but the state
-directory, and `ProtectHome=yes` hides `/home`, `/root` and `/run/user`. A collector that needs
-more gets it from a drop-in, which adds to the unit's lists:
+directory, and `ProtectHome=yes` hides `/home`, `/root` and `/run/user`.
+
+- A file needs to be readable by that user or one of its groups, and every directory above it
+  traversable. Group `adm` and mode `0640` are enough, without a restart: the next scan finds
+  it.
+- Rotation must keep the group and the mode, e.g. logrotate's `create 0640 myapp adm`.
+- A file the agent cannot read does not stop the unit. fluent-bit logs that it cannot open it,
+  at every scan (`refresh_interval`, 60 s by default), and ships nothing from it. Look in the
+  unit's journal after adding a source.
+
+A collector that needs more gets it from a drop-in, which adds to the unit's lists, and a
+restart:
 
 ```
 # systemctl edit observability-host
