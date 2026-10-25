@@ -162,15 +162,19 @@ A source's schema is now in two files on one machine: the collector and the SQL.
 of the bucket, or the same developer on another machine, has only the lines. If that becomes a
 need, the proposal is JSON Schema, which fits JSON lines:
 
+- **Written in YAML:** JSON Schema in a YAML file, `collectors/schemas/<table>.schema.yaml`
+  next to the collector, readable and with comments.
 - **One schema per table and version,** describing the object in `json`, with the time field
   and what the fields mean.
 - **Shipped as rows of their own** (`table` `schema`), by an `exec` collector that reads the
   schema files at each start. They travel with the data, under the same credential and key
-  layout, with no other kind of object in the bucket.
+  layout, with no other kind of object in the bucket. The row carries the schema as JSON, so
+  that readers need no YAML parser: macOS has no YAML tool of its own, so the collector's
+  command would be a small Go program, as `dev-feed-git` is.
 - **Explore would make a table's view from its newest schema** rather than from a hand-written
   SQL file.
 
-Not decided.
+Settled: YAML. The rest is not decided.
 
 ## The build
 
