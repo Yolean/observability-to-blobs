@@ -163,9 +163,11 @@ INIT=$TMP/init.sql
 cat >"$INIT" <<SQL
 .output /dev/null
 INSTALL httpfs; LOAD httpfs; SET TimeZone='UTC';
-SET s3_region='us-east-1'; SET s3_endpoint='127.0.0.1:$LOCAL_PORT';
-SET s3_access_key_id='demoaccess'; SET s3_secret_access_key='demosecret';
-SET s3_use_ssl=false; SET s3_url_style='path';
+-- a secret scoped to the bucket, which wins over any broader one this
+-- machine keeps (a persistent secret for s3:// would otherwise be used)
+CREATE OR REPLACE SECRET host_itest (TYPE s3, KEY_ID 'demoaccess', SECRET 'demosecret',
+  REGION 'us-east-1', ENDPOINT '127.0.0.1:$LOCAL_PORT', USE_SSL false, URL_STYLE 'path',
+  SCOPE 's3://$BUCKET');
 SET VARIABLE raw_files = 's3://$BUCKET/$KEY_ROOT/$CLUSTER/*/*/*/*.jsonl.zst';
 .read $PWD/compactor/sql/raw.sql
 .read $PWD/compactor/sql/tables.sql
