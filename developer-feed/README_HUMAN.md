@@ -74,6 +74,13 @@ developer-feed/macos/build.sh && developer-feed/macos/install.sh
 
 Again after adding a category: it ships only what is new.
 
+Old sessions from a backup, as a one-off: unpack it outside `~/Documents`, `~/Desktop` and `~/Downloads`, then:
+
+```sh
+developer-feed/backfill/check-claude-sessions.sh <unpacked dir>                  # prints the --home to use
+~/.local/opt/observability-host/bin/dev-feed-backfill --home <home> --ship
+```
+
 ## Explore
 
 ```sh

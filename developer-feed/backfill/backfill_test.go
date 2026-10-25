@@ -301,3 +301,41 @@ func TestObjects(t *testing.T) {
 		t.Fatalf("objects\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
+
+// A backup's sessions, with --home: shipped from there, with a state of
+// their own, and the home's own state as it was.
+func TestOtherHome(t *testing.T) {
+	f := newFixture(t)
+	f.write(".claude/projects/p/"+session+".jsonl", line("own", "2026-10-20T10:00:00Z"))
+	f.ship("claude-transcript")
+	own, err := os.ReadFile(filepath.Join(f.s.state, "backfill", "claude-transcript.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	backup := filepath.Join(t.TempDir(), "unpacked", "Users", "dev")
+	p := filepath.Join(backup, ".claude", "projects", "-Users-dev-old", "33333333-3333-4333-8333-333333333333.jsonl")
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(line("old", "2026-08-01T09:00:00Z")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	home := f.s
+	f.s.home, f.s.otherHome = backup, true
+	rows := f.ship(strings.Join(homeCategories, ","))
+	f.s = home
+	if got := strings.Join(messages(rows), ","); got != "old" {
+		t.Fatalf("backup: %s, want its session only", got)
+	}
+	if rows[0]["path"] != p || rows[0]["project"] != "-Users-dev-old" || rows[0]["session_id"] != "33333333-3333-4333-8333-333333333333" {
+		t.Errorf("row %v", rows[0])
+	}
+	after, _ := os.ReadFile(filepath.Join(f.s.state, "backfill", "claude-transcript.json"))
+	if string(after) != string(own) {
+		t.Errorf("the home's own state changed:\n%s\nwas\n%s", after, own)
+	}
+	if again := f.ship("claude-transcript"); len(again) != 0 {
+		t.Errorf("the home's own again: %v", messages(again))
+	}
+}

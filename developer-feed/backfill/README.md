@@ -16,6 +16,33 @@ config's `credential_process`, or `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY
 only. `dev-feed-git` and `dev-feed-cmux` must be next to it or on `PATH`, and `sqlite3` on
 `PATH`.
 
+## Sessions from a backup
+
+`--home <dir>` reads the files under `<dir>` rather than the home directory: Claude Code
+sessions kept elsewhere, such as a backup that will never be resumed.
+
+- **Layout:** they must be where they were under the home, as
+  `<dir>/.claude/projects/<project>/<session>.jsonl` with subagents in
+  `<session>/subagents/`. A tarball of `~/.claude/projects/...` made with absolute paths
+  unpacks so: `<dir>` is the unpacked `Users/<you>`.
+- **Categories:** `claude-transcript` and `claude-subagent` unless `--category` says
+  otherwise. A backup's prompt history and memories would mostly ship the home's own lines
+  and files again, under other paths. `git` and `cmux` are refused.
+- **State:** its own, in `backfill/homes/<dir with - for />/`, so the home's own state is
+  untouched. A second run over the same directory ships only what is new there.
+- **Rows:** `path` is the file's path under `<dir>`. `project` and `session_id` come from it as
+  usual, and the lines are verbatim.
+
+`check-claude-sessions.sh <dir>` checks first that what is there is Claude Code's. It checks
+every `.jsonl` under `<dir>`:
+- it is in that layout;
+- its lines are JSON objects with a `type`;
+- it has user and assistant entries, each with a `uuid`, a `timestamp` and the Claude Code
+  `version`;
+- every `sessionId` in it is the session's.
+
+It prints each session's span, version, cwd and title, and the `--home` to backfill with.
+
 ## Categories
 
 | Category | Its collector | Reads | Time of a line |

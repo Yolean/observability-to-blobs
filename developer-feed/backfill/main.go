@@ -6,6 +6,8 @@
 //	dev-feed-backfill [--category <a,b>] --ship    ship it
 //	dev-feed-backfill [--category <a,b>] --out <dir>
 //	                                               write the objects there
+//	dev-feed-backfill --home <dir> [--ship]        files from elsewhere: a
+//	                                               backup's <dir>/.claude/...
 //
 // Each category keeps its own state, in the backfill/ directory of the
 // agent's state, so a run takes on a category the feed has never had
@@ -55,6 +57,8 @@ type settings struct {
 	bucket, endpoint, region string
 	root, cluster, node      string
 	bin                      string // where dev-feed-git and dev-feed-cmux are
+	// home is not the user's own: a backup's, with a state of its own
+	otherHome bool
 }
 
 func loadSettings() settings {
@@ -88,9 +92,12 @@ func loadSettings() settings {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprint(w, `usage: dev-feed-backfill [--category <a,b>] [--ship | --out <dir>]
+	fmt.Fprint(w, `usage: dev-feed-backfill [--home <dir>] [--category <a,b>] [--ship | --out <dir>]
 
 Without --ship or --out it says what it would ship, and ships nothing.
+--home reads the files under <dir> rather than the home directory, such as
+a backup's sessions in <dir>/.claude/projects/, with a state of its own;
+its categories are `+strings.Join(homeCategories, " and ")+` unless --category says otherwise.
 Categories:
 `)
 	for _, c := range categories {
@@ -105,6 +112,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	ship := fs.Bool("ship", false, "upload the objects, then record what was shipped")
 	out := fs.String("out", "", "write the objects under this directory, and record nothing")
 	only := fs.String("category", "", "these categories only, comma-separated")
+	home := fs.String("home", "", "read the files under this directory instead of the home directory")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -112,12 +120,33 @@ func run(args []string, stdout, stderr io.Writer) int {
 		usage(stderr)
 		return 2
 	}
+	if *home != "" && *only == "" {
+		*only = strings.Join(homeCategories, ",")
+	}
 	chosen, err := choose(*only)
 	if err != nil {
 		fmt.Fprintln(stderr, "dev-feed-backfill:", err)
 		return 2
 	}
 	s := loadSettings()
+	if *home != "" {
+		for _, c := range chosen {
+			if c.name == "git" || c.name == "cmux" {
+				fmt.Fprintf(stderr, "dev-feed-backfill: --home reads files only, not %s\n", c.name)
+				return 2
+			}
+		}
+		abs, err := filepath.Abs(*home)
+		if err != nil {
+			fmt.Fprintln(stderr, "dev-feed-backfill:", err)
+			return 2
+		}
+		if fi, err := os.Stat(abs); err != nil || !fi.IsDir() {
+			fmt.Fprintf(stderr, "dev-feed-backfill: --home %s is no directory\n", *home)
+			return 2
+		}
+		s.home, s.otherHome = abs, true
+	}
 	if s.cluster == "" || s.node == "" {
 		fmt.Fprintln(stderr, "dev-feed-backfill: CLUSTER_NAME and NODE_NAME are not set, in the environment or the config (developer-feed/macos/install.sh)")
 		return 2
@@ -141,6 +170,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	return 0
 }
+
+// homeCategories are --home's: sessions are what a backup holds that the
+// feed can't have. A backup's prompt history and memories would mostly be
+// the lines and files of the home's own, shipped again under other paths.
+var homeCategories = []string{"claude-transcript", "claude-subagent"}
 
 func choose(names string) ([]category, error) {
 	if names == "" {
@@ -214,6 +248,11 @@ func (b *backfill) emit(cat string, ts time.Time, row map[string]any) error {
 
 func backfillRun(s settings, cats []category, dest *bucket, outDir string, now time.Time, w io.Writer) error {
 	dir := filepath.Join(s.state, "backfill")
+	if s.otherHome {
+		// a state per directory: a category's state lists the files it has
+		// seen, and the home's own would lose theirs to the backup's
+		dir = filepath.Join(dir, "homes", strings.ReplaceAll(strings.Trim(s.home, "/"), "/", "-"))
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
