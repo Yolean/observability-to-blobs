@@ -237,8 +237,9 @@ The collectors have two tests:
   - the rows in the bucket, read through `compactor/sql/raw.sql`;
   - that `--no-collector.heartbeat` stops the launcher with exit 2 before fluent-bit starts.
 
-  Run it with `TARBALL=target/host/<tarball> itest/host-docker/run.sh`. The itest's host phase
-  passes the defaults through fluent-bit's dry run and runs them as the unit.
+  Run it with `TARBALL=target/host/<tarball> itest/host-docker/run.sh`. CI runs it on amd64 and
+  arm64 (`.github/workflows/ci.yaml`, `host-docker`). The itest's host phase passes the defaults
+  through fluent-bit's dry run and runs them as the unit.
 
 ## Metrics
 
