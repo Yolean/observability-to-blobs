@@ -11,7 +11,7 @@ or delete. The two run side by side on a node and share no credential.
 | Source | How | Notes |
 |---|---|---|
 | The journal | `systemd` input, every unit, with a denylist | A denylist fails toward collecting too much: an allowlist of units misses messages logged by PID 1 about a unit, such as a stop. Defaults deny nothing; `HOST_JOURNAL_DENY`, a regular expression on a row's `unit`, names noisy units to leave out. |
-| The audit log, `/var/log/audit/audit.log` | `tail`, following the file by inode across rotation, never the numbered files | auditd's `audit(timestamp:serial)` identifies each record. Reading it needs auditd's `log_group` set to a group the service is in (`adm`). |
+| The audit log, `/var/log/audit/audit.log` | `tail`, following the file by inode across rotation, never the numbered files | auditd's `audit(timestamp:serial)` identifies each record. Reading it needs auditd's `log_group` set to a group the service is in (`adm`), and auditd restarted. A pristine Ubuntu 24.04 has no auditd: `apt-get update`, then `apt-get install auditd`. |
 | Package changes: `/var/log/dpkg.log`, `/var/log/apt/history.log`, `/var/log/unattended-upgrades/*.log` | `tail` | |
 | Further files, configured | `tail`, `HOST_EXTRA_FILES` | Comma-separated paths or globs, for example a Kubernetes API server audit log written on the host. |
 | A heartbeat | every 60 s, a metrics line with the boot id and a counter | The counter is kept in the state directory: it continues across restarts of the service and starts again at a new boot id. A missing counter value or a silence longer than the interval shows a gap at the receiver. |
@@ -87,6 +87,8 @@ it is created, which is one more reason for `use_put_object`.
   are dropped.
 - A shutdown flushes what was read (`grace` 10 s); what the bucket does not take stays on disk for
   the next start.
+- fluent-bit warns at every start: "Please use 'store_dir_limit_size' with s3 output instead of
+  'storage.total_limit_size'". Both are set on purpose, one for each buffer.
 
 ## Packaging
 
@@ -122,6 +124,39 @@ it is created, which is one more reason for `use_put_object`.
   extracts it to the prefix, creates the user, writes the environment file and the credential, links
   the unit and keeps the installed files from drifting. The repository does not install anything on
   a host by itself; `itest/host/run.sh` shows the steps.
+- The files of an install, all `root:root`. The service runs as `observability-host`, so it must be
+  able to read every one of them but the credential, which systemd hands it:
+
+  | path | mode |
+  |---|---|
+  | `/opt/observability-host/` | as extracted (`tar --no-same-owner`) |
+  | `/etc/observability-host/` | `0755` |
+  | `/etc/observability-host/env`, `args` | `0644`: no secret is in them |
+  | `/etc/observability-host/collectors/` (Your own collectors) | `0755`, its files `0644` |
+  | `/etc/observability-host/s3-credentials` | `0600` |
+
+### Upgrading
+
+The state directory carries over: positions, the journal cursor, the heartbeat's counter and the
+buffers. An upgrade resumes where the previous version stopped:
+
+```sh
+systemctl stop observability-host
+mkdir /opt/observability-host.new
+tar xzf observability-to-blobs-host-<version>-linux-<arch>.tar.gz -C /opt/observability-host.new --no-same-owner
+rm -rf /opt/observability-host && mv /opt/observability-host.new /opt/observability-host
+install -m 0644 /opt/observability-host/lib/systemd/system/observability-host.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl start observability-host
+```
+
+- **A new prefix, not one extracted over the old:** a file that a version no longer has, such as
+  a collector, would stay and still be read.
+- **The unit again, every time:** a unit the release changed is otherwise left as it was. From
+  0.2.1, the first release, this is required. Its unit runs `fluent-bit -c etc/host.yaml`, and
+  the new `etc/host.yaml` alone has no inputs: the agent would run and ship nothing. A unit linked
+  with `systemctl link /opt/observability-host/lib/systemd/system/observability-host.service`
+  follows the prefix, and needs only the `daemon-reload`.
 
 ## The systemd unit
 
@@ -148,7 +183,8 @@ it is created, which is one more reason for `use_put_object`.
 
 ### Settings
 
-All are optional but the first four; the defaults are in `etc/host.yaml` and `etc/collectors.d/`.
+`CLUSTER_NAME`, `S3_BUCKET` and `S3_ENDPOINT` are required. The rest are optional; the defaults
+are in `etc/host.yaml` and `etc/collectors.d/`.
 
 | setting | default | |
 |---|---|---|
@@ -164,6 +200,7 @@ All are optional but the first four; the defaults are in `etc/host.yaml` and `et
 | `HOST_BUFFER_LIMIT` | `4G` | each of the output's two on-disk buffers |
 | `HOST_TLS_CA_FILE` | `/etc/ssl/certs/ca-certificates.crt` | the CA bundle the S3 output trusts; `/etc/ssl/cert.pem` on macOS |
 | `HOST_LOG_LEVEL` | `info` | fluent-bit's log level |
+| `HOST_COLLECTOR_DIRS` | none | more directories of collectors, colon-separated (Collectors) |
 
 ### Collectors
 
@@ -249,6 +286,14 @@ name (`compactor/guard.go`). So a collector:
 - writes `logs` rows, with `stream`, `unit` and `message`, `cluster` and `node`, or `metrics`
   rows as the heartbeat's;
 - keeps every other field out with a `record_modifier` allowlist;
+- keeps a source's line whole in `message`, with no `parser`. A parser lifts the line's fields
+  out of `log`, the allowlist then drops them, and the row arrives without a `message`: the guard
+  lets it through, and the content is lost. Readers take fields out of `message`, for example
+  `json_extract_string(message, '$.event')`;
+- sets a tail's `buffer_max_size` above the longest line it will see, with `skip_long_lines: on`.
+  The default is 32 KB: a longer line is then dropped with a warning, and without
+  `skip_long_lines` tail gives up on the whole file ("lines are too long. Skipping file.") and
+  later lines never arrive;
 - keeps its state, such as a tail's `db`, in a file of its own under `${HOST_STATE_DIR}`;
 - buffers on disk: `storage.type: filesystem`.
 
@@ -273,6 +318,7 @@ pipeline:
       db: ${HOST_STATE_DIR}/myapp.db
       db.sync: full
       db.locking: true
+      # above the longest line, or it is dropped (the default is 32k)
       buffer_max_size: 8M
       skip_long_lines: on
       storage.type: filesystem
@@ -293,10 +339,26 @@ pipeline:
 It runs once `myapp` is in `/etc/observability-host/collectors/collectors.defaults`, or with
 `--collector.myapp` in the args file.
 
+**Files already in `HOST_EXTRA_FILES` stay there.** A collector of their own has a `db` of its
+own and reads them from their start, so every line would be shipped again. File rows have no
+identity to drop the second by, and their `ts` is the time they were read. Moving them anyway
+takes `read_from_head: false` in the new collector, and an application that does not write
+between the stop of the agent and its start: the new collector starts at the files' ends.
+
 **What a collector can read.** The unit runs fluent-bit as `observability-host`, in the groups
 `systemd-journal` and `adm`. `ProtectSystem=strict` leaves it nothing to write but the state
-directory, and `ProtectHome=yes` hides `/home`, `/root` and `/run/user`. A collector that needs
-more gets it from a drop-in, which adds to the unit's lists:
+directory, and `ProtectHome=yes` hides `/home`, `/root` and `/run/user`.
+
+- A file needs to be readable by that user or one of its groups, and every directory above it
+  traversable. Group `adm` and mode `0640` are enough, without a restart: the next scan finds
+  it.
+- Rotation must keep the group and the mode, e.g. logrotate's `create 0640 myapp adm`.
+- A file the agent cannot read does not stop the unit. fluent-bit logs that it cannot open it,
+  at every scan (`refresh_interval`, 60 s by default), and ships nothing from it. Look in the
+  unit's journal after adding a source.
+
+A collector that needs more gets it from a drop-in, which adds to the unit's lists, and a
+restart:
 
 ```
 # systemctl edit observability-host
