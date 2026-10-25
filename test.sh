@@ -51,6 +51,8 @@ cd "$(dirname "$0")"
 CONTEXT=${CONTEXT:-node-agent}
 IMAGE=node-agent:itest
 BUCKET=node-agent
+# the multi-cluster phase's (further down), on the same gateway
+MULTI_BUCKET=node-agent-multi
 CLUSTER=itest
 # the second compactor, in spool mode, and the stock Fluent Bit that
 # uploads to its put endpoint (itest/compactor-put)
@@ -747,7 +749,10 @@ INSTALL httpfs; LOAD httpfs; SET TimeZone='UTC';
 -- s3:// on this machine would otherwise win over SET s3_*
 CREATE OR REPLACE SECRET node_itest (TYPE s3, KEY_ID 'demoaccess', SECRET 'demosecret',
   REGION 'us-east-1', ENDPOINT '127.0.0.1:$S3_PORT', USE_SSL false, URL_STYLE 'path',
-  SCOPE 's3://$BUCKET');
+  SCOPE 's3://$BUCKET/');
+CREATE OR REPLACE SECRET node_itest_multi (TYPE s3, KEY_ID 'demoaccess', SECRET 'demosecret',
+  REGION 'us-east-1', ENDPOINT '127.0.0.1:$S3_PORT', USE_SSL false, URL_STYLE 'path',
+  SCOPE 's3://$MULTI_BUCKET/');
 SQL
 # the compactor's parquet keys; 0600 like the S3 one (umask above)
 for f in "$PARQUET_KEYS"/*; do
@@ -1754,7 +1759,6 @@ phase "assert: one compactor for every cluster of a bucket (itest/compactor-mult
 # $CLUSTER and $CLUSTER-copy: the compactor without CLUSTER_NAME finds both
 # and writes each the same as the other, as two compactors of one cluster
 # each would.
-MULTI_BUCKET=node-agent-multi
 $KUBECTL -n observability-multi scale deployment/blobs-compactor --replicas=0 >/dev/null 2>&1 || true
 $KUBECTL delete pod copy-multi --ignore-not-found >/dev/null 2>&1
 $KUBECTL run copy-multi --restart=Never --image=amazon/aws-cli:2.22.35 \
