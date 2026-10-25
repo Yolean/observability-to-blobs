@@ -1,0 +1,45 @@
+# An example of your own source (developer-feed/macos/README.md, Your own
+# sources): a file of JSON lines that something of yours appends to,
+# ~/worklog.jsonl, shipped a line a row with the line verbatim in json.
+# Copy this directory to ~/.config/observability-host/v1/collectors/ and
+# change the name, the path and the table.
+#
+# The collector's name is the file's name, worklog. Live only, as the
+# feed's tails: lines already in the file at the agent's first start are
+# not shipped; read_from_head: on ships them, once.
+pipeline:
+  inputs:
+    - name: tail
+      alias: worklog
+      # blob: the tag the agent's S3 output takes
+      tag: blob
+      path: ${HOME}/worklog.jsonl
+      path_key: path
+      # where tail keeps its position: a file of its own in the agent's state
+      db: ${HOST_STATE_DIR}/worklog.db
+      db.sync: full
+      db.locking: true
+      refresh_interval: 5
+      # the longest line it ships whole; a longer one is skipped
+      buffer_max_size: 1M
+      skip_long_lines: on
+      # buffered on disk while the bucket is out of reach
+      storage.type: filesystem
+      processors:
+        logs:
+          - name: modify
+            add:
+              # table: the row's kind in the feed, a name of your own
+              - table worklog
+              - cluster ${CLUSTER_NAME}
+              - node ${NODE_NAME}
+            rename:
+              - log json
+          # these fields only: a line is shipped as written, in json
+          - name: record_modifier
+            allowlist_key:
+              - table
+              - cluster
+              - node
+              - path
+              - json

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Explore the feed in DuckDB (developer-feed/explore/README.md): ingests the
 # bucket's objects from <since> back, then again every <every> minutes,
-# into a database in the user-level state, with the schemas of sql/, and
-# serves it with quack on localhost only, for duckdb -ui and other clients.
+# into a database in the user-level state, with the schemas of sql/ and then
+# the config's explore/*.sql, and serves it with quack on localhost only,
+# for duckdb -ui and other clients.
 #
 #   developer-feed/explore/explore.sh [<since>] [--every <minutes>] [--ttl <ttl>]
 #                                     [--port <port>] [--clusters <a,b>]
@@ -175,6 +176,12 @@ feed() {
   for f in "$here"/sql/*.sql; do
     cat "$f"
     printf "INSERT OR REPLACE INTO ingest.migrations VALUES (%s, now());\n" "$(q "$(basename "$f")")"
+  done
+  # the developer's own schemas, after the feed's (macos/README.md, Your own sources)
+  for f in "$OBSERVABILITY_HOST_CONFIG"/explore/*.sql; do
+    [ -f "$f" ] || continue
+    cat "$f"
+    printf "INSERT OR REPLACE INTO ingest.migrations VALUES (%s, now());\n" "$(q "config/$(basename "$f")")"
   done
   printf "CALL quack_serve(%s, token = %s);\n" "$(q "quack:localhost:$port")" "$(q "$token")"
   sleep 3

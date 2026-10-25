@@ -26,6 +26,11 @@
 # hammerspoon: a line in the activity log before the start, which must not
 # ship, and one after, which must.
 #
+# your own source: developer-feed/examples/collectors/ as a second
+# directory of collectors, as the config's collectors/ is on a Mac; its
+# worklog, live only like the others, and its explore schema,
+# developer-feed/examples/explore/.
+#
 # cmux: a journal with cmux's schema, with rows before the start, which must
 # not ship, and after dev-feed-cmux's first run, which must, once each.
 #
@@ -117,13 +122,13 @@ printf '[default]\naws_access_key_id = feedagent\naws_secret_access_key = %s\n' 
 # own directory, and the heartbeat: the host's own defaults are turned off
 printf -- '--no-collector.journal --no-collector.files\n--no-collector.node --no-collector.self\n' >"$TMP/args"
 docker run -d --name "$AGENT" --network "$NET" \
-  -v "$PWD/$TARBALL:/tmp/host.tar.gz:ro" -v "$PWD/developer-feed/collectors:/opt/developer-feed/collectors:ro" \
+  -v "$PWD/$TARBALL:/tmp/host.tar.gz:ro" -v "$PWD/developer-feed/collectors:/opt/developer-feed/collectors:ro" -v "$PWD/developer-feed/examples/collectors:/opt/developer-feed/own:ro" \
   -v "$TMP/s3-credentials:/etc/observability-host/s3-credentials:ro" -v "$TMP/args:/etc/observability-host/args:ro" \
   -v "$TMP/bin:/opt/developer-feed/built:ro" -v "$PWD/developer-feed/bin:/opt/developer-feed/bin:ro" \
   -e PATH=/opt/developer-feed/built:/opt/developer-feed/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   -e DEV_FEED_GIT_INTERVAL=3 -e DEV_FEED_CMUX_INTERVAL=3 -e DEV_FEED_MEMORY_INTERVAL=3 -e DEV_FEED_CMUX_JOURNAL=/root/cmux/journal.sqlite3 \
   -e CLUSTER_NAME=$CLUSTER -e NODE_NAME=$NODE -e "S3_BUCKET=$BUCKET" -e "S3_ENDPOINT=http://$GW:7070" -e S3_TLS=off \
-  -e KEY_ROOT=$KEY_ROOT -e UPLOAD_TIMEOUT=5s -e HOST_COLLECTOR_DIRS=/opt/developer-feed/collectors \
+  -e KEY_ROOT=$KEY_ROOT -e UPLOAD_TIMEOUT=5s -e HOST_COLLECTOR_DIRS=/opt/developer-feed/collectors:/opt/developer-feed/own \
   -e AWS_SHARED_CREDENTIALS_FILE=/etc/observability-host/s3-credentials \
   -e HEARTBEAT_COMMAND=/opt/observability-host/bin/observability-host-heartbeat \
   -e "S1=$S1" -e "S2=$S2" -e "PROJ=$PROJ" -e "RUN=$RUN" \
@@ -131,6 +136,7 @@ docker run -d --name "$AGENT" --network "$NET" \
     set -e
     mkdir -p /opt/observability-host "$HOME/.claude/projects/$PROJ/memory" "$HOME/Reposoft/productivity-logs"
     echo "{\"ts\":\"2026-10-24T18:00:00.000Z\",\"event\":\"window_focused\",\"app\":\"before-start-$RUN\"}" >"$HOME/Reposoft/productivity-logs/hammerspoon-activity-log.jsonl"
+    echo "{\"at\":\"2026-10-24T17:00:00Z\",\"text\":\"worklog-before-start-$RUN\"}" >"$HOME/worklog.jsonl"
     printf -- "---\nname: kept\n---\nmemory-before-start-$RUN\n" >"$HOME/.claude/projects/$PROJ/memory/kept.md"
     echo "memory-to-delete-$RUN" >"$HOME/.claude/projects/$PROJ/memory/gone.md"
     tar xzf /tmp/host.tar.gz -C /opt/observability-host
@@ -156,8 +162,8 @@ docker run -d --name "$AGENT" --network "$NET" \
     while :; do date -u +%s >>/var/lib/observability-host/agent-starts
       /opt/observability-host/bin/observability-host-launch || true; sleep 1; done' >/dev/null
 in_agent() { docker exec "$AGENT" bash -c "$1"; }
-for _ in $(seq 30); do docker logs "$AGENT" 2>&1 | grep -q 'collectors: claude claude-memory cmux git hammerspoon heartbeat$' && break; sleep 1; done
-check "the feed's directory's defaults, claude, claude-memory, cmux, git and hammerspoon, run beside the heartbeat" sh -c "docker logs $AGENT 2>&1 | grep -q 'collectors: claude claude-memory cmux git hammerspoon heartbeat\$'"
+for _ in $(seq 30); do docker logs "$AGENT" 2>&1 | grep -q 'collectors: claude claude-memory cmux git hammerspoon heartbeat worklog$' && break; sleep 1; done
+check "the feed's directory's defaults, claude, claude-memory, cmux, git and hammerspoon, and the second directory's worklog run beside the heartbeat" sh -c "docker logs $AGENT 2>&1 | grep -q 'collectors: claude claude-memory cmux git hammerspoon heartbeat worklog\$'"
 sleep 6
 for _ in $(seq 20); do in_agent 'ls /var/lib/observability-host/git/*.json' >/dev/null 2>&1 && break; sleep 1; done
 check "dev-feed-git's first run recorded the repository" in_agent 'ls /var/lib/observability-host/git/*.json'
@@ -174,6 +180,7 @@ in_agent 'd=$HOME/.claude/projects/$PROJ/memory
   rm "$d/gone.md"
   echo "memory-new-$RUN" >"$d/new.md"'
 
+in_agent 'echo "{\"at\":\"2026-10-24T18:01:00Z\",\"text\":\"worklog-after-start-$RUN\"}" >>"$HOME/worklog.jsonl"'
 in_agent 'echo "{\"ts\":\"2026-10-24T18:01:00.123Z\",\"event\":\"window_focused\",\"app\":\"Code\",\"bundle_id\":\"com.microsoft.VSCode\",\"title\":\"after-start-$RUN\"}" >>"$HOME/Reposoft/productivity-logs/hammerspoon-activity-log.jsonl"'
 
 phase "after the first start: a commit pushed and fetched"
@@ -204,8 +211,8 @@ sleep 12
 phase "restart: fluent-bit killed, lines written while it is down, then it starts again"
 in_agent 'pkill -x fluent-bit'
 in_agent 'echo "{\"type\":\"user\",\"sessionId\":\"$S1\",\"m\":\"during-restart-$RUN\"}" >>"$HOME/.claude/projects/$PROJ/$S1.jsonl"'
-for _ in $(seq 20); do [ "$(docker logs "$AGENT" 2>&1 | grep -c 'collectors: claude claude-memory cmux git hammerspoon heartbeat$')" -ge 2 ] && break; sleep 1; done
-check "the launcher started fluent-bit again" sh -c "[ \$(docker logs $AGENT 2>&1 | grep -c 'collectors: claude claude-memory cmux git hammerspoon heartbeat\$') -ge 2 ]"
+for _ in $(seq 20); do [ "$(docker logs "$AGENT" 2>&1 | grep -c 'collectors: claude claude-memory cmux git hammerspoon heartbeat worklog$')" -ge 2 ] && break; sleep 1; done
+check "the launcher started fluent-bit again" sh -c "[ \$(docker logs $AGENT 2>&1 | grep -c 'collectors: claude claude-memory cmux git hammerspoon heartbeat worklog\$') -ge 2 ]"
 in_agent 'echo "{\"type\":\"user\",\"sessionId\":\"$S1\",\"m\":\"after-restart-$RUN\"}" >>"$HOME/.claude/projects/$PROJ/$S1.jsonl"'
 sleep 15
 
@@ -268,6 +275,9 @@ assert "memory: a file that appeared after the start" \
 H="FROM feed WHERE \"table\" = 'hammerspoon'"
 assert "hammerspoon: the line logged after the start, verbatim, and not the one before" \
   "SELECT count(*) = 1 AND bool_and(json_extract_string(json, '\$.bundle_id') = 'com.microsoft.VSCode' AND path LIKE '%/hammerspoon-activity-log.jsonl') $H AND json LIKE '%after-start-$RUN%' AND (SELECT count(*) $H AND json LIKE '%before-start-$RUN%') = 0"
+W="FROM feed WHERE \"table\" = 'worklog'"
+assert "your own source: the worklog line after the start, verbatim, with the agent's fields, and not the one before" \
+  "SELECT count(*) = 1 AND bool_and(json_extract_string(json, '\$.text') = 'worklog-after-start-$RUN' AND path = '/root/worklog.jsonl' AND cluster = '$CLUSTER' AND node = '$NODE' AND ts IS NOT NULL) $W AND (SELECT count(*) $W AND json LIKE '%worklog-before-start-$RUN%') = 0"
 X="FROM feed WHERE \"table\" = 'cmux'"
 assert "cmux: the journal's rows from after the first run, once each, in order, with their workspace and pane" \
   "SELECT count(*) = 2 AND list(event_id ORDER BY sequence) = ['after-1-$RUN', 'after-2-$RUN'] AND list(surface_id ORDER BY sequence) = ['sf-1', 'sf-2'] AND bool_and(session_id = '$S1' AND workspace_id = 'ws-1') $X"
@@ -331,6 +341,12 @@ got=$(duckdb -noheader -csv -c ".read $TMP/init.sql" -c ".read $PWD/developer-fe
     AND (SELECT count(*) = 1 FROM ingest.rows WHERE line->>'json' LIKE '%\"after-start-$RUN\"%' AND kind = 'transcript')
     AND (SELECT count(*) = 2 FROM ingest.rows WHERE \"table\" = 'claude' AND kind = 'memory' AND line->>'path' LIKE '%/kept.md')" 2>&1) || true
 if [ "$got" = true ]; then pass "explore: a line shipped by both is there once, and memory versions are kept"; else failed "explore: a line shipped by both is there once (got: $got)"; fi
+
+# your own schema, after explore's
+got=$(duckdb -noheader -csv -c ".read $TMP/init.sql" -c ".read $PWD/developer-feed/explore/sql/001-ingest.sql" -c ".read $PWD/developer-feed/examples/explore/worklog.sql" -c ".output /dev/null" \
+  -c "INSERT INTO ingest.lines SELECT filename, json FROM read_json_objects('s3://$BUCKET/$KEY_ROOT/$CLUSTER/*/*/*/*.jsonl.zst', format='newline_delimited', compression='zstd', filename=true)" \
+  -c ".output" -c "SELECT list(text) = ['worklog-after-start-$RUN'] AND bool_and(occurred_at = TIMESTAMPTZ '2026-10-24 18:01:00+00') FROM worklog.entries" 2>&1) || true
+if [ "$got" = true ]; then pass "explore: your own schema's view of your own source"; else failed "explore: your own schema's view (got: $got)"; fi
 
 if [ "$FAILED" -gt 0 ]; then echo "--- agent"; docker logs --tail 30 "$AGENT" 2>&1 | grep -v 'unattended-upgrades' || true; fi
 echo

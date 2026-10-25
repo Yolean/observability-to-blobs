@@ -104,6 +104,10 @@ large `idle_s` on the next sample is time away, not focus. DuckDB does not `sum(
 `repo` is the repository's top level. A Claude `cwd` or `project_path` is in a repository when
 it starts with `repo`.
 
+**The developer's own sources:** schemas not described here come from SQL files of the
+developer's, listed in `ingest.migrations` as `config/<file>`. Read those files, in
+`~/.config/observability-host/v1/explore/`: their comments say what the rows mean.
+
 **`host`:** `host.heartbeats`, the agent's own pulse once a minute. A gap means the machine was
 asleep or the agent was stopped. Use it to tell "no activity" from "no data".
 

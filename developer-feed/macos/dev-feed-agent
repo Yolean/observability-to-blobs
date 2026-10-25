@@ -21,6 +21,10 @@ export STATE_DIRECTORY="$OBSERVABILITY_HOST_STATE"
 export HOST_ETC="$prefix/etc/host"
 export HOST_ARGS_FILE="$OBSERVABILITY_HOST_CONFIG/args"
 export HOST_COLLECTOR_DIRS="$prefix/etc/developer-feed"
+# the developer's own sources, if any (README.md, Your own sources)
+if [ -d "$OBSERVABILITY_HOST_CONFIG/collectors/collectors.d" ]; then
+  HOST_COLLECTOR_DIRS="$HOST_COLLECTOR_DIRS:$OBSERVABILITY_HOST_CONFIG/collectors"
+fi
 export HEARTBEAT_COMMAND="$prefix/bin/observability-host-heartbeat"
 export PATH="$prefix/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 # the credential: credential_process in this file, and no shared
@@ -30,8 +34,11 @@ export AWS_SHARED_CREDENTIALS_FILE="$OBSERVABILITY_HOST_CONFIG/no-shared-credent
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE
 
 # each start, for the backfill to tell which files the agent found at a
-# start, and so began at their end (developer-feed/backfill/README.md)
-mkdir -p "$STATE_DIRECTORY"
-date -u +%s >>"$STATE_DIRECTORY/agent-starts"
+# start, and so began at their end (developer-feed/backfill/README.md);
+# --list and --print are no start
+if [ $# -eq 0 ]; then
+  mkdir -p "$STATE_DIRECTORY"
+  date -u +%s >>"$STATE_DIRECTORY/agent-starts"
+fi
 
 exec "$prefix/bin/observability-host-launch" "$@"

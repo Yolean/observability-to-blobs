@@ -77,6 +77,101 @@ tail -f ~/.local/state/observability-host/v1/log/agent.log
 **Stopping:** `uninstall.sh` stops the agent and keeps everything else. `uninstall.sh --purge`
 also removes the program, the config, the state and the Keychain item.
 
+## Your own sources
+
+Anything fluent-bit can read can go to the bucket beside the feed. You add it in the config: a
+collector in standard fluent-bit configuration and, for explore, a SQL file.
+
+```
+~/.config/observability-host/v1/
+  collectors/
+    collectors.d/<name>.yaml   a collector: fluent-bit YAML, its inputs with their processors
+    collectors.defaults        the names that run by default, a line each
+    parts.d/<part>.yaml        if needed: parsers and the like, which a collector names on a
+                               "# needs: <part>" line
+  explore/<file>.sql           your schemas in explore, applied after explore's own
+```
+
+`dev-feed-agent` adds `collectors/` to the launcher's collector directories when it has a
+`collectors.d/` (`HOST_COLLECTOR_DIRS`, `HOST_MODE.md`, Collectors). Its collectors are
+switched with the same flags as the feed's, in the config's `args`: `--collector.<name>` and
+`--no-collector.<name>`.
+
+[`../examples/`](../examples/) has one of each: `worklog`, a JSON-lines file of your own
+(`~/worklog.jsonl`), and its explore view. The feed's e2e runs them (`../itest/run.sh`).
+
+### A collector
+
+To start one from the example:
+
+1. Copy `developer-feed/examples/collectors/` to `~/.config/observability-host/v1/collectors/`.
+2. Rename `worklog` in the file's name, in `collectors.defaults`, and in the file's `alias`,
+   `path`, `db` and `table`.
+3. Check it with `~/.local/opt/observability-host/bin/dev-feed-agent --list`. `--print` shows
+   the whole configuration.
+4. Restart the agent: `launchctl kickstart -k gui/$(id -u)/com.yolean.observability-host`.
+
+What a collector must do:
+
+- **`tag: blob`:** the agent's S3 output takes that tag and no other.
+- **`table`, `cluster` and `node`,** added by a `modify` processor. `table` is a name of your
+  own, none of the feed's (`logs`, `metrics`, `claude`, `git`, `cmux`, `hammerspoon`). The
+  output adds `ts`, the time the agent read the line.
+- **The source's line whole in `json`** (`rename: log json`), and a `record_modifier`
+  allowlist of those fields. A parser that lifts the line's fields to the top level would mix
+  them with the feed's columns (`ts`, `kind`, `path`, `time`, ...), and the feed's
+  `sql/feed.sql` would read them as those.
+- **Its state in a file of its own under `${HOST_STATE_DIR}`:** a `tail`'s `db`, an `exec`
+  command's files.
+- **`storage.type: filesystem`,** so its lines wait on disk while the bucket is out of reach.
+
+Good to know:
+
+- **Live only, unless you say otherwise:** a `tail` starts at a file's end on the agent's first
+  start, and from the first line for files that appear later. `read_from_head: on` ships what
+  the file already holds, once. `dev-feed-backfill` knows only the feed's own categories.
+- **A name in one directory only:** none of the feed's collectors' names.
+- **`exec`** runs a command every `interval_sec` and ships each line it prints, as
+  `../collectors/collectors.d/cmux.yaml` does. Give the command's full path: the agent's `PATH`
+  is its own `bin/`, `/usr/bin`, `/bin`, `/usr/sbin` and `/sbin`.
+- **The agent runs as you,** and ships everything a collector reads. A path under
+  `~/Documents`, `~/Desktop`, `~/Downloads` or iCloud Drive makes macOS ask, naming
+  fluent-bit, and ask again for every new build.
+- **fluent-bit v5.1.2** refuses a list of more than 10 items in a processor
+  (`../collectors/collectors.d/git.yaml`).
+- **Whatever fluent-bit can read:** any of its inputs and processors works the same way, as in
+  [fluent-bit's documentation](https://docs.fluentbit.io/manual/pipeline/inputs).
+
+### Its schema in explore
+
+`explore.sh` applies `~/.config/observability-host/v1/explore/*.sql` after its own schemas, at
+every start, in name order. It lists them in `ingest.migrations` as `config/<file>`.
+[`../examples/explore/worklog.sql`](../examples/explore/worklog.sql) is the example:
+
+- **Repeatable:** `CREATE SCHEMA IF NOT EXISTS`, `CREATE OR REPLACE VIEW`.
+- **Read `ingest.rows`** where `"table"` is yours. It has each line once; `line` is the line as
+  JSON, and your source's own line is `line->>'json'`.
+- **Say in the file's comments what the rows mean.** An agent analyzing the feed reads them
+  (`../explore/ANALYZE.md`). A `COMMENT ON VIEW` does not reach a client over quack.
+
+Start `explore.sh` again to apply a new or changed file.
+
+### Not built: schemas with the data
+
+A source's schema is now in two files on one machine: the collector and the SQL. Another reader
+of the bucket, or the same developer on another machine, has only the lines. If that becomes a
+need, the proposal is JSON Schema, which fits JSON lines:
+
+- **One schema per table and version,** describing the object in `json`, with the time field
+  and what the fields mean.
+- **Shipped as rows of their own** (`table` `schema`), by an `exec` collector that reads the
+  schema files at each start. They travel with the data, under the same credential and key
+  layout, with no other kind of object in the bucket.
+- **Explore would make a table's view from its newest schema** rather than from a hand-written
+  SQL file.
+
+Not decided.
+
 ## The build
 
 `build.sh` builds the fork's fluent-bit natively: the Dockerfile's `FLB_VERSION`, the fork's

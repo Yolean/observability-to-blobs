@@ -37,6 +37,7 @@ All machines of one developer write to one bucket, in the host agent's key layou
 | [`git/`](git/) | `dev-feed-git`, the git collector's command |
 | [`bin/`](bin/) | `dev-feed-cmux`, the cmux collector's command |
 | [`backfill/`](backfill/) | `dev-feed-backfill`: the history from before the collectors ran, per category |
+| [`examples/`](examples/) | your own source: a collector in fluent-bit configuration and its explore schema, for the config (`macos/README.md`, Your own sources) |
 | [`briefs/`](briefs/) | briefs for a dedicated session: settled requirements apart from current scope and status |
 | [`sql/feed.sql`](sql/feed.sql) | the feed's line contract, for DuckDB |
 | [`itest/`](itest/) | the collectors end to end, in docker against versitygw |

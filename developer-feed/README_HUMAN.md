@@ -50,6 +50,18 @@ Lost machine: delete its parent token in the dashboard.
 
 Stop: `developer-feed/macos/uninstall.sh` (`--purge` removes everything).
 
+## Your own sources
+
+Per machine. Copy the example, then rename `worklog` in the files' names and contents:
+
+```sh
+cp -R developer-feed/examples/collectors ~/.config/observability-host/v1/collectors
+~/.local/opt/observability-host/bin/dev-feed-agent --list
+launchctl kickstart -k gui/$(id -u)/com.yolean.observability-host
+mkdir -p ~/.config/observability-host/v1/explore
+cp developer-feed/examples/explore/worklog.sql ~/.config/observability-host/v1/explore/   # then start explore.sh again
+```
+
 ## Backfill
 
 Per machine, once forwarding works: what the tools kept from before the agent's first start.
