@@ -11,7 +11,7 @@ or delete. The two run side by side on a node and share no credential.
 | Source | How | Notes |
 |---|---|---|
 | The journal | `systemd` input, every unit, with a denylist | A denylist fails toward collecting too much: an allowlist of units misses messages logged by PID 1 about a unit, such as a stop. Defaults deny nothing; `HOST_JOURNAL_DENY`, a regular expression on a row's `unit`, names noisy units to leave out. |
-| The audit log, `/var/log/audit/audit.log` | `tail`, following the file by inode across rotation, never the numbered files | auditd's `audit(timestamp:serial)` identifies each record. Reading it needs auditd's `log_group` set to a group the service is in (`adm`). |
+| The audit log, `/var/log/audit/audit.log` | `tail`, following the file by inode across rotation, never the numbered files | auditd's `audit(timestamp:serial)` identifies each record. Reading it needs auditd's `log_group` set to a group the service is in (`adm`), and auditd restarted. A pristine Ubuntu 24.04 has no auditd: `apt-get update`, then `apt-get install auditd`. |
 | Package changes: `/var/log/dpkg.log`, `/var/log/apt/history.log`, `/var/log/unattended-upgrades/*.log` | `tail` | |
 | Further files, configured | `tail`, `HOST_EXTRA_FILES` | Comma-separated paths or globs, for example a Kubernetes API server audit log written on the host. |
 | A heartbeat | every 60 s, a metrics line with the boot id and a counter | The counter is kept in the state directory: it continues across restarts of the service and starts again at a new boot id. A missing counter value or a silence longer than the interval shows a gap at the receiver. |
@@ -87,6 +87,8 @@ it is created, which is one more reason for `use_put_object`.
   are dropped.
 - A shutdown flushes what was read (`grace` 10 s); what the bucket does not take stays on disk for
   the next start.
+- fluent-bit warns at every start: "Please use 'store_dir_limit_size' with s3 output instead of
+  'storage.total_limit_size'". Both are set on purpose, one for each buffer.
 
 ## Packaging
 
@@ -122,6 +124,38 @@ it is created, which is one more reason for `use_put_object`.
   extracts it to the prefix, creates the user, writes the environment file and the credential, links
   the unit and keeps the installed files from drifting. The repository does not install anything on
   a host by itself; `itest/host/run.sh` shows the steps.
+- The files of an install, all `root:root`. The service runs as `observability-host`, so it must be
+  able to read every one of them but the credential, which systemd hands it:
+
+  | path | mode |
+  |---|---|
+  | `/opt/observability-host/` | as extracted (`tar --no-same-owner`) |
+  | `/etc/observability-host/` | `0755` |
+  | `/etc/observability-host/env`, `args` | `0644`: no secret is in them |
+  | `/etc/observability-host/s3-credentials` | `0600` |
+
+### Upgrading
+
+The state directory carries over: positions, the journal cursor, the heartbeat's counter and the
+buffers. An upgrade resumes where the previous version stopped:
+
+```sh
+systemctl stop observability-host
+mkdir /opt/observability-host.new
+tar xzf observability-to-blobs-host-<version>-linux-<arch>.tar.gz -C /opt/observability-host.new --no-same-owner
+rm -rf /opt/observability-host && mv /opt/observability-host.new /opt/observability-host
+install -m 0644 /opt/observability-host/lib/systemd/system/observability-host.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl start observability-host
+```
+
+- **A new prefix, not one extracted over the old:** a file that a version no longer has, such as
+  a collector, would stay and still be read.
+- **The unit again, every time:** a unit the release changed is otherwise left as it was. From
+  0.2.1, the first release, this is required. Its unit runs `fluent-bit -c etc/host.yaml`, and
+  the new `etc/host.yaml` alone has no inputs: the agent would run and ship nothing. A unit linked
+  with `systemctl link /opt/observability-host/lib/systemd/system/observability-host.service`
+  follows the prefix, and needs only the `daemon-reload`.
 
 ## The systemd unit
 
@@ -148,7 +182,8 @@ it is created, which is one more reason for `use_put_object`.
 
 ### Settings
 
-All are optional but the first four; the defaults are in `etc/host.yaml` and `etc/collectors.d/`.
+`CLUSTER_NAME`, `S3_BUCKET` and `S3_ENDPOINT` are required. The rest are optional; the defaults
+are in `etc/host.yaml` and `etc/collectors.d/`.
 
 | setting | default | |
 |---|---|---|
