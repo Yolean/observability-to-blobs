@@ -92,8 +92,9 @@ collector in standard fluent-bit configuration and, for explore, a SQL file.
   explore/<file>.sql           your schemas in explore, applied after explore's own
 ```
 
-`dev-feed-agent` adds `collectors/` to the launcher's collector directories when it has a
-`collectors.d/` (`HOST_COLLECTOR_DIRS`, `HOST_MODE.md`, Collectors). Its collectors are
+The launcher reads `collectors/` beside the args file when it has a `collectors.d/`, as it
+reads `/etc/observability-host/collectors/` on a Linux host (`HOST_MODE.md`, Your own
+collectors). Its collectors are
 switched with the same flags as the feed's, in the config's `args`: `--collector.<name>` and
 `--no-collector.<name>`.
 

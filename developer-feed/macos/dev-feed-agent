@@ -21,10 +21,6 @@ export STATE_DIRECTORY="$OBSERVABILITY_HOST_STATE"
 export HOST_ETC="$prefix/etc/host"
 export HOST_ARGS_FILE="$OBSERVABILITY_HOST_CONFIG/args"
 export HOST_COLLECTOR_DIRS="$prefix/etc/developer-feed"
-# the developer's own sources, if any (README.md, Your own sources)
-if [ -d "$OBSERVABILITY_HOST_CONFIG/collectors/collectors.d" ]; then
-  HOST_COLLECTOR_DIRS="$HOST_COLLECTOR_DIRS:$OBSERVABILITY_HOST_CONFIG/collectors"
-fi
 export HEARTBEAT_COMMAND="$prefix/bin/observability-host-heartbeat"
 export PATH="$prefix/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 # the credential: credential_process in this file, and no shared
