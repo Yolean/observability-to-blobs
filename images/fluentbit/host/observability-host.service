@@ -19,8 +19,9 @@
 #    in the environment file, this unit or the command line. fluent-bit reads
 #    it once, when it first needs credentials, so a changed key takes a
 #    restart of the unit.
-#  - for the audit log: auditd's log_group set to adm in
-#    /etc/audit/auditd.conf (and the log directory group-readable).
+#  - for the audit log: auditd, which a pristine Ubuntu does not have
+#    (apt-get update, then apt-get install auditd), with log_group set to
+#    adm in /etc/audit/auditd.conf and auditd restarted.
 #  - optionally /etc/observability-host/args: the collectors, as flags of
 #    bin/observability-host-launch (HOST_MODE.md, Collectors); without it
 #    the defaults run.
