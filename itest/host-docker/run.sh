@@ -150,7 +150,8 @@ m=$(metrics_of self-only 2>/dev/null || true)
 check "self-only: 2023 serves the agent's own metrics" grep -q '^fluentbit_' <<<"$m"
 if grep -q '^node_cpu' <<<"$m"; then failed "self-only: no node_* series"; else pass "self-only: no node_* series"; fi
 m=$(metrics_of defaults 2>/dev/null || true)
-check "defaults: 2023 serves node_* and the agent's own metrics" sh -c 'grep -q "^node_cpu" && grep -q "^fluentbit_"' <<<"$m"
+# two here-strings: two greps on one stdin share it, and the first reads past what the second needs
+check "defaults: 2023 serves node_* and the agent's own metrics" bash -c 'grep -q "^node_cpu" <<<"$1" && grep -q "^fluentbit_" <<<"$1"' _ "$m"
 
 phase "bucket: the rows of each scenario"
 cat >"$TMP/init.sql" <<SQL
