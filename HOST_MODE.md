@@ -212,6 +212,7 @@ Two more settings of the launcher:
 - **`HOST_COLLECTOR_DIRS`** names more directories of collectors, separated by colons. Each has a
   `collectors.d/` and may have `parts.d/` and a `collectors.defaults`, whose collectors add to the
   defaults. This lets a separate package add collectors without changing the tarball's files.
+  The machine's own, `collectors/` beside the args file, comes after them (Your own collectors).
   A collector name may be in only one directory. `--collector.disable-defaults` turns off every
   directory's defaults; a machine that wants another directory's collectors but not the host's
   own turns those off with `--no-collector.<name>`.
@@ -224,6 +225,94 @@ A change of collectors takes a restart of the unit, as a change of the environme
 `observability-host-launch --list` shows what would run, and `--print` the configuration it would
 write.
 
+### Your own collectors
+
+A machine adds sources of its own in `/etc/observability-host/collectors/`, beside the args file,
+laid out as the tarball's `etc/`:
+
+```
+/etc/observability-host/collectors/
+  collectors.d/<name>.yaml   a collector: fluent-bit YAML, its inputs with their processors
+  collectors.defaults        the names that run without a flag, one a line
+  parts.d/<part>.yaml        if a collector needs one, named on its "# needs: <part>" line
+```
+
+The launcher reads it when it has a `collectors.d/`, and its collectors take the same flags. An
+upgrade of the tarball leaves it alone. For log files alone no collector is needed:
+`HOST_EXTRA_FILES` adds them to `files`.
+
+**What a collector writes.** Host lines are `raw1` lines (Schema), and the compactor's guard
+refuses a line whose table it does not fold, or with a field `compactor/sql/raw.sql` does not
+name (`compactor/guard.go`). So a collector:
+
+- tags its inputs `blob`, the S3 output's tag;
+- writes `logs` rows, with `stream`, `unit` and `message`, `cluster` and `node`, or `metrics`
+  rows as the heartbeat's;
+- keeps every other field out with a `record_modifier` allowlist;
+- keeps its state, such as a tail's `db`, in a file of its own under `${HOST_STATE_DIR}`;
+- buffers on disk: `storage.type: filesystem`.
+
+A source whose rows do not fit `raw1` belongs under a key root of its own (`KEY_ROOT`, Where it
+writes), from an agent of its own, with its own contract and readers.
+
+For example, an application's log files as a collector of their own, switched apart from
+`files`, with longer lines:
+
+```yaml
+# /etc/observability-host/collectors/collectors.d/myapp.yaml
+pipeline:
+  inputs:
+    - name: tail
+      alias: myapp
+      tag: blob
+      path: /var/log/myapp/*.log
+      # the path is the row's unit
+      path_key: unit
+      # what the files hold at the first start, too; later starts resume from db
+      read_from_head: true
+      db: ${HOST_STATE_DIR}/myapp.db
+      db.sync: full
+      db.locking: true
+      buffer_max_size: 8M
+      skip_long_lines: on
+      storage.type: filesystem
+      processors:
+        logs:
+          - name: modify
+            add:
+              - table logs
+              - cluster ${CLUSTER_NAME}
+              - node ${NODE_NAME}
+              - stream file
+            rename:
+              - log message
+          - name: record_modifier
+            allowlist_key: [table, cluster, node, stream, unit, message]
+```
+
+It runs once `myapp` is in `/etc/observability-host/collectors/collectors.defaults`, or with
+`--collector.myapp` in the args file.
+
+**What a collector can read.** The unit runs fluent-bit as `observability-host`, in the groups
+`systemd-journal` and `adm`. `ProtectSystem=strict` leaves it nothing to write but the state
+directory, and `ProtectHome=yes` hides `/home`, `/root` and `/run/user`. A collector that needs
+more gets it from a drop-in, which adds to the unit's lists:
+
+```
+# systemctl edit observability-host
+[Service]
+SupplementaryGroups=myapp
+# only for a source under a home directory
+ProtectHome=read-only
+```
+
+An `exec` collector's command runs as the same user, in the same sandbox. Give it with its full
+path.
+
+**Applying a change:** `systemctl restart observability-host`. The launcher logs the collectors
+it runs (`collectors: ...`) to the unit's journal before it starts fluent-bit, and refuses an
+unknown name, so the unit then does not start.
+
 The collectors have two tests:
 
 - `images/fluentbit/host/test-launch.sh`, run by `./test.sh checks`, covers the flags and the
@@ -235,7 +324,8 @@ The collectors have two tests:
   - the collectors it logs;
   - whether the metrics port is open, and what it serves;
   - the rows in the bucket, read through `compactor/sql/raw.sql`;
-  - that `--no-collector.heartbeat` stops the launcher with exit 2 before fluent-bit starts.
+  - that `--no-collector.heartbeat` stops the launcher with exit 2 before fluent-bit starts;
+  - the example of Your own collectors, as written here, from `/etc/observability-host/collectors/`.
 
   Run it with `TARBALL=target/host/<tarball> itest/host-docker/run.sh`. CI runs it on amd64 and
   arm64 (`.github/workflows/ci.yaml`, `host-docker`). The itest's host phase passes the defaults

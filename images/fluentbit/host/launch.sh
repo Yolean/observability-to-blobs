@@ -28,7 +28,9 @@
 #                    each with collectors.d/ and, if it has any, parts.d/
 #                    and collectors.defaults, whose collectors add to
 #                    HOST_ETC's defaults; a collector name may be in only
-#                    one directory
+#                    one directory. The machine's own, collectors/ beside
+#                    the args file (/etc/observability-host/collectors/),
+#                    comes after them when it has a collectors.d/
 #   STATE_DIRECTORY  the state directory: the configuration, and everything
 #                    fluent-bit and the heartbeat keep (systemd sets it from
 #                    StateDirectory=; default /var/lib/observability-host).
@@ -58,10 +60,18 @@ for d in ${HOST_COLLECTOR_DIRS:-}; do
   roots="$roots:$(cd "$d" && pwd)"
 done
 IFS=$old_ifs
+# the machine's own collectors, beside its args (HOST_MODE.md, Your own
+# collectors); once, if HOST_COLLECTOR_DIRS names it too
+own=$(dirname "$args_file")/collectors
+if [ -d "$own/collectors.d" ]; then
+  own=$(cd "$own" && pwd)
+  case ":$roots:" in *":$own:"*) ;; *) roots="$roots:$own" ;; esac
+fi
 
 # every collector there is, "<name> <file>": <root>/collectors.d/<name>.yaml
 index=$(IFS=:; for r in $roots; do
-  for f in "$r"/collectors.d/*.yaml; do [ -e "$f" ] && echo "$(basename "$f" .yaml) $f"; done
+  # an empty collectors.d/ leaves the pattern itself, which is no file
+  for f in "$r"/collectors.d/*.yaml; do [ ! -e "$f" ] || echo "$(basename "$f" .yaml) $f"; done
 done)
 dup=$(echo "$index" | awk 'NF { print $1 }' | sort | uniq -d | tr '\n' ' ')
 [ -z "$dup" ] || die "collectors in more than one directory: $dup"
