@@ -5,9 +5,11 @@
 #    again at 1 when the boot id changes and continues across restarts of
 #    the service;
 #  - prints one JSON line, a raw1 metrics row: the sample
-#    observability_host_heartbeat{boot_id="..."} (a counter, the counter's
-#    value) and the time, which the pipeline completes with cluster and node
-#    and takes as the row's event time;
+#    observability_host_heartbeat{boot_id="...",collectors="..."} (a
+#    counter, the counter's value) and the time, which the pipeline
+#    completes with cluster and node and takes as the row's event time;
+#    collectors are the ones running, comma-separated, as the launcher
+#    exports them (no label without it);
 #  - writes the restart flag as textfile metrics (node_reboot_required,
 #    node_reboot_required_since_seconds, node_reboot_required_packages) to
 #    a .prom file in the state directory, for the node_exporter textfile
@@ -22,6 +24,7 @@
 #   HEARTBEAT_REBOOT_FLAG /var/run/reboot-required (the package list is
 #                         HEARTBEAT_REBOOT_PKGS, default <flag>.pkgs)
 #   NODE_NAME, HOST_METRICS_PORT   the row's instance, node:port
+#   HOST_COLLECTORS       the collectors running, from the launcher
 set -eu
 
 state_dir=${HEARTBEAT_STATE_DIR:-/var/lib/observability-host}
@@ -98,6 +101,8 @@ PROM
 }
 write_flag_metrics | write_atomic "$prom_file" || echo "heartbeat: cannot write $prom_file" >&2
 
+labels="\"boot_id\":\"$boot_id\""
+[ -z "${HOST_COLLECTORS:-}" ] || labels="$labels,\"collectors\":\"$(quote "$HOST_COLLECTORS")\""
 # the row's time, to the nanosecond as the node agent's scrapes carry it
-printf '{"table":"metrics","time":"%s","scrape":"node","instance":"%s","samples":[{"name":"observability_host_heartbeat","type":"counter","labels":{"boot_id":"%s"},"value":%s}]}\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" "$(quote "$instance")" "$boot_id" "$counter"
+printf '{"table":"metrics","time":"%s","scrape":"node","instance":"%s","samples":[{"name":"observability_host_heartbeat","type":"counter","labels":{%s},"value":%s}]}\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" "$(quote "$instance")" "$labels" "$counter"

@@ -1,0 +1,17 @@
+# The node collector (HOST_MODE.md, Collectors): node_exporter's series,
+# served on the metrics port, not shipped.
+# needs: serve-metrics
+pipeline:
+  inputs:
+    # cmetrics: served by the serve-metrics part, not shipped
+    - name: node_exporter_metrics
+      alias: node_exporter
+      tag: exp.node
+      scrape_interval: 15
+      # the node agent's collectors (agent/fluent-bit.yaml: cpufreq, hwmon,
+      # thermalzone and nvme left out for the missing sysfs files on VMs),
+      # plus timex (clock offset and sync status), systemd (unit states)
+      # and textfile (the restart flag the heartbeat script writes)
+      metrics: ${HOST_NODE_COLLECTORS:-cpu,meminfo,diskstats,filesystem,uname,stat,time,timex,loadavg,vmstat,netdev,netstat,sockstat,filefd,processes,systemd,textfile}
+      # every *.prom file in the state directory
+      collector.textfile.path: /var/lib/observability-host

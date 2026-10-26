@@ -11,10 +11,10 @@ or delete. The two run side by side on a node and share no credential.
 | Source | How | Notes |
 |---|---|---|
 | The journal | `systemd` input, every unit, with a denylist | A denylist fails toward collecting too much: an allowlist of units misses messages logged by PID 1 about a unit, such as a stop. Defaults deny nothing; `HOST_JOURNAL_DENY`, a regular expression on a row's `unit`, names noisy units to leave out. |
-| The audit log, `/var/log/audit/audit.log` | `tail`, following the file by inode across rotation, never the numbered files | auditd's `audit(timestamp:serial)` identifies each record. Reading it needs auditd's `log_group` set to a group the service is in (`adm`). |
-| Package changes: `/var/log/dpkg.log`, `/var/log/apt/history.log`, `/var/log/unattended-upgrades/*.log` | `tail` | |
-| Further files, configured | `tail`, `HOST_EXTRA_FILES` | Comma-separated paths or globs, for example a Kubernetes API server audit log written on the host. |
-| A heartbeat | every 60 s, a metrics line with the boot id and a counter | The counter is kept in the state directory: it continues across restarts of the service and starts again at a new boot id. A missing counter value or a silence longer than the interval shows a gap at the receiver. |
+| The audit log, `/var/log/audit/audit.log` | `tail`, following the file by inode across rotation, never the numbered files | auditd's `audit(timestamp:serial)` identifies each record. Reading it needs auditd's `log_group` set to a group the service is in (`adm`), and auditd restarted or reloaded. A reload is a SIGHUP, `systemctl kill -s HUP auditd`: Ubuntu 24.04's unit has no `ExecReload`, so `systemctl reload auditd` is refused. On a reload, auditd 3.1.2 (Ubuntu 24.04's) reopens the log when `log_group` changed and sets the group of the directory and the files (`reconfigure()` in `src/auditd-event.c`; read from the source, not run on a host). A pristine Ubuntu 24.04 has no auditd: `apt-get update`, then `apt-get install auditd`. |
+| Package changes: `/var/log/dpkg.log`, `/var/log/apt/history.log`, `/var/log/unattended-upgrades/*.log` | `tail` | A host without unattended-upgrades has no such directory, which is no error (see the next row). |
+| Further files, configured | `tail`, `HOST_EXTRA_FILES` | Comma-separated paths or globs, for example a Kubernetes API server audit log written on the host. A glob whose directory may be missing needs one letter of the directory in brackets, as `files` has `/var/log/unattended-upgrade[s]/*.log`: tail aborts a glob at a missing directory named as it is, and logs a warning and an error at every scan, which the journal then ships. With the bracket the directory is a pattern too, and a missing one is no match. |
+| A heartbeat | every 60 s, a metrics line with the boot id, the collectors running and a counter | The counter is kept in the state directory: it continues across restarts of the service and starts again at a new boot id. A missing counter value or a silence longer than the interval shows a gap at the receiver, and the `collectors` label a host whose sources changed. |
 | Node metrics and the restart flag | `node_exporter_metrics` (see Metrics) | Served on the node, not shipped (see Metrics). |
 
 ## Schema: a subset of `raw1`
@@ -31,8 +31,12 @@ reader of `raw1` reads them:
   journald's copy of audit events is best effort. `ts` is the time the agent read the line; the
   line's own stamp (the audit record's `audit(...)`) is in the message.
 - **Metrics** are `metrics` rows as the DaemonSet's node scrape (`scrape` `node`, `instance`,
-  `samples`): today the heartbeat, as one sample, `observability_host_heartbeat{boot_id="..."}`
+  `samples`): today the heartbeat, as one sample,
+  `observability_host_heartbeat{boot_id="...",collectors="files,heartbeat,journal,node,self"}`
   (type `counter`) with the counter as value, and `instance` the node's name and the metrics port.
+  `collectors` are the collectors running, comma-separated, as the launcher started them: a
+  receiver can tell from the bucket alone that a host stopped running `files` or `journal`. A
+  change of them, like a new boot id, starts another series.
   Rows carry `time` (the script's stamp to the nanosecond, as the node agent's scrapes do) and `ts`
   (the same, rendered at microseconds), and no `namespace`, `pod` or `container`. The node exporter
   series, the restart flag and the agent's own metrics are served on the node; shipping them is
@@ -87,6 +91,8 @@ it is created, which is one more reason for `use_put_object`.
   are dropped.
 - A shutdown flushes what was read (`grace` 10 s); what the bucket does not take stays on disk for
   the next start.
+- fluent-bit warns at every start: "Please use 'store_dir_limit_size' with s3 output instead of
+  'storage.total_limit_size'". Both are set on purpose, one for each buffer.
 
 ## Packaging
 
@@ -106,7 +112,11 @@ it is created, which is one more reason for `use_put_object`.
   |---|---|
   | `bin/fluent-bit` | the binary, stripped |
   | `bin/observability-host-heartbeat` | the heartbeat script (POSIX `sh`, coreutils and `sed`) |
-  | `etc/host.yaml` | the pipeline, with the defaults of every setting |
+  | `bin/observability-host-launch` | the launcher (POSIX `sh`, see Collectors), which the unit runs |
+  | `etc/host.yaml` | the pipeline's service section and S3 output, with the defaults of their settings |
+  | `etc/collectors.d/<name>.yaml` | one collector each: its inputs and their processors |
+  | `etc/parts.d/<name>.yaml` | what collectors share: `serve-metrics`, the metrics port |
+  | `etc/collectors.defaults` | the collectors that run when nothing says otherwise |
   | `etc/observability-host.env.example` | the environment file, commented |
   | `lib/systemd/system/observability-host.service` | the unit; goes to `/etc/systemd/system/` |
   | `share/fluent-bit-LICENSE` | Fluent Bit's licence |
@@ -118,6 +128,41 @@ it is created, which is one more reason for `use_put_object`.
   extracts it to the prefix, creates the user, writes the environment file and the credential, links
   the unit and keeps the installed files from drifting. The repository does not install anything on
   a host by itself; `itest/host/run.sh` shows the steps.
+- The files of an install, all `root:root`. The service runs as `observability-host`, so it must be
+  able to read every one of them but the credential, which systemd hands it:
+
+  | path | mode |
+  |---|---|
+  | `/opt/observability-host/` | as extracted (`tar --no-same-owner`) |
+  | `/etc/observability-host/` | `0755` |
+  | `/etc/observability-host/env`, `args`, `required` | `0644`: no secret is in them |
+  | `/etc/observability-host/s3-credentials` | `0600` |
+
+### Upgrading
+
+The state directory carries over: positions, the journal cursor, the heartbeat's counter and the
+buffers. An upgrade resumes where the previous version stopped:
+
+```sh
+systemctl stop observability-host
+mkdir /opt/observability-host.new
+tar xzf observability-to-blobs-host-<version>-linux-<arch>.tar.gz -C /opt/observability-host.new --no-same-owner
+rm -rf /opt/observability-host && mv /opt/observability-host.new /opt/observability-host
+install -m 0644 /opt/observability-host/lib/systemd/system/observability-host.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl start observability-host
+```
+
+- **A new prefix, not one extracted over the old:** a file that a version no longer has, such as
+  a collector, would stay and still be read.
+- **The unit again, every time:** a unit the release changed is otherwise left as it was. From
+  0.2.1, the first release, this is required. Its unit runs `fluent-bit -c etc/host.yaml`, and
+  the new `etc/host.yaml` alone has no inputs: the agent would run and ship nothing. A unit linked
+  with `systemctl link /opt/observability-host/lib/systemd/system/observability-host.service`
+  follows the prefix, and needs only the `daemon-reload`.
+- **Or a prefix per version:** extracted to `/opt/observability-host-<version>`, with
+  `/opt/observability-host` a symbolic link to it, swapped with the agent stopped. The previous
+  version stays, for a rollback.
 
 ## The systemd unit
 
@@ -144,7 +189,8 @@ it is created, which is one more reason for `use_put_object`.
 
 ### Settings
 
-All are optional but the first four; the defaults are in `etc/host.yaml`.
+`CLUSTER_NAME`, `S3_BUCKET` and `S3_ENDPOINT` are required. The rest are optional; the defaults
+are in `etc/host.yaml` and `etc/collectors.d/`.
 
 | setting | default | |
 |---|---|---|
@@ -158,6 +204,79 @@ All are optional but the first four; the defaults are in `etc/host.yaml`.
 | `HOST_NODE_COLLECTORS` | see Metrics | `textfile` alone on a Kubernetes node |
 | `HOST_METRICS_LISTEN`, `HOST_METRICS_PORT` | `127.0.0.1`, `2023` | the address and the port the metrics are served on |
 | `HOST_BUFFER_LIMIT` | `4G` | each of the output's two on-disk buffers |
+
+### Collectors
+
+Each source is a collector: a file in `etc/collectors.d/` with its inputs and their processors. The
+unit runs `bin/observability-host-launch`. The launcher picks the collectors, writes
+`/var/lib/observability-host/fluent-bit.yaml`, which includes `etc/host.yaml`, the enabled
+collectors and the parts they need, and execs fluent-bit with it. A collector that does not run
+adds nothing to the process: no input, no port, no command.
+
+| collector | default | what |
+|---|---|---|
+| `heartbeat` | on, cannot be turned off | the heartbeat row (see What it ships); its silence is how a receiver tells a stopped agent from a quiet one |
+| `journal` | on | the journal, with `HOST_JOURNAL_DENY` |
+| `files` | on | the audit log, the package logs and `HOST_EXTRA_FILES` |
+| `node` | on | `node_exporter_metrics`, served on the metrics port (see Metrics) |
+| `self` | on | the agent's own metrics, served on the metrics port |
+
+The defaults are the pipeline as it was before collectors existed. The metrics port, the part
+`parts.d/serve-metrics.yaml`, is opened only when a collector that runs needs it, `node` or
+`self`: with both off, nothing listens. `HOST_NODE_COLLECTORS` remains the list of
+node_exporter's own collectors within `node`.
+
+The flags are node_exporter's (its README, "Collectors"):
+
+- `--collector.<name>` enables a collector, and `--no-collector.<name>` disables one.
+- `--collector.disable-defaults` disables every collector that is not enabled explicitly, wherever
+  it is in the flags.
+- For one collector the last flag wins.
+- An unknown collector or flag, or `--no-collector.heartbeat`, is refused, and the unit then does
+  not start.
+- A collector the host requires is refused as `--no-collector.<name>` too, and stays on with
+  `--collector.disable-defaults`. The installer lists them in `/etc/observability-host/required`,
+  beside the args file (`HOST_REQUIRED_FILE`), names one or more a line with `#` for comments: for
+  example `files` and `journal`, where they are the sources of a security log. The args file then
+  cannot stop them, and the heartbeat's `collectors` label shows that they run (Schema).
+
+The flags come from `/etc/observability-host/args`, one or more per line with `#` for comments
+(`HOST_ARGS_FILE`; a missing file is no flags), followed by the launcher's own command line. For
+example, on a Kubernetes node, where the DaemonSet exports the machine's `node_*` (see Metrics),
+`HOST_NODE_COLLECTORS=textfile` keeps `node` for the restart flag alone. A host that only
+forwards its journal would have:
+
+```
+# /etc/observability-host/args
+--collector.disable-defaults
+--collector.journal
+```
+
+A change of collectors takes a restart of the unit, as a change of the environment file does.
+`observability-host-launch --list` shows what would run, and `--print` the configuration it would
+write.
+
+The collectors have two tests:
+
+- `images/fluentbit/host/test-launch.sh`, run by `./test.sh checks`, covers the flags and the
+  configuration written.
+- `itest/host-docker/run.sh` runs the tarball in Ubuntu containers against versitygw, with no
+  systemd and no qemu, so it also runs where the host phase can't. A user that a bucket policy
+  allows only PutObject under the root writes, and the test checks for each set of flags what
+  the process does:
+  - the collectors it logs;
+  - whether the metrics port is open, and what it serves;
+  - the rows in the bucket, read through `compactor/sql/raw.sql`;
+  - that `--no-collector.heartbeat` stops the launcher with exit 2 before fluent-bit starts, and so
+    does `--no-collector.files` where `/etc/observability-host/required` lists `files`;
+  - the heartbeat's `collectors` label, for each set of flags;
+  - `files` with `HOST_EXTRA_FILES` unset: the package logs arrive, and fluent-bit warns of
+    nothing but `store_dir_limit_size` (Buffering), with `/var/log/unattended-upgrades/` missing
+    or there.
+
+  Run it with `TARBALL=target/host/<tarball> itest/host-docker/run.sh`. CI runs it on amd64 and
+  arm64 (`.github/workflows/ci.yaml`, `host-docker`). The itest's host phase passes the defaults
+  through fluent-bit's dry run and runs them as the unit.
 
 ## Metrics
 
