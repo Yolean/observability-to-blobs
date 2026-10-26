@@ -67,12 +67,24 @@ treated as such, so a directory like `/var/lib/example.d/metrics` falls through
 with `use_directory_pattern` left false and is scanned as one file. Read in the
 source of v5.1.2, not reproduced; the host agent's state directory has no dot.
 
-## in_tail: an unreadable directory in a glob is an error every refresh
+## in_tail: an unreadable or missing directory in a glob is an error every refresh
 
 A `path` glob such as `/var/log/unattended-upgrades/*.log` whose directory the
-process may not read logs `read error, check permissions` and `error scanning
-path` at every `refresh_interval` (5 s here), where a glob that matches nothing
-is silent. Seen on v5.1.2 as an unprivileged user.
+process may not read, or which does not exist, logs `read error, check
+permissions` and `error scanning path` at every `refresh_interval` (5 s here),
+where a glob that matches nothing is silent. Seen on v5.1.2 as an unprivileged
+user, and in a container without the directory. The cause: `tail_scan_path()`
+(`plugins/in_tail/tail_scan_glob.c`) globs with `GLOB_ERR`, and glibc aborts
+with `GLOB_ABORTED` when it cannot open a directory the pattern names as it is;
+fluent-bit reports that as a read error. A missing directory could be no match,
+as `GLOB_NOMATCH` is.
+
+Worked around for a missing directory in `host/collectors.d/files.yaml`: one
+letter of the directory in brackets, `/var/log/unattended-upgrade[s]/*.log`,
+matches the same directory as a pattern, so glob reads `/var/log` and a
+missing directory is `GLOB_NOMATCH` (checked with glibc on Ubuntu 24.04, and by
+`itest/host-docker`). A directory that exists and cannot be read is still an
+error every refresh.
 
 ## YAML config: a list of more than 10 items in a processor's settings is refused
 
