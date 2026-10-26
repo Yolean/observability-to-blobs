@@ -12,8 +12,8 @@ or delete. The two run side by side on a node and share no credential.
 |---|---|---|
 | The journal | `systemd` input, every unit, with a denylist | A denylist fails toward collecting too much: an allowlist of units misses messages logged by PID 1 about a unit, such as a stop. Defaults deny nothing; `HOST_JOURNAL_DENY`, a regular expression on a row's `unit`, names noisy units to leave out. |
 | The audit log, `/var/log/audit/audit.log` | `tail`, following the file by inode across rotation, never the numbered files | auditd's `audit(timestamp:serial)` identifies each record. Reading it needs auditd's `log_group` set to a group the service is in (`adm`), and auditd restarted or reloaded. A reload is a SIGHUP, `systemctl kill -s HUP auditd`: Ubuntu 24.04's unit has no `ExecReload`, so `systemctl reload auditd` is refused. On a reload, auditd 3.1.2 (Ubuntu 24.04's) reopens the log when `log_group` changed and sets the group of the directory and the files (`reconfigure()` in `src/auditd-event.c`; read from the source, not run on a host). A pristine Ubuntu 24.04 has no auditd: `apt-get update`, then `apt-get install auditd`. |
-| Package changes: `/var/log/dpkg.log`, `/var/log/apt/history.log`, `/var/log/unattended-upgrades/*.log` | `tail` | |
-| Further files, configured | `tail`, `HOST_EXTRA_FILES` | Comma-separated paths or globs, for example a Kubernetes API server audit log written on the host. |
+| Package changes: `/var/log/dpkg.log`, `/var/log/apt/history.log`, `/var/log/unattended-upgrades/*.log` | `tail` | A host without unattended-upgrades has no such directory, which is no error (see the next row). |
+| Further files, configured | `tail`, `HOST_EXTRA_FILES` | Comma-separated paths or globs, for example a Kubernetes API server audit log written on the host. A glob whose directory may be missing needs one letter of the directory in brackets, as `files` has `/var/log/unattended-upgrade[s]/*.log`: tail aborts a glob at a missing directory named as it is, and logs a warning and an error at every scan, which the journal then ships. With the bracket the directory is a pattern too, and a missing one is no match. |
 | A heartbeat | every 60 s, a metrics line with the boot id, the collectors running and a counter | The counter is kept in the state directory: it continues across restarts of the service and starts again at a new boot id. A missing counter value or a silence longer than the interval shows a gap at the receiver, and the `collectors` label a host whose sources changed. |
 | Node metrics and the restart flag | `node_exporter_metrics` (see Metrics) | Served on the node, not shipped (see Metrics). |
 
@@ -270,8 +270,9 @@ The collectors have two tests:
   - that `--no-collector.heartbeat` stops the launcher with exit 2 before fluent-bit starts, and so
     does `--no-collector.files` where `/etc/observability-host/required` lists `files`;
   - the heartbeat's `collectors` label, for each set of flags;
-  - `files` with `HOST_EXTRA_FILES` unset: the package logs arrive, and fluent-bit warns of no
-    path but those of the files the container lacks.
+  - `files` with `HOST_EXTRA_FILES` unset: the package logs arrive, and fluent-bit warns of
+    nothing but `store_dir_limit_size` (Buffering), with `/var/log/unattended-upgrades/` missing
+    or there.
 
   Run it with `TARBALL=target/host/<tarball> itest/host-docker/run.sh`. CI runs it on amd64 and
   arm64 (`.github/workflows/ci.yaml`, `host-docker`). The itest's host phase passes the defaults
