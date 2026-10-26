@@ -114,6 +114,10 @@ agent() {
       mkdir -p /opt/observability-host /var/lib/observability-host /var/log/itest
       tar xzf /tmp/host.tar.gz -C /opt/observability-host
       echo "itest-before-start" >/var/log/itest/a.log
+      if [ -n "${ITEST_UNATTENDED:-}" ]; then
+        mkdir -p /var/log/unattended-upgrades
+        echo "itest-unattended" >/var/log/unattended-upgrades/unattended-upgrades.log
+      fi
       exec /opt/observability-host/bin/observability-host-launch' >/dev/null
 }
 in_agent() { docker exec "$P-$1" bash -c "$2"; }
@@ -122,8 +126,10 @@ listening() { in_agent "$1" 'exec 3<>/dev/tcp/127.0.0.1/2023' 2>/dev/null; }
 metrics_of() { in_agent "$1" 'exec 3<>/dev/tcp/127.0.0.1/2023; printf "GET /metrics HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n" >&3; timeout 5 cat <&3'; }
 
 phase "scenarios: one agent each"
+# files-only has a /var/log/unattended-upgrades/; the other scenarios
+# have none, as a host without unattended-upgrades
 agent files-only '--collector.disable-defaults
---collector.files'
+--collector.files' -e ITEST_UNATTENDED=1
 agent self-only '# the agent'"'"'s own metrics and nothing else
 --collector.disable-defaults --collector.self'
 agent defaults '# no flags: the defaults'
@@ -201,10 +207,16 @@ assert "the refused scenarios wrote nothing" \
   "SELECT count(*) = 0 FROM raw WHERE node IN ('refused', 'required-off')"
 assert "no-extra: with HOST_EXTRA_FILES unset, the package log's lines as file rows" \
   "SELECT count(*) > 0 FROM raw WHERE node = 'no-extra' AND stream = 'file' AND unit = '/var/log/dpkg.log'"
-# the container has no /var/log/unattended-upgrades/: tail warns of that
-# glob at every scan, with HOST_EXTRA_FILES set or not
-check "no-extra: fluent-bit warned of no other path than files' own, and of nothing else but store_dir_limit_size" \
-  sh -c "! docker logs $P-no-extra 2>&1 | grep -E '\\[ *(warn|error)\\]' | grep -v -e store_dir_limit_size -e ': /var/log/unattended-upgrades/\\*\\.log\$'"
+for s in no-extra files-only; do
+  check "$s: fluent-bit warned of nothing but store_dir_limit_size (Buffering), and of no path" \
+    sh -c "! docker logs $P-$s 2>&1 | grep -E '\\[ *(warn|error)\\]' | grep -v store_dir_limit_size"
+done
+# node_exporter's systemd collector needs a systemd, which the container
+# lacks: two errors at the start (the host phase has a systemd)
+check "defaults: fluent-bit warned of nothing but store_dir_limit_size and the container's lack of systemd" \
+  sh -c "! docker logs $P-defaults 2>&1 | grep -E '\\[ *(warn|error)\\]' | grep -v -e store_dir_limit_size -e 'node_exporter.*systemd'"
+assert "files-only: a file in /var/log/unattended-upgrades/, read through the bracket in files' path" \
+  "SELECT count(*) = 1 FROM raw WHERE node = 'files-only' AND unit = '/var/log/unattended-upgrades/unattended-upgrades.log' AND message = 'itest-unattended'"
 for s in files-only:files,heartbeat self-only:heartbeat,self defaults:files,heartbeat,journal,node,self no-extra:files,heartbeat; do
   assert "${s%%:*}: the heartbeat says the collectors running, ${s#*:}" \
     "SELECT count(*) >= 1 AND bool_and(samples[1].labels['collectors'] = '${s#*:}') FROM raw WHERE node = '${s%%:*}' AND \"table\" = 'metrics' AND samples[1].name = 'observability_host_heartbeat'"

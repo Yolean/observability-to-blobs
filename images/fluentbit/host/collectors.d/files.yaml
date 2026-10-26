@@ -5,10 +5,16 @@ pipeline:
     # Files. The audit log is followed by inode, never the numbered files
     # (a rotated file is read to its end, then dropped); the position of
     # every file is kept in db.
+    #
+    # unattended-upgrade[s]: tail globs with GLOB_ERR, so a directory named
+    # as it is and missing aborts the scan, which tail logs as a warning and
+    # an error at every scan, and the journal collector ships. The bracket
+    # matches the same directory, but as a pattern: glob reads /var/log
+    # instead, and a missing directory is no match, logged at debug only.
     - name: tail
       alias: files
       tag: blob
-      path: /var/log/audit/audit.log,/var/log/dpkg.log,/var/log/apt/history.log,/var/log/unattended-upgrades/*.log,${HOST_EXTRA_FILES:-}
+      path: /var/log/audit/audit.log,/var/log/dpkg.log,/var/log/apt/history.log,/var/log/unattended-upgrade[s]/*.log,${HOST_EXTRA_FILES:-}
       # the path is the row's unit
       path_key: unit
       read_from_head: true
