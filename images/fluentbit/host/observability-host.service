@@ -21,10 +21,13 @@
 #    restart of the unit.
 #  - for the audit log: auditd, which a pristine Ubuntu does not have
 #    (apt-get update, then apt-get install auditd), with log_group set to
-#    adm in /etc/audit/auditd.conf and auditd restarted.
+#    adm in /etc/audit/auditd.conf and auditd restarted or sent a SIGHUP
+#    (systemctl kill -s HUP auditd; its unit has no ExecReload).
 #  - optionally /etc/observability-host/args: the collectors, as flags of
 #    bin/observability-host-launch (HOST_MODE.md, Collectors); without it
 #    the defaults run.
+#  - optionally /etc/observability-host/required: collectors this host
+#    requires, which no flag in args can turn off.
 [Unit]
 Description=observability-to-blobs host agent
 After=network-online.target

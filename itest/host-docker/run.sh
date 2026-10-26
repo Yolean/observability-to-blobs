@@ -93,17 +93,20 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 DOCKERFILE
 printf '[default]\naws_access_key_id = hostagent\naws_secret_access_key = %s\n' "$AGENT_SECRET" >"$TMP/s3-credentials"
 
-# agent <scenario> <args file content>: one agent container, the tarball at
-# the install prefix, NODE_NAME the scenario, so that each scenario's
-# objects are under their own node in the key
+# agent <scenario> <args file content> [docker run arg ...]: one agent
+# container, the tarball at the install prefix, NODE_NAME the scenario, so
+# that each scenario's objects are under their own node in the key;
+# HOST_EXTRA_FILES the fixture, unset with NO_EXTRA_FILES=1
 agent() {
-  local name=$1 args=$2
+  local name=$1 args=$2 extra=(-e "HOST_EXTRA_FILES=/var/log/itest/*.log")
+  shift 2
+  [ "${NO_EXTRA_FILES:-}" != 1 ] || extra=()
   printf '%s\n' "$args" >"$TMP/args-$name"
-  docker run -d --name "$P-$name" --network "$NET" \
+  docker run -d --name "$P-$name" --network "$NET" "$@" "${extra[@]}" \
     -v "$PWD/$TARBALL:/tmp/host.tar.gz:ro" -v "$TMP/s3-credentials:/etc/observability-host/s3-credentials:ro" \
     -v "$TMP/args-$name:/etc/observability-host/args:ro" \
     -e CLUSTER_NAME=$CLUSTER -e "NODE_NAME=$name" -e "S3_BUCKET=$BUCKET" -e "S3_ENDPOINT=http://$GW:7070" -e S3_TLS=off \
-    -e KEY_ROOT=$KEY_ROOT -e UPLOAD_TIMEOUT=5s -e HOST_EXTRA_FILES=/var/log/itest/*.log \
+    -e KEY_ROOT=$KEY_ROOT -e UPLOAD_TIMEOUT=5s \
     -e AWS_SHARED_CREDENTIALS_FILE=/etc/observability-host/s3-credentials \
     -e HEARTBEAT_COMMAND=/opt/observability-host/bin/observability-host-heartbeat \
     "$AGENT_IMAGE" sh -c '
@@ -125,13 +128,20 @@ agent self-only '# the agent'"'"'s own metrics and nothing else
 --collector.disable-defaults --collector.self'
 agent defaults '# no flags: the defaults'
 agent refused '--no-collector.heartbeat'
+# the installer requires files and journal (HOST_MODE.md, Collectors), and
+# the args file turns files off
+printf '# the security log\nfiles journal\n' >"$TMP/required"
+agent required-off '--no-collector.files' -v "$TMP/required:/etc/observability-host/required:ro"
+# files with HOST_EXTRA_FILES unset: its path ends in an empty item
+NO_EXTRA_FILES=1 agent no-extra '--collector.disable-defaults
+--collector.files'
 sleep 8
 for s in files-only self-only defaults; do
   docker exec "$P-$s" sh -c "echo itest-after-start-$RUN >>/var/log/itest/a.log" || true
 done
 
 phase "launch: what each set of flags runs"
-for s in files-only self-only defaults; do
+for s in files-only self-only defaults no-extra; do
   check "$s: the agent is running" sh -c "[ \"\$(docker inspect -f '{{.State.Running}}' $P-$s)\" = true ]"
 done
 check "files-only: the launcher logged heartbeat and files" sh -c "docker logs $P-files-only 2>&1 | grep -q 'collectors: files heartbeat\$'"
@@ -140,6 +150,10 @@ check "defaults: the launcher logged the five defaults" sh -c "docker logs $P-de
 for _ in $(seq 20); do [ "$(docker inspect -f '{{.State.Running}}' "$P-refused")" = false ] && break; sleep 1; done
 check "refused: --no-collector.heartbeat stops the launcher before fluent-bit, with exit 2" \
   sh -c "[ \"\$(docker inspect -f '{{.State.ExitCode}}' $P-refused)\" = 2 ] && docker logs $P-refused 2>&1 | grep -q 'cannot be turned off'"
+for _ in $(seq 20); do [ "$(docker inspect -f '{{.State.Running}}' "$P-required-off")" = false ] && break; sleep 1; done
+check "required-off: --no-collector.files, which /etc/observability-host/required requires, stops the launcher with exit 2" \
+  sh -c "[ \"\$(docker inspect -f '{{.State.ExitCode}}' $P-required-off)\" = 2 ] && docker logs $P-required-off 2>&1 | grep -q 'the files collector is required on this host (/etc/observability-host/required)'"
+check "no-extra: the launcher logged heartbeat and files" sh -c "docker logs $P-no-extra 2>&1 | grep -q 'collectors: files heartbeat\$'"
 
 phase "waiting 70 s: the first heartbeat comes 60 s after the start, the first scrape 15 s"
 sleep 70
@@ -183,13 +197,23 @@ assert "defaults: heartbeat rows and the fixture's file rows" \
   "SELECT count(*) FILTER (WHERE \"table\" = 'metrics') >= 1 AND count(*) FILTER (WHERE unit = '/var/log/itest/a.log') >= 2 FROM raw WHERE node = 'defaults'"
 assert "no scenario but the defaults has journal rows" \
   "SELECT count(*) = 0 FROM raw WHERE stream = 'journal' AND node <> 'defaults'"
-assert "the refused scenario wrote nothing" \
-  "SELECT count(*) = 0 FROM raw WHERE node = 'refused'"
+assert "the refused scenarios wrote nothing" \
+  "SELECT count(*) = 0 FROM raw WHERE node IN ('refused', 'required-off')"
+assert "no-extra: with HOST_EXTRA_FILES unset, the package log's lines as file rows" \
+  "SELECT count(*) > 0 FROM raw WHERE node = 'no-extra' AND stream = 'file' AND unit = '/var/log/dpkg.log'"
+# the container has no /var/log/unattended-upgrades/: tail warns of that
+# glob at every scan, with HOST_EXTRA_FILES set or not
+check "no-extra: fluent-bit warned of no other path than files' own, and of nothing else but store_dir_limit_size" \
+  sh -c "! docker logs $P-no-extra 2>&1 | grep -E '\\[ *(warn|error)\\]' | grep -v -e store_dir_limit_size -e ': /var/log/unattended-upgrades/\\*\\.log\$'"
+for s in files-only:files,heartbeat self-only:heartbeat,self defaults:files,heartbeat,journal,node,self no-extra:files,heartbeat; do
+  assert "${s%%:*}: the heartbeat says the collectors running, ${s#*:}" \
+    "SELECT count(*) >= 1 AND bool_and(samples[1].labels['collectors'] = '${s#*:}') FROM raw WHERE node = '${s%%:*}' AND \"table\" = 'metrics' AND samples[1].name = 'observability_host_heartbeat'"
+done
 assert "every key is under $KEY_ROOT/$CLUSTER/{date}/{HH}/{node}/" \
-  "SELECT bool_and(regexp_matches(filename, '/$KEY_ROOT/$CLUSTER/[0-9]{4}-[0-9]{2}-[0-9]{2}/[0-9]{2}/(files-only|self-only|defaults)/[0-9]{4}-[A-Za-z0-9]{8}\\.jsonl\\.zst\$')) FROM raw"
+  "SELECT bool_and(regexp_matches(filename, '/$KEY_ROOT/$CLUSTER/[0-9]{4}-[0-9]{2}-[0-9]{2}/[0-9]{2}/(files-only|self-only|defaults|no-extra)/[0-9]{4}-[A-Za-z0-9]{8}\\.jsonl\\.zst\$')) FROM raw"
 
 if [ "$FAILED" -gt 0 ]; then
-  for s in files-only self-only defaults refused; do echo "--- $s"; docker logs --tail 15 "$P-$s" 2>&1 || true; done
+  for s in files-only self-only defaults refused required-off no-extra; do echo "--- $s"; docker logs --tail 15 "$P-$s" 2>&1 || true; done
 fi
 echo
 echo "host-docker: $FAILED failed"
