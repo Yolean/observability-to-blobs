@@ -21,6 +21,11 @@
 # Env:
 #   HOST_ARGS_FILE   the args file (default /etc/observability-host/args;
 #                    a missing file is no flags)
+#   HOST_REQUIRED_FILE
+#                    the collectors this host requires, one or more names a
+#                    line, which no flag turns off, as the heartbeat
+#                    (default: required beside the args file; a missing file
+#                    requires none)
 #   HOST_ETC         host.yaml, collectors.defaults, collectors.d/, parts.d/
 #                    (default: etc/ beside this script's bin/)
 #   HOST_COLLECTOR_DIRS
@@ -44,6 +49,7 @@ bin=$(cd "$(dirname "$0")" && pwd)
 etc=${HOST_ETC:-$(cd "$bin/../etc" 2>/dev/null && pwd || echo "$bin/../etc")}
 state=${STATE_DIRECTORY:-/var/lib/observability-host}
 args_file=${HOST_ARGS_FILE:-/etc/observability-host/args}
+required_file=${HOST_REQUIRED_FILE:-$(dirname "$args_file")/required}
 fluent_bit=${HOST_FLUENT_BIT:-$bin/fluent-bit}
 
 die() { echo "observability-host-launch: $*" >&2; exit 2; }
@@ -83,6 +89,15 @@ forced=$(echo "$defaults_lines" | awk 'NF && $2 == "forced" { print $1 }')
 for c in $defaults; do
   echo "$available" | grep -qx "$c" || die "a collectors.defaults names $c, which has no collectors.d/$c.yaml"
 done
+# the installer's: collectors that must run on this host, whatever the
+# flags say (HOST_MODE.md, Collectors)
+required=
+if [ -f "$required_file" ]; then
+  required=$(sed -e 's/#.*//' "$required_file" | tr -s ' \t' '\n' | sed '/^$/d')
+  for c in $required; do
+    echo "$available" | grep -qx "$c" || die "$required_file requires $c, which has no collectors.d/$c.yaml"
+  done
+fi
 
 # the flags: the args file's, then the command line's; the fluent-bit args
 # after "--" are kept in "$@"
@@ -124,6 +139,10 @@ state_of() {
     [ "$s" != off ] || die "the $1 collector cannot be turned off"
     echo forced; return
   fi
+  if echo "$required" | grep -qx "$1"; then
+    [ "$s" != off ] || die "the $1 collector is required on this host ($required_file)"
+    echo required; return
+  fi
   if [ -n "$s" ]; then echo "$s"; return; fi
   if ! $disable_defaults && echo "$defaults" | grep -qx "$1"; then echo on; else echo off; fi
 }
@@ -132,7 +151,7 @@ enabled=
 for c in $available; do
   s=$(state_of "$c")
   if [ "$mode" = list ]; then
-    d=; echo "$defaults" | grep -qx "$c" && [ "$s" != forced ] && d=", on by default"
+    d=; echo "$defaults" | grep -qx "$c" && [ "$s" != forced ] && [ "$s" != required ] && d=", on by default"
     echo "$c $s$d"
   fi
   [ "$s" = off ] || enabled="$enabled $c"
@@ -170,4 +189,7 @@ echo "observability-host-launch: collectors:$enabled" >&2
 HOST_STATE_DIR=$state
 HEARTBEAT_STATE_DIR=${HEARTBEAT_STATE_DIR:-$state}
 export HOST_STATE_DIR HEARTBEAT_STATE_DIR
+# for the heartbeat, which ships them in its row (HOST_MODE.md, What it ships)
+HOST_COLLECTORS=$(echo "${enabled# }" | tr ' ' ',')
+export HOST_COLLECTORS
 exec "$fluent_bit" -c "$state/fluent-bit.yaml" "$@"
