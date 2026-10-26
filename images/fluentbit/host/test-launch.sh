@@ -15,7 +15,9 @@ export HOST_ETC=$here
 export HOST_ARGS_FILE=$tmp/args
 export STATE_DIRECTORY=$tmp/state
 export HOST_FLUENT_BIT=$tmp/fluent-bit
-printf '#!/bin/sh\necho "$@" >"%s/fluent-bit.args"\n' "$tmp" >"$HOST_FLUENT_BIT"
+# the stub's own $@ and variable, expanded when it runs
+# shellcheck disable=SC2016
+printf '#!/bin/sh\necho "$@" >"%s/fluent-bit.args"\necho "$HOST_COLLECTORS" >"%s/fluent-bit.collectors"\n' "$tmp" "$tmp" >"$HOST_FLUENT_BIT"
 chmod +x "$HOST_FLUENT_BIT"
 
 # enabled <flag ...>: the collectors the launcher would run, space-separated
@@ -83,6 +85,8 @@ ok "the configuration is written to the state directory"
 ok "fluent-bit runs with it, and with the arguments after --"
 grep -q "collectors: files heartbeat node self" "$tmp/stderr" || fail "stderr: $(cat "$tmp/stderr")"
 ok "the collectors are logged"
+[ "$(cat "$tmp/fluent-bit.collectors")" = "files,heartbeat,node,self" ] || fail "HOST_COLLECTORS: $(cat "$tmp/fluent-bit.collectors")"
+ok "fluent-bit, and so the heartbeat, gets them in HOST_COLLECTORS"
 [ ! -e "$STATE_DIRECTORY/fluent-bit.yaml.tmp" ] || fail "the temporary file was left"
 ok "no temporary file is left"
 
@@ -92,5 +96,16 @@ grep -qx "heartbeat forced" <<<"$list" || fail "list: $list"
 grep -qx "journal off, on by default" <<<"$list" || fail "list: $list"
 grep -qx "node on, on by default" <<<"$list" || fail "list: $list"
 ok "--list says each collector's state and whether it is a default"
+
+echo "required"
+printf '# the security log\nfiles journal\n' >"$tmp/required"
+expect "a required collector runs with --collector.disable-defaults" "files heartbeat journal" --collector.disable-defaults
+refuses "--no-collector of a required one is refused, naming the file" "the files collector is required on this host ($tmp/required)" --no-collector.files
+grep -qx "journal required" <<<"$("$here/launch.sh" --list)" || fail "list: $("$here/launch.sh" --list)"
+ok "--list says it is required"
+echo nosuch >>"$tmp/required"
+refuses "a required name that is no collector is refused" "requires nosuch, which has no collectors.d/nosuch.yaml"
+HOST_REQUIRED_FILE=$tmp/elsewhere expect "HOST_REQUIRED_FILE names another file; a missing one requires none" "heartbeat" --collector.disable-defaults
+rm "$tmp/required"
 
 echo "all launch tests passed"
