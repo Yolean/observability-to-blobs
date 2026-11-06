@@ -2,6 +2,8 @@ module github.com/Yolean/observability-to-blobs/tools/y-obs
 
 go 1.26.0
 
+toolchain go1.27.3
+
 require (
 	github.com/Yolean/observability-to-blobs/images/fluentbit/plugins/k8s_objects v0.0.0-00010101000000-000000000000
 	github.com/aws/aws-sdk-go-v2 v1.47.1

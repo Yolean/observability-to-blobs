@@ -24,7 +24,7 @@ RUN set -ex; \
     flex bison libsasl2-dev; \
   rm -rf /var/lib/apt/lists/*
 
-COPY --from=golang:1.26-trixie@sha256:b389f1219965d8ba67776b81d17308ab25fa763be3855e5fe63ebcb10e15f3a1 /usr/local/go /usr/local/go
+COPY --from=golang:1.27.3-trixie@sha256:2336eda24930976591abea806d9b7d99eeae38238f19755c5deec02facdc1594 /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:$PATH
 
 # Upstream is configured and compiled before the patches are copied in, so

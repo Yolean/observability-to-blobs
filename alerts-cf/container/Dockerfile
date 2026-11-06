@@ -1,6 +1,6 @@
 # Build context is the repo root (wrangler.jsonc image_build_context), so
 # the tailer and the demo rules come from their canonical locations.
-FROM docker.io/library/golang:1.26 AS tailer
+FROM docker.io/library/golang:1.27.3-trixie@sha256:2336eda24930976591abea806d9b7d99eeae38238f19755c5deec02facdc1594 AS tailer
 WORKDIR /src
 COPY images/blobs-to-prometheus/ ./
 RUN CGO_ENABLED=0 go build -o /blobs-to-prometheus .

@@ -2,6 +2,8 @@ module github.com/Yolean/observability-to-blobs/tools/rules-manifest
 
 go 1.26
 
+toolchain go1.27.3
+
 require (
 	github.com/prometheus/prometheus v0.314.0
 	gopkg.in/yaml.v3 v3.0.1

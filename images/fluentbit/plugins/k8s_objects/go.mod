@@ -2,6 +2,8 @@ module github.com/Yolean/observability-to-blobs/images/fluentbit/plugins/k8s_obj
 
 go 1.26.0
 
+toolchain go1.27.3
+
 require (
 	github.com/fluent/fluent-bit-go v0.0.0-20260616051939-71a89c3094aa
 	k8s.io/apimachinery v0.37.1

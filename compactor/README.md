@@ -20,8 +20,8 @@
 | | |
 |---|---|
 | Engine | DuckDB **v1.5.6** (latest, 2026-09-28) embedded via `github.com/duckdb/duckdb-go/v2` **v2.10506.0**, which links prebuilt static libraries from `duckdb-go-bindings` (version-locked by go.sum). DuckDB itself is never compiled here |
-| Go | `go 1.27.0`, `toolchain go1.27.1` in `compactor/go.mod` |
-| C toolchain | the Debian gcc 14.2 inside a digest-pinned `golang:1.27.1-trixie`; one native toolchain per target arch, run under emulation for the foreign arch. No cross compilers, nothing from the host |
+| Go | `go 1.27.0`, `toolchain go1.27.3` in `compactor/go.mod` |
+| C toolchain | the Debian gcc 14.2 inside a digest-pinned `golang:1.27.3-trixie`; one native toolchain per target arch, run under emulation for the foreign arch. No cross compilers, nothing from the host |
 | Host requirements | bash and docker. No Go, contain, crane, jq or gcc on the host |
 | Runtime base | `gcr.io/distroless/cc-debian13:nonroot`, digest-pinned; same Debian release as the builder, so glibc matches |
 | httpfs | not in the static libraries (they carry json, parquet, icu, core_functions); a signed `httpfs.duckdb_extension` per platform, sha256-pinned, baked into the image, `LOAD`ed by path with autoinstall off |
@@ -81,8 +81,8 @@ docker run --rm --platform linux/<arch> --user "$(id -u):$(id -g)" \
     -o /repo/target/compactor/app/linux/<arch>/blobs-compactor .
 ```
 
-- **Pins** live in `compactor/build.env`: `BUILDER` (golang:1.27.1-trixie
-  index digest, today `sha256:433790e5...`), `CONTAIN=v1.1.0`,
+- **Pins** live in `compactor/build.env`: `BUILDER` (golang:1.27.3-trixie
+  index digest, today `sha256:2336eda2...`), `CONTAIN=v1.1.0`,
   `CRANE=v0.22.1`, `BINFMT` digest, `DUCKDB_VERSION=v1.5.6` and
   `HTTPFS_SHA256_linux_amd64` / `_linux_arm64`. The runtime base digest
   is in `contain.yaml`, and the DuckDB engine is in `go.sum`.

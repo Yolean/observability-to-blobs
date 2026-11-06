@@ -2,6 +2,8 @@ module github.com/Yolean/observability-to-blobs/images/operator-to-annotations
 
 go 1.26.0
 
+toolchain go1.27.3
+
 require (
 	github.com/go-logr/logr v1.4.4
 	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.94.1

@@ -2,7 +2,7 @@ module github.com/Yolean/observability-to-blobs/compactor
 
 go 1.27.0
 
-toolchain go1.27.1
+toolchain go1.27.3
 
 require (
 	github.com/danielgtaylor/huma/v2 v2.37.2
