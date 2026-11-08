@@ -69,6 +69,15 @@ jobs:
         chmod +x /usr/local/bin/y-cluster
         y-cluster --version
 
+    # y-cluster's docker backend refuses to provision below 256 inotify
+    # instances, and ubuntu-latest (the ubuntu-26.04 image) keeps the
+    # kernel's default of 128. The watches limit is printed for a later
+    # failure of the same kind.
+    - name: Raise the inotify limit
+      run: |
+        sudo sysctl -w fs.inotify.max_user_instances=512
+        sysctl fs.inotify.max_user_watches
+
     # the runner's apt shellcheck (0.9.0) reports what current releases no
     # longer do, so test.sh's checks would differ from a developer's run
     - name: Install shellcheck
