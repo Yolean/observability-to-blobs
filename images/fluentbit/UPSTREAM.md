@@ -94,6 +94,6 @@ to add key to list map" and "yaml error", attributed to the including file
 rather than the one with the list. `flb_cf_yaml.c` (v5.1.2, around line
 2928) makes the variant array of a sequence with `cfl_array_create(10)` and
 never calls `cfl_array_resizable()`, as the code at line 730 does for its
-own array; the 11th `cfl_array_append` fails. Found with
-developer-feed's collectors; worked around there by not listing more than
-10. The fix is one line: make the array resizable.
+own array; the 11th `cfl_array_append` fails. Found with a collector of
+more than 10 fields; worked around by listing at most 10, or by a processor
+that needs no list. The fix is one line: make the array resizable.
