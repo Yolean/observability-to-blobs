@@ -109,11 +109,29 @@ need() {
 # apiserver-at runs the itest cluster's own release instead (at_assets).
 ENVTEST_K8S=1.37.0
 SETUP_ENVTEST=v0.25.2
+# setup_envtest <release>: the path of the release's API server binaries,
+# downloaded once into setup-envtest's cache. They come from GitHub's
+# release assets, which answer 5xx at times (seen: a 504 on a CI run), so
+# up to three attempts, 15 s and 30 s apart.
+setup_envtest() {
+  local attempt path
+  for attempt in 1 2 3; do
+    if path=$(GOFLAGS='' go run "sigs.k8s.io/controller-runtime/tools/setup-envtest@$SETUP_ENVTEST" use "$1" -p path); then
+      echo "$path"
+      return 0
+    fi
+    if [ "$attempt" -lt 3 ]; then
+      echo "setup-envtest: attempt $attempt for Kubernetes $1 failed, retrying in $((attempt * 15)) s" >&2
+      sleep $((attempt * 15))
+    fi
+  done
+  return 1
+}
 # envtest_assets: KUBEBUILDER_ASSETS, downloaded once into setup-envtest's
 # cache unless already set
 envtest_assets() {
   if [ -z "${KUBEBUILDER_ASSETS:-}" ]; then
-    KUBEBUILDER_ASSETS=$(GOFLAGS='' go run "sigs.k8s.io/controller-runtime/tools/setup-envtest@$SETUP_ENVTEST" use "$ENVTEST_K8S" -p path) \
+    KUBEBUILDER_ASSETS=$(setup_envtest "$ENVTEST_K8S") \
       || fail "setup-envtest could not provide Kubernetes $ENVTEST_K8S"
   fi
   export KUBEBUILDER_ASSETS
@@ -1260,7 +1278,7 @@ phase "assert: kubectl at a time (y-obs apiserver-at)"
 # roles to the state (seen: 1.37 against a 1.35 cluster, 2026-10-07)
 need jq "https://jqlang.github.io/jq/"
 AT_K8S=$($KUBECTL version -o json | jq -r .serverVersion.gitVersion | sed -E 's/^v([0-9]+\.[0-9]+)\..*/\1.x/')
-AT_ASSETS=$(GOFLAGS='' go run "sigs.k8s.io/controller-runtime/tools/setup-envtest@$SETUP_ENVTEST" use "$AT_K8S" -p path) \
+AT_ASSETS=$(setup_envtest "$AT_K8S") \
   || fail "setup-envtest could not provide Kubernetes $AT_K8S"
 echo "  apiserver-at runs Kubernetes $AT_K8S: $AT_ASSETS"
 (cd tools/y-obs && go build -o ../../target/bin/y-obs .) || fail "build tools/y-obs"
