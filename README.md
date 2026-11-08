@@ -627,3 +627,12 @@ The alerting tailer (`images/blobs-to-prometheus`, reading `raw1/`):
   label `cluster`, the cluster a series is about, arrives as
   `exported_cluster`, and `cluster` is the cluster whose agent scraped the
   compactor.
+
+## License
+
+Copyright Yolean AB. Licensed under the Apache License, Version 2.0: [LICENSE](LICENSE).
+
+Fluent Bit, which the agent image and the host tarball build with this repository's patches
+(`images/fluentbit/`), is Apache-2.0 as well; the tarball carries its licence as
+`share/fluent-bit-LICENSE`. The CRDs vendored in `operator-to-annotations/crds/` are
+prometheus-operator's, Apache-2.0.
