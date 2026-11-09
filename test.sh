@@ -106,7 +106,8 @@ need() {
 }
 # The Kubernetes release of the API servers in tools/y-obs's
 # acceptance test, the source and apiserver-at both. The itest's
-# apiserver-at runs the itest cluster's own release instead (at_assets).
+# apiserver-at runs the itest cluster's own release instead, which
+# itest/cluster/*/y-cluster-provision.yaml pin to the same minor.
 ENVTEST_K8S=1.37.0
 SETUP_ENVTEST=v0.25.2
 # setup_envtest <release>: the path of the release's API server binaries,

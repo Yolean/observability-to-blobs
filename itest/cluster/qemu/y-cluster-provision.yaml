@@ -15,6 +15,12 @@ memory: "6144"
 # plugins, one of them client-go) needs about 12G; the default 20G disk
 # went into DiskPressure and evicted BuildKit mid-build (2026-10-07)
 diskSize: 40G
+# The cluster's Kubernetes release has the minor of test.sh's ENVTEST_K8S:
+# apiserver-at runs the cluster's own release, so it uses the API server
+# the acceptance test has downloaded already, and kubectl is within its
+# version skew. Pinned, because y-cluster's default moves with y-cluster.
+k3s:
+  version: v1.37.0+k3s1
 gateway:
   skip: true
 portForwards:
