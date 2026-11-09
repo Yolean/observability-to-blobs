@@ -118,10 +118,13 @@ RUN set -ex; \
   ldd "$bin" | grep 'not found' && exit 1; \
   arch=$(dpkg --print-architecture); \
   name=observability-to-blobs-host-$HOST_VERSION-linux-$arch; \
-  pkg=/pkg; mkdir -p $pkg/bin $pkg/etc $pkg/lib/systemd/system $pkg/share; \
+  pkg=/pkg; mkdir -p $pkg/bin $pkg/etc/collectors.d $pkg/etc/parts.d $pkg/lib/systemd/system $pkg/share; \
   install -m 0755 "$bin" $pkg/bin/fluent-bit; strip --strip-unneeded $pkg/bin/fluent-bit; \
   install -m 0755 /src/host/heartbeat.sh $pkg/bin/observability-host-heartbeat; \
-  install -m 0644 /src/host/host.yaml $pkg/etc/host.yaml; \
+  install -m 0755 /src/host/launch.sh $pkg/bin/observability-host-launch; \
+  install -m 0644 /src/host/host.yaml /src/host/collectors.defaults $pkg/etc/; \
+  install -m 0644 /src/host/collectors.d/*.yaml $pkg/etc/collectors.d/; \
+  install -m 0644 /src/host/parts.d/*.yaml $pkg/etc/parts.d/; \
   install -m 0644 /src/host/observability-host.env.example $pkg/etc/observability-host.env.example; \
   install -m 0644 /src/host/observability-host.service $pkg/lib/systemd/system/observability-host.service; \
   install -m 0644 /src/fluent-bit/LICENSE $pkg/share/fluent-bit-LICENSE; \

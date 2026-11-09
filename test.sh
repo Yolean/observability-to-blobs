@@ -51,6 +51,8 @@ cd "$(dirname "$0")"
 CONTEXT=${CONTEXT:-node-agent}
 IMAGE=node-agent:itest
 BUCKET=node-agent
+# the multi-cluster phase's (further down), on the same gateway
+MULTI_BUCKET=node-agent-multi
 CLUSTER=itest
 # the second compactor, in spool mode, and the stock Fluent Bit that
 # uploads to its put endpoint (itest/compactor-put)
@@ -104,14 +106,33 @@ need() {
 }
 # The Kubernetes release of the API servers in tools/y-obs's
 # acceptance test, the source and apiserver-at both. The itest's
-# apiserver-at runs the itest cluster's own release instead (at_assets).
+# apiserver-at runs the itest cluster's own release instead, which
+# itest/cluster/*/y-cluster-provision.yaml pin to the same minor.
 ENVTEST_K8S=1.37.0
 SETUP_ENVTEST=v0.25.2
+# setup_envtest <release>: the path of the release's API server binaries,
+# downloaded once into setup-envtest's cache. They come from GitHub's
+# release assets, which answer 5xx at times (seen: a 504 on a CI run), so
+# up to three attempts, 15 s and 30 s apart.
+setup_envtest() {
+  local attempt path
+  for attempt in 1 2 3; do
+    if path=$(GOFLAGS='' go run "sigs.k8s.io/controller-runtime/tools/setup-envtest@$SETUP_ENVTEST" use "$1" -p path); then
+      echo "$path"
+      return 0
+    fi
+    if [ "$attempt" -lt 3 ]; then
+      echo "setup-envtest: attempt $attempt for Kubernetes $1 failed, retrying in $((attempt * 15)) s" >&2
+      sleep $((attempt * 15))
+    fi
+  done
+  return 1
+}
 # envtest_assets: KUBEBUILDER_ASSETS, downloaded once into setup-envtest's
 # cache unless already set
 envtest_assets() {
   if [ -z "${KUBEBUILDER_ASSETS:-}" ]; then
-    KUBEBUILDER_ASSETS=$(GOFLAGS='' go run "sigs.k8s.io/controller-runtime/tools/setup-envtest@$SETUP_ENVTEST" use "$ENVTEST_K8S" -p path) \
+    KUBEBUILDER_ASSETS=$(setup_envtest "$ENVTEST_K8S") \
       || fail "setup-envtest could not provide Kubernetes $ENVTEST_K8S"
   fi
   export KUBEBUILDER_ASSETS
@@ -180,8 +201,9 @@ if [ "$MODE" = all ] || [ "$MODE" = checks ]; then
   phase "checks: host mode"
   need jq "https://jqlang.github.io/jq/"
   need python3 "python3"
-  shellcheck images/fluentbit/host/*.sh itest/host/*.sh
+  shellcheck images/fluentbit/host/*.sh itest/host/*.sh itest/host-docker/*.sh
   images/fluentbit/host/test-heartbeat.sh
+  images/fluentbit/host/test-launch.sh
   python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' itest/host/s3-recorder.py
   kubectl kustomize itest/host >/dev/null
 
@@ -742,9 +764,14 @@ LOGS_HDR=$INIT.logs.headers LOGS_OUT=$INIT.logs.body
 cat >"$INIT_S3" <<SQL
 .output /dev/null
 INSTALL httpfs; LOAD httpfs; SET TimeZone='UTC';
-SET s3_region='us-east-1'; SET s3_endpoint='127.0.0.1:$S3_PORT';
-SET s3_access_key_id='demoaccess'; SET s3_secret_access_key='demosecret';
-SET s3_use_ssl=false; SET s3_url_style='path';
+-- scoped to the bucket, as itest/host-docker does: a persistent secret for
+-- s3:// on this machine would otherwise win over SET s3_*
+CREATE OR REPLACE SECRET node_itest (TYPE s3, KEY_ID 'demoaccess', SECRET 'demosecret',
+  REGION 'us-east-1', ENDPOINT '127.0.0.1:$S3_PORT', USE_SSL false, URL_STYLE 'path',
+  SCOPE 's3://$BUCKET/');
+CREATE OR REPLACE SECRET node_itest_multi (TYPE s3, KEY_ID 'demoaccess', SECRET 'demosecret',
+  REGION 'us-east-1', ENDPOINT '127.0.0.1:$S3_PORT', USE_SSL false, URL_STYLE 'path',
+  SCOPE 's3://$MULTI_BUCKET/');
 SQL
 # the compactor's parquet keys; 0600 like the S3 one (umask above)
 for f in "$PARQUET_KEYS"/*; do
@@ -1252,7 +1279,7 @@ phase "assert: kubectl at a time (y-obs apiserver-at)"
 # roles to the state (seen: 1.37 against a 1.35 cluster, 2026-10-07)
 need jq "https://jqlang.github.io/jq/"
 AT_K8S=$($KUBECTL version -o json | jq -r .serverVersion.gitVersion | sed -E 's/^v([0-9]+\.[0-9]+)\..*/\1.x/')
-AT_ASSETS=$(GOFLAGS='' go run "sigs.k8s.io/controller-runtime/tools/setup-envtest@$SETUP_ENVTEST" use "$AT_K8S" -p path) \
+AT_ASSETS=$(setup_envtest "$AT_K8S") \
   || fail "setup-envtest could not provide Kubernetes $AT_K8S"
 echo "  apiserver-at runs Kubernetes $AT_K8S: $AT_ASSETS"
 (cd tools/y-obs && go build -o ../../target/bin/y-obs .) || fail "build tools/y-obs"
@@ -1751,7 +1778,6 @@ phase "assert: one compactor for every cluster of a bucket (itest/compactor-mult
 # $CLUSTER and $CLUSTER-copy: the compactor without CLUSTER_NAME finds both
 # and writes each the same as the other, as two compactors of one cluster
 # each would.
-MULTI_BUCKET=node-agent-multi
 $KUBECTL -n observability-multi scale deployment/blobs-compactor --replicas=0 >/dev/null 2>&1 || true
 $KUBECTL delete pod copy-multi --ignore-not-found >/dev/null 2>&1
 $KUBECTL run copy-multi --restart=Never --image=amazon/aws-cli:2.22.35 \

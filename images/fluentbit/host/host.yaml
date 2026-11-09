@@ -13,6 +13,13 @@
 # it was read, the line's own stamps (the audit record's audit(...) stamp)
 # are in the message.
 #
+# This file is the service and the S3 output. The inputs are the collectors,
+# collectors.d/<name>.yaml, and the metrics port is the part
+# parts.d/serve-metrics.yaml; the launcher (launch.sh, installed as
+# bin/observability-host-launch) writes a configuration that includes this
+# file, the enabled collectors and the parts they need, and runs fluent-bit
+# with it (HOST_MODE.md, Collectors).
+#
 # Everything the process writes is under /var/lib/observability-host, the
 # unit's StateDirectory; it never touches the node agent's /var/lib/node-agent.
 #
@@ -47,144 +54,8 @@ service:
   storage.sync: full
   storage.max_chunks_up: 128
 
-parsers:
-  # the heartbeat row: "time" (nanoseconds) is the event time, and stays in
-  # the row as the node agent's scrapes have it
-  - name: heartbeat_json
-    format: json
-    time_key: time
-    time_format: '%Y-%m-%dT%H:%M:%S.%L%z'
-    time_keep: on
-
 pipeline:
-  inputs:
-    # The journal, every unit: a denylist fails toward collecting too much.
-    # The processors are the node agent's journal processors (rows are
-    # the same), plus the denylist.
-    - name: systemd
-      alias: journal
-      tag: blob
-      db: /var/lib/observability-host/journal.db
-      db.sync: full
-      # the first start; later starts continue from the cursor in db
-      read_from_tail: on
-      lowercase: on
-      strip_underscores: on
-      storage.type: filesystem
-      processors:
-        logs:
-          - name: modify
-            add:
-              - table logs
-              - cluster ${CLUSTER_NAME}
-              - node ${NODE_NAME}
-              - stream journal
-            # rename does not overwrite, so the first existing key wins:
-            # the unit, else the syslog identifier, else the transport
-            # ("kernel" for kernel messages)
-            rename:
-              - systemd_unit unit
-              - syslog_identifier unit
-              - transport unit
-          - name: content_modifier
-            action: convert
-            key: priority
-            converted_type: int
-          # the denylist: a row whose unit matches is left out; a row
-          # without a unit, or any row when nothing is configured, stays
-          # ((?!) matches nothing)
-          - name: grep
-            exclude: $unit ${HOST_JOURNAL_DENY:-(?!)}
-          # the journal's other fields stay out of the blob
-          - name: record_modifier
-            allowlist_key:
-              - table
-              - cluster
-              - node
-              - stream
-              - unit
-              - priority
-              - message
-
-    # Files. The audit log is followed by inode, never the numbered files
-    # (a rotated file is read to its end, then dropped); the position of
-    # every file is kept in db.
-    - name: tail
-      alias: files
-      tag: blob
-      path: /var/log/audit/audit.log,/var/log/dpkg.log,/var/log/apt/history.log,/var/log/unattended-upgrades/*.log,${HOST_EXTRA_FILES:-}
-      # the path is the row's unit
-      path_key: unit
-      read_from_head: true
-      db: /var/lib/observability-host/tail.db
-      db.sync: full
-      db.locking: true
-      refresh_interval: 5
-      rotate_wait: 30
-      buffer_chunk_size: 256k
-      buffer_max_size: 2M
-      skip_long_lines: on
-      storage.type: filesystem
-      processors:
-        logs:
-          - name: modify
-            add:
-              - table logs
-              - cluster ${CLUSTER_NAME}
-              - node ${NODE_NAME}
-              - stream file
-            rename:
-              - log message
-          - name: record_modifier
-            allowlist_key:
-              - table
-              - cluster
-              - node
-              - stream
-              - unit
-              - message
-
-    # A raw1 metrics row every 60 s: a counter that continues across
-    # restarts of the service and starts again at a new boot id. The script
-    # also writes the restart flag for the textfile collector below.
-    - name: exec
-      alias: heartbeat
-      tag: blob
-      command: ${HEARTBEAT_COMMAND:-/opt/observability-host/bin/observability-host-heartbeat}
-      parser: heartbeat_json
-      interval_sec: 60
-      storage.type: filesystem
-      processors:
-        logs:
-          - name: modify
-            add:
-              - cluster ${CLUSTER_NAME}
-              - node ${NODE_NAME}
-
-    # cmetrics: served below, not shipped
-    - name: node_exporter_metrics
-      alias: node_exporter
-      tag: exp.node
-      scrape_interval: 15
-      # the node agent's collectors (agent/fluent-bit.yaml: cpufreq, hwmon,
-      # thermalzone and nvme left out for the missing sysfs files on VMs),
-      # plus timex (clock offset and sync status), systemd (unit states)
-      # and textfile (the restart flag the heartbeat script writes)
-      metrics: ${HOST_NODE_COLLECTORS:-cpu,meminfo,diskstats,filesystem,uname,stat,time,timex,loadavg,vmstat,netdev,netstat,sockstat,filefd,processes,systemd,textfile}
-      # every *.prom file in the state directory
-      collector.textfile.path: /var/lib/observability-host
-
-    - name: fluentbit_metrics
-      alias: self_metrics
-      tag: exp.agent
-      scrape_interval: 15
-
   outputs:
-    - name: prometheus_exporter
-      match: exp.*
-      host: ${HOST_METRICS_LISTEN:-127.0.0.1}
-      port: ${HOST_METRICS_PORT:-2023}
-
     - name: s3
       alias: blob
       match: blob
